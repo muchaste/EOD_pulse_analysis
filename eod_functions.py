@@ -1605,3 +1605,91 @@ def create_clustering_plots(event_table, event_waveforms, event_summary, species
     plt.close()
     
     print(f"Clustering plots saved to {output_folder}")
+
+
+
+# =============================================================================
+# STATISTICS AND ANALYSIS FUNCTIONS
+# =============================================================================
+
+def calculate_waveform_stats(waveforms_list, label=""):
+
+    """
+    Parameters
+    ----------    
+    waveforms_list : list of 1D arrays
+        List of waveforms to analyze
+    label : str, optional
+        Label for the waveforms (for display purposes)
+
+    Returns
+    -------
+    stats_dict : dict
+        Dictionary containing comprehensive statistics
+
+    """
+
+    if not waveforms_list:
+        return {}
+
+    # Filter out empty waveforms
+    valid_waveforms = [wf for wf in waveforms_list if len(wf) > 0]
+    
+    if not valid_waveforms:
+        return {}
+
+    # Length statistics
+    lengths = [len(wf) for wf in valid_waveforms]
+    
+    # Amplitude statistics
+    max_amps = [np.max(np.abs(wf)) for wf in valid_waveforms]
+    peak_to_trough = [np.max(wf) - np.min(wf) for wf in valid_waveforms]
+    
+    # Shape statistics
+    skewness = [stats.skew(wf) if len(wf) > 3 else 0 for wf in valid_waveforms]
+    kurtosis = [stats.kurtosis(wf) if len(wf) > 3 else 0 for wf in valid_waveforms]
+
+    # Peak/trough position statistics
+    peak_positions = []
+    trough_positions = []
+    for wf in valid_waveforms:
+        if len(wf) > 0:
+            peak_pos = np.argmax(wf) / len(wf)  # Relative position
+            trough_pos = np.argmin(wf) / len(wf)  # Relative position
+            peak_positions.append(peak_pos)
+            trough_positions.append(trough_pos)
+    
+    stats_dict = {
+        'count': len(valid_waveforms),
+        'empty_count': len(waveforms_list) - len(valid_waveforms),
+        'length_stats': {
+            'mean': np.mean(lengths),
+            'std': np.std(lengths),
+            'min': np.min(lengths),
+            'max': np.max(lengths),
+            'median': np.median(lengths),
+            'q25': np.percentile(lengths, 25),
+            'q75': np.percentile(lengths, 75)
+        },
+        'amplitude_stats': {
+            'max_amp_mean': np.mean(max_amps),
+            'max_amp_std': np.std(max_amps),
+            'peak_to_trough_mean': np.mean(peak_to_trough),
+            'peak_to_trough_std': np.std(peak_to_trough),
+            'peak_to_trough_median': np.median(peak_to_trough)
+        },
+        'shape_stats': {
+            'skewness_mean': np.mean(skewness),
+            'skewness_std': np.std(skewness),
+            'kurtosis_mean': np.mean(kurtosis),
+            'kurtosis_std': np.std(kurtosis)
+        },
+        'position_stats': {
+            'peak_pos_mean': np.mean(peak_positions),
+            'peak_pos_std': np.std(peak_positions),
+            'trough_pos_mean': np.mean(trough_positions),
+            'trough_pos_std': np.std(trough_positions)
+        }
+    }
+    
+    return stats_dict
