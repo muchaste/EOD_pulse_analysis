@@ -74,7 +74,8 @@ parameters = {'thresh':thresh,
               'min_rel_slope_diff':0.25,
               'min_width_s':5e-05,  # Minimum pulse width in seconds
               'max_width_s':0.001,  # Maximum pulse width in seconds
-              'width_fac':5.0,
+              'width_fac_detection':5.0,
+              'width_fac_extraction':10.0,  # Factor for variable-width extraction
               'verbose':0,
               'return_data':False,
               # Additional filtering parameters
@@ -135,7 +136,7 @@ for n, filepath in enumerate(file_set['filename']):
                                  min_rel_slope_diff=parameters['min_rel_slope_diff'][0],
                                  min_width=parameters['min_width_s'][0],  # in seconds
                                  max_width=parameters['max_width_s'][0],  # in seconds
-                                 width_fac=parameters['width_fac'][0],
+                                 width_fac=parameters['width_fac_detection'][0],
                                  verbose=parameters['verbose'][0],
                                  return_data=parameters['return_data'][0])
         peaks.append(ch_peaks)
@@ -186,8 +187,8 @@ for n, filepath in enumerate(file_set['filename']):
         # Analyze snippets with variable widths
         eod_waveforms, amps, eod_amp, cor_coeffs, eod_chan, is_differential, final_peak_idc, final_trough_idc, original_pulse_orientation, amplitude_ratios, waveform_lengths = \
             extract_pulse_snippets(data, unique_midpoints, unique_peaks, unique_troughs, 
-                                       unique_widths, rate, width_factor=50.0, interp_factor=1, 
-                                       center_on_zero_crossing=False)  # Skip centering for storage efficiency
+                                       unique_widths, rate, width_factor=parameters['width_fac_extraction'][0], 
+                                       interp_factor=1, center_on_zero_crossing=False)  # Skip centering for storage efficiency
         
         # 1. Create filter mask (only differential waveforms + amplitude ratio)
         basic_filter_mask = (amplitude_ratios >= parameters['amplitude_ratio_min'][0]) & \
