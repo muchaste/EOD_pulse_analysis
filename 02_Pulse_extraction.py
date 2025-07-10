@@ -642,6 +642,9 @@ parameters.to_csv('%s\\analysis_parameters.csv' % output_path, index=False)
 plt.close()
 
 
+# Option to save filtered-out pulses for quality control
+save_filtered_out = True  # Set to True to save filtered-out events for QC
+
 # Process each file
 for n, filepath in enumerate(file_set['filename']):
     fname = filepath.split('\\')[-1]
@@ -1018,21 +1021,58 @@ for n, filepath in enumerate(file_set['filename']):
             plt.savefig(f'{output_path}\\{fname[:-4]}_analysis_summary.png', dpi=150, bbox_inches='tight')  # Reduced DPI
             plt.close()
         
-        else:
-            print("No events passed filtering criteria.")
-        
-        # Clear large variables from memory
-        del eod_waveforms, amps, eod_amp, cor_coeffs
-        del filtered_eod_waveforms, filtered_amps, filtered_eod_amp, filtered_cor_coeffs
-        gc.collect()
-            
-    else:
-        print("No unique events found in this file.")
-    
-    # Clear data array for this file
-    del data
-    gc.collect()
-    print(f"Completed file {n+1}/{len(file_set)}: {fname}")
-    print(f"Memory freed for next file.\n")
-    
-    # ...continue with your analysis...
+        # --- Save filtered-out events for QC if requested ---
+        if save_filtered_out:
+            # Indices of all events after duplicate removal
+            all_indices = np.arange(len(eod_waveforms))
+            # Indices of filtered-out events
+            filtered_out_indices = np.setdiff1d(all_indices, keep_indices)
+            if len(filtered_out_indices) > 0:
+                filteredout_eod_waveforms = [eod_waveforms[i] for i in filtered_out_indices]
+                filteredout_amps = amps[filtered_out_indices]
+                filteredout_eod_amp = eod_amp[filtered_out_indices]
+                filteredout_cor_coeffs = cor_coeffs[filtered_out_indices]
+                filteredout_eod_chan = eod_chan[filtered_out_indices]
+                filteredout_is_differential = is_differential[filtered_out_indices]
+                filteredout_final_peak_idc = final_peak_idc[filtered_out_indices]
+                filteredout_final_trough_idc = final_trough_idc[filtered_out_indices]
+                filteredout_unique_midpoints = unique_midpoints[filtered_out_indices]
+                filteredout_unique_peaks = unique_peaks[filtered_out_indices]
+                filteredout_unique_troughs = unique_troughs[filtered_out_indices]
+                filteredout_unique_widths = unique_widths[filtered_out_indices]
+                filteredout_original_pulse_orientation = original_pulse_orientation[filtered_out_indices]
+                filteredout_waveform_lengths = waveform_lengths[filtered_out_indices]
+                # Features
+                filteredout_durations_us = np.abs(filteredout_final_peak_idc - filteredout_final_trough_idc) / rate * 1e6
+                filteredout_features = pd.DataFrame({
+                    'pp_dur_us': filteredout_durations_us,
+                    'pp_ratio': amplitude_ratios[filtered_out_indices],
+                })
+                # Timestamps
+                filteredout_eod_timestamps = [file_set['timestamp'][n] + dt.timedelta(seconds=filteredout_unique_midpoints[i]/rate) for i in range(len(filteredout_unique_midpoints))]
+                # Table
+                filteredout_eod_table = pd.DataFrame({
+                    'timestamp': filteredout_eod_timestamps,
+                    'midpoint_idx': filteredout_unique_midpoints,
+                    'peak_idx': filteredout_final_peak_idc,
+                    'trough_idx': filteredout_final_trough_idc,
+                    'eod_channel': filteredout_eod_chan,
+                    'is_differential': filteredout_is_differential,
+                    'eod_amplitude': filteredout_eod_amp,
+                    'pulse_width': filteredout_unique_widths,
+                    'pulse_orientation': filteredout_original_pulse_orientation,
+                    'original_peak_idx': filteredout_unique_peaks,
+                    'original_trough_idx': filteredout_unique_troughs
+                })
+                for ch in range(n_channels):
+                    filteredout_eod_table[f'amplitude_ch{ch}'] = filteredout_amps[:, ch] if len(filteredout_amps) > 0 else []
+                for ch in range(n_channels - 1):
+                    filteredout_eod_table[f'correlation_ch{ch}_{ch+1}'] = filteredout_cor_coeffs[:, ch] if len(filteredout_cor_coeffs) > 0 else []
+                filteredout_eod_table['waveform_length'] = filteredout_waveform_lengths if len(filteredout_waveform_lengths) > 0 else []
+                filteredout_eod_table = filteredout_eod_table.join(filteredout_features)
+                # Save table and waveforms
+                filteredout_eod_table.to_csv(f'{output_path}\\{fname[:-4]}_eod_table_filteredout.csv', index=False)
+                if len(filteredout_eod_waveforms) > 0:
+                    save_variable_length_waveforms(filteredout_eod_waveforms, f'{output_path}\\{fname[:-4]}_eod_waveforms_filteredout')
+                print(f"Saved {len(filteredout_eod_waveforms)} filtered-out EOD events for QC.")
+# ...existing code...
