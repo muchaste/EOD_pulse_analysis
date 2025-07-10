@@ -3,6 +3,7 @@ Quality Control Script for EOD Pulse Extraction
 Compares accepted vs filtered-out pulses to evaluate filtering effectiveness
 """
 
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -12,6 +13,16 @@ import seaborn as sns
 from scipy import stats
 import tkinter as tk
 from tkinter import filedialog
+
+# Helper to convert numpy types for JSON serialization
+def convert_numpy(obj):
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    elif isinstance(obj, (np.floating,)):
+        return float(obj)
+    elif isinstance(obj, (np.ndarray,)):
+        return obj.tolist()
+    return obj
 
 # Import shared functions from eod_functions module
 from eod_functions import load_variable_length_waveforms, calculate_waveform_stats
@@ -474,7 +485,7 @@ def main():
     }
     
     with open(output_path / f"{file_prefix}_QC_stats.json", 'w') as f:
-        json.dump(stats_output, f, indent=2)
+        json.dump(stats_output, f, indent=2, default=convert_numpy)
     
     print(f"\nQuality control analysis complete!")
     print(f"Results saved in: {output_dir}")
