@@ -426,8 +426,8 @@ def extract_pulse_snippets(data, unique_midpoints, unique_peaks, unique_troughs,
         end_idx = min(data.shape[0], center_idx + half_len)
         actual_length = end_idx - start_idx
         
-        # Extract actual data without padding initially
-        snippet = data[start_idx:end_idx, :]
+        # Extract actual data without padding initially - MAKE A COPY to avoid modifying original data
+        snippet = data[start_idx:end_idx, :].copy()
         
         # Only pad if absolutely necessary and keep track of padding
         padding_needed = snippet_samples - actual_length
@@ -479,17 +479,17 @@ def extract_pulse_snippets(data, unique_midpoints, unique_peaks, unique_troughs,
                 best_channel = np.argmax(amps[i, :])
                 eod_chan[i] = best_channel
                 is_differential[i] = 0
-            
-            # Extract the final waveform
+                
+            # Extract the final waveform - ALWAYS USE COPY to avoid modifying original data
             if len(flips) > 0:
                 # Use differential signal
-                eod_waveform = snippet_diff[:, eod_chan[i]]
+                eod_waveform = snippet_diff[:, eod_chan[i]].copy()
             else:
                 # Use single-ended signal
-                eod_waveform = snippet[:, eod_chan[i]]
+                eod_waveform = snippet[:, eod_chan[i]].copy()
         else:
             # Single channel case
-            eod_waveform = snippet[:, 0]
+            eod_waveform = snippet[:, 0].copy()
             eod_chan[i] = 0
             is_differential[i] = 0
         
@@ -701,7 +701,9 @@ for n, filepath in enumerate(file_set['filename']):
             if event[0] - last_mp > 3:
                 unique_events.append(event)
                 last_mp = event[0]
-
+        del all_events
+        gc.collect()
+    
     # Unpack to arrays for further analysis
     if unique_events:
         unique_midpoints = np.array([e[0] for e in unique_events])
