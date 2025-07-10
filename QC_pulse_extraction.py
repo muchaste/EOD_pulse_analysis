@@ -13,119 +13,12 @@ from scipy import stats
 import tkinter as tk
 from tkinter import filedialog
 
+# Import shared functions from eod_functions module
+from eod_functions import load_variable_length_waveforms, calculate_waveform_stats
+
 # Set style for better plots
 plt.style.use('default')
 sns.set_palette("husl")
-
-def load_variable_length_waveforms(base_path):
-    """Load variable-length waveforms from efficient storage format."""
-    try:
-        # Load concatenated data and metadata
-        try:
-            data_file = np.load(base_path + '_concatenated.npz')
-            concatenated = data_file['data']
-        except:
-            print(f"Warning: Could not load {base_path}_concatenated.npz")
-            return []
-        
-        with open(base_path + '_metadata.json', 'r') as f:
-            metadata = json.load(f)
-        
-        # Reconstruct individual waveforms
-        waveforms_list = []
-        lengths = metadata['lengths']
-        
-        # Handle case where some waveforms were empty
-        if 'non_empty_indices' in metadata:
-            concatenated_idx = 0
-            for i in range(metadata['total_waveforms']):
-                if lengths[i] == 0:
-                    waveforms_list.append(np.array([]))
-                else:
-                    length = lengths[i]
-                    waveform = concatenated[concatenated_idx:concatenated_idx + length]
-                    waveforms_list.append(waveform)
-                    concatenated_idx += length
-        else:
-            # Original format - all waveforms were non-empty
-            start_indices = metadata['start_indices']
-            for i in range(metadata['total_waveforms']):
-                start_idx = start_indices[i]
-                length = lengths[i]
-                waveform = concatenated[start_idx:start_idx + length]
-                waveforms_list.append(waveform)
-        
-        return waveforms_list
-    except Exception as e:
-        print(f"Error loading waveforms from {base_path}: {e}")
-        return []
-
-def calculate_waveform_stats(waveforms_list, label=""):
-    """Calculate comprehensive statistics for a list of waveforms."""
-    if not waveforms_list:
-        return {}
-    
-    # Filter out empty waveforms
-    valid_waveforms = [wf for wf in waveforms_list if len(wf) > 0]
-    
-    if not valid_waveforms:
-        return {}
-    
-    # Length statistics
-    lengths = [len(wf) for wf in valid_waveforms]
-    
-    # Amplitude statistics
-    max_amps = [np.max(np.abs(wf)) for wf in valid_waveforms]
-    peak_to_trough = [np.max(wf) - np.min(wf) for wf in valid_waveforms]
-    
-    # Shape statistics
-    skewness = [stats.skew(wf) if len(wf) > 3 else 0 for wf in valid_waveforms]
-    kurtosis = [stats.kurtosis(wf) if len(wf) > 3 else 0 for wf in valid_waveforms]
-    
-    # Peak/trough position statistics
-    peak_positions = []
-    trough_positions = []
-    for wf in valid_waveforms:
-        if len(wf) > 0:
-            peak_pos = np.argmax(wf) / len(wf)  # Relative position
-            trough_pos = np.argmin(wf) / len(wf)  # Relative position
-            peak_positions.append(peak_pos)
-            trough_positions.append(trough_pos)
-    
-    stats_dict = {
-        'count': len(valid_waveforms),
-        'empty_count': len(waveforms_list) - len(valid_waveforms),
-        'length_stats': {
-            'mean': np.mean(lengths),
-            'std': np.std(lengths),
-            'min': np.min(lengths),
-            'max': np.max(lengths),
-            'median': np.median(lengths),
-            'q25': np.percentile(lengths, 25),
-            'q75': np.percentile(lengths, 75)
-        },
-        'amplitude_stats': {
-            'max_amp_mean': np.mean(max_amps),
-            'max_amp_std': np.std(max_amps),
-            'peak_to_trough_mean': np.mean(peak_to_trough),
-            'peak_to_trough_std': np.std(peak_to_trough),
-            'peak_to_trough_median': np.median(peak_to_trough)
-        },
-        'shape_stats': {
-            'skewness_mean': np.mean(skewness),
-            'skewness_std': np.std(skewness),
-            'kurtosis_mean': np.mean(kurtosis),
-            'kurtosis_std': np.std(kurtosis)
-        },
-        'position_stats': {
-            'peak_pos_mean': np.mean(peak_positions),
-            'peak_pos_std': np.std(peak_positions),
-            'trough_pos_mean': np.mean(trough_positions),
-            'trough_pos_std': np.std(trough_positions)
-        }
-    }
-    
-    return stats_dict
 
 def plot_waveform_comparison(accepted_waveforms, filtered_waveforms, output_path, file_prefix):
     """Create comprehensive comparison plots."""
