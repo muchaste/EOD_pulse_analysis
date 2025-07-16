@@ -361,7 +361,7 @@ def remove_noise_artifacts(waveforms, timestamps, rate,
 # =============================================================================
 
 def extract_pulse_snippets(data, unique_midpoints, unique_peaks, unique_troughs, unique_widths, 
-                                rate, width_factor=5.0, interp_factor=1, center_on_zero_crossing=False):
+                                rate, width_factor=5.0, interp_factor=1, center_on_zero_crossing=False, return_diff=False):
     """
     Extract and analyze EOD snippets with variable widths based on detected pulse widths.
     Optimized to store variable-length waveforms without zero-padding for maximum efficiency.
@@ -386,6 +386,8 @@ def extract_pulse_snippets(data, unique_midpoints, unique_peaks, unique_troughs,
         Interpolation factor for final waveforms
     center_on_zero_crossing : bool
         Whether to center waveforms on zero-crossing (False for storage efficiency)
+    return_diff : bool
+        If True, only return differential events (is_differential=1), default False
     
     Returns
     -------
@@ -575,6 +577,27 @@ def extract_pulse_snippets(data, unique_midpoints, unique_peaks, unique_troughs,
             waveform_lengths[i] = 0
             final_peak_idc[i] = unique_peaks[i]
             final_trough_idc[i] = unique_troughs[i]
+    
+    # Filter for differential events only if requested
+    if return_diff:
+        diff_mask = is_differential == 1
+        filtered_eod_waveforms = [eod_waveforms[i] for i in range(len(eod_waveforms)) if diff_mask[i]]
+        filtered_amps = amps[diff_mask]
+        filtered_eod_amp = eod_amp[diff_mask]
+        filtered_cor_coeffs = cor_coeffs[diff_mask]
+        filtered_eod_chan = eod_chan[diff_mask]
+        filtered_is_differential = is_differential[diff_mask]
+        filtered_final_peak_idc = final_peak_idc[diff_mask]
+        filtered_final_trough_idc = final_trough_idc[diff_mask]
+        filtered_pulse_orientation = pulse_orientation[diff_mask]
+        filtered_amplitude_ratios = amplitude_ratios[diff_mask]
+        filtered_waveform_lengths = waveform_lengths[diff_mask]
+        
+        # Return filtered results
+        return (filtered_eod_waveforms, filtered_amps, filtered_eod_amp, filtered_cor_coeffs, 
+                filtered_eod_chan, filtered_is_differential, filtered_final_peak_idc, 
+                filtered_final_trough_idc, filtered_pulse_orientation, filtered_amplitude_ratios, 
+                filtered_waveform_lengths)
     
     # Return variable-length waveforms as list (no zero-padding)
     return (eod_waveforms, amps, eod_amp, cor_coeffs, eod_chan, 
