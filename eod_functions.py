@@ -11,14 +11,8 @@ from pathlib import Path
 from scipy.signal import find_peaks, correlate, windows
 from scipy.interpolate import interp1d
 from scipy import stats
-import gc
-
-# Additional imports for event extraction and clustering
 import glob
-from sklearn.preprocessing import StandardScaler
-from sklearn.decomposition import PCA
-from sklearn.cluster import DBSCAN
-from sklearn.mixture import BayesianGaussianMixture
+
 
 # =============================================================================
 # STORAGE FUNCTIONS
@@ -315,7 +309,7 @@ def remove_noise_artifacts(waveforms, timestamps, rate,
     for i in range(n_events):
         if valid_waveforms_mask[i]:
             waveform = waveforms[i]
-            is_noisy, freq_stats = analyze_waveform_fft_proper(waveform, rate, max_freq_content)
+            is_noisy, _ = analyze_waveform_fft_proper(waveform, rate, max_freq_content)
             if is_noisy:
                 clean_mask[i] = False
         else:
@@ -431,11 +425,11 @@ def extract_pulse_snippets(data, unique_midpoints, unique_peaks, unique_troughs,
     waveform_lengths = np.zeros(n_events, dtype=int)  # Track actual lengths
     
     for i in range(n_events):
-        # Calculate snippet length based on width - OPTIMIZED
+        # Calculate snippet length based on width
         snippet_samples = int(unique_widths[i] * width_factor)
         snippet_samples = max(snippet_samples, 20)  # Minimum 20 samples
         
-        # Extract snippet around midpoint - OPTIMIZED (reduce padding needs)
+        # Extract snippet around midpoint
         center_idx = int(unique_midpoints[i])
         half_len = snippet_samples // 2
         
@@ -560,10 +554,10 @@ def extract_pulse_snippets(data, unique_midpoints, unique_peaks, unique_troughs,
                     eod_waveform = np.roll(eod_waveform, shift)
             
             # Normalize amplitude
-            max_abs = np.max(np.abs(eod_waveform))
-            if max_abs > 0:
-                eod_waveform /= max_abs
-            
+            # max_abs = np.max(np.abs(eod_waveform))
+            if max_val > 0:
+                eod_waveform /= max_val
+
             # Store variable-length waveform and its length
             eod_waveforms.append(eod_waveform)
             waveform_lengths[i] = len(eod_waveform)
@@ -581,23 +575,17 @@ def extract_pulse_snippets(data, unique_midpoints, unique_peaks, unique_troughs,
     # Filter for differential events only if requested
     if return_diff:
         diff_mask = is_differential == 1
-        filtered_eod_waveforms = [eod_waveforms[i] for i in range(len(eod_waveforms)) if diff_mask[i]]
-        filtered_amps = amps[diff_mask]
-        filtered_eod_amp = eod_amp[diff_mask]
-        filtered_cor_coeffs = cor_coeffs[diff_mask]
-        filtered_eod_chan = eod_chan[diff_mask]
-        filtered_is_differential = is_differential[diff_mask]
-        filtered_final_peak_idc = final_peak_idc[diff_mask]
-        filtered_final_trough_idc = final_trough_idc[diff_mask]
-        filtered_pulse_orientation = pulse_orientation[diff_mask]
-        filtered_amplitude_ratios = amplitude_ratios[diff_mask]
-        filtered_waveform_lengths = waveform_lengths[diff_mask]
-        
-        # Return filtered results
-        return (filtered_eod_waveforms, filtered_amps, filtered_eod_amp, filtered_cor_coeffs, 
-                filtered_eod_chan, filtered_is_differential, filtered_final_peak_idc, 
-                filtered_final_trough_idc, filtered_pulse_orientation, filtered_amplitude_ratios, 
-                filtered_waveform_lengths)
+        eod_waveforms = [eod_waveforms[i] for i in range(len(eod_waveforms)) if diff_mask[i]]
+        amps = amps[diff_mask]
+        eod_amp = eod_amp[diff_mask]
+        cor_coeffs = cor_coeffs[diff_mask]
+        eod_chan = eod_chan[diff_mask]
+        is_differential = is_differential[diff_mask]
+        final_peak_idc = final_peak_idc[diff_mask]
+        final_trough_idc = final_trough_idc[diff_mask]
+        pulse_orientation = pulse_orientation[diff_mask]
+        amplitude_ratios = amplitude_ratios[diff_mask]
+        waveform_lengths = waveform_lengths[diff_mask]
     
     # Return variable-length waveforms as list (no zero-padding)
     return (eod_waveforms, amps, eod_amp, cor_coeffs, eod_chan, 
