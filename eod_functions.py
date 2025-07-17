@@ -202,7 +202,7 @@ def calculate_storage_efficiency(waveforms_list, padded_format_length=None):
 # FFT AND NOISE ANALYSIS FUNCTIONS
 # =============================================================================
 
-def analyze_waveform_fft_proper(waveform, rate, max_freq_content=0.8):
+def analyze_waveform_fft(waveform, rate, max_freq_content=0.8):
     """
     Proper FFT analysis without zero-padding artifacts.
     
@@ -269,7 +269,8 @@ def analyze_waveform_fft_proper(waveform, rate, max_freq_content=0.8):
     return is_noisy, freq_stats
 
 def remove_noise_artifacts(waveforms, timestamps, rate, 
-                          max_freq_content=0.8, min_snr=2.0, max_ipi_ratio=50.0):
+                          max_freq_content=0.8, min_snr=2.0, max_ipi_ratio=50.0,
+                          return_freq_stats=False):
     """
     Remove obvious noise artifacts from EOD waveforms (per-file processing).
     Optimized for variable-length waveforms with improved efficiency.
@@ -289,6 +290,8 @@ def remove_noise_artifacts(waveforms, timestamps, rate,
         Minimum signal-to-noise ratio
     max_ipi_ratio : float
         Maximum ratio of pulse width to inter-pulse interval
+    return_freq_stats : bool
+        If True, return frequency stats (via analyze_waveform_fft)
     
     Returns
     -------
@@ -309,7 +312,7 @@ def remove_noise_artifacts(waveforms, timestamps, rate,
     for i in range(n_events):
         if valid_waveforms_mask[i]:
             waveform = waveforms[i]
-            is_noisy, _ = analyze_waveform_fft_proper(waveform, rate, max_freq_content)
+            is_noisy, freq_stats = analyze_waveform_fft(waveform, rate, max_freq_content)
             if is_noisy:
                 clean_mask[i] = False
         else:
@@ -347,8 +350,10 @@ def remove_noise_artifacts(waveforms, timestamps, rate,
                 if i < len(ipis):
                     if ipis[i] < median_ipi / max_ipi_ratio or ipis[i] > median_ipi * max_ipi_ratio:
                         clean_mask[orig_idx] = False
-    
-    return clean_mask
+    if return_freq_stats:
+        return clean_mask, freq_stats
+    else:
+        return clean_mask
 
 # =============================================================================
 # WAVEFORM PROCESSING FUNCTIONS
