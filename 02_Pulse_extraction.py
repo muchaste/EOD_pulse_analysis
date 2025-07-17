@@ -80,7 +80,7 @@ parameters = {'thresh':thresh,
               'return_data':False,
               # Additional filtering parameters
               'amplitude_ratio_min':0.1,  # Minimum peak-to-peak amplitude ratio
-              'amplitude_ratio_max':3     # Maximum peak-to-peak amplitude ratio
+              'amplitude_ratio_max':10     # Maximum peak-to-peak amplitude ratio
               }
 
 print(parameters)
@@ -188,12 +188,11 @@ for n, filepath in enumerate(file_set['filename']):
         eod_waveforms, amps, eod_amp, cor_coeffs, eod_chan, is_differential, final_peak_idc, final_trough_idc, original_pulse_orientation, amplitude_ratios, waveform_lengths = \
             extract_pulse_snippets(data, unique_midpoints, unique_peaks, unique_troughs, 
                                        unique_widths, rate, width_factor=parameters['width_fac_extraction'][0], 
-                                       interp_factor=1, center_on_zero_crossing=False)  # Skip centering for storage efficiency
+                                       interp_factor=1, center_on_zero_crossing=False, return_diff=True)  # Skip centering for storage efficiency
         
         # 1. Create filter mask (only differential waveforms + amplitude ratio)
         basic_filter_mask = (amplitude_ratios >= parameters['amplitude_ratio_min'][0]) & \
-                           (amplitude_ratios <= parameters['amplitude_ratio_max'][0]) & \
-                           (is_differential == 1)
+                           (amplitude_ratios <= parameters['amplitude_ratio_max'][0])
         basic_keep_indices = np.where(basic_filter_mask)[0]
         
         # 2. Apply noise removal to basic filtered events
@@ -202,24 +201,29 @@ for n, filepath in enumerate(file_set['filename']):
             basic_filtered_waveforms = [eod_waveforms[i] for i in basic_keep_indices]
             basic_filtered_timestamps = unique_midpoints[basic_keep_indices] / rate
             
-            # Remove noise artifacts (now handles variable-length waveforms properly)
-            noise_clean_mask = remove_noise_artifacts(
-                basic_filtered_waveforms,  # Pass list of variable-length waveforms
-                basic_filtered_timestamps, 
-                rate,
-                max_freq_content=0.75,  # Allow some high freq for species differences
-                min_snr=2.0,
-                max_ipi_ratio=20.0
-            )
+            # # Remove noise artifacts (now handles variable-length waveforms properly)
+            # noise_clean_mask = remove_noise_artifacts(
+            #     basic_filtered_waveforms,  # Pass list of variable-length waveforms
+            #     basic_filtered_timestamps, 
+            #     rate,
+            #     max_freq_content=0.75,  # Allow some high freq for species differences
+            #     min_snr=2.0,
+            #     max_ipi_ratio=20.0
+            # )
             
-            # Combine filters: basic + noise removal
-            final_keep_indices = basic_keep_indices[noise_clean_mask]
-            keep_mask = np.zeros(len(eod_waveforms), dtype=bool)
-            keep_mask[final_keep_indices] = True
-            keep_indices = final_keep_indices
+            # # Combine filters: basic + noise removal
+            # final_keep_indices = basic_keep_indices[noise_clean_mask]
+            # keep_mask = np.zeros(len(eod_waveforms), dtype=bool)
+            # keep_mask[final_keep_indices] = True
+            # keep_indices = final_keep_indices
         else:
             keep_mask = basic_filter_mask
             keep_indices = basic_keep_indices
+
+        # Indices of all events after duplicate removal
+        all_indices = np.arange(len(eod_waveforms))
+        # Indices of filtered-out events
+        filtered_out_indices = np.setdiff1d(all_indices, keep_indices)
         
         print(f"EODs after differential + amplitude ratio + noise filtering: {len(keep_indices)} out of {len(eod_waveforms)}")
         print(f"  - Differential events: {np.sum(is_differential == 1)}")
@@ -236,7 +240,7 @@ for n, filepath in enumerate(file_set['filename']):
             filtered_eod_amp = eod_amp[keep_indices]
             filtered_cor_coeffs = cor_coeffs[keep_indices]
             filtered_eod_chan = eod_chan[keep_indices]
-            filtered_is_differential = is_differential[keep_indices]
+            # filtered_is_differential = is_differential[keep_indices]
             filtered_final_peak_idc = final_peak_idc[keep_indices]
             filtered_final_trough_idc = final_trough_idc[keep_indices]
             filtered_unique_midpoints = unique_midpoints[keep_indices]
@@ -262,7 +266,7 @@ for n, filepath in enumerate(file_set['filename']):
             filtered_eod_amp = np.empty(0)
             filtered_cor_coeffs = np.empty((0, n_channels - 1))
             filtered_eod_chan = np.empty(0, dtype=int)
-            filtered_is_differential = np.empty(0, dtype=int)
+            # filtered_is_differential = np.empty(0, dtype=int)
             filtered_final_peak_idc = np.empty(0, dtype=int)
             filtered_final_trough_idc = np.empty(0, dtype=int)
             filtered_unique_midpoints = np.empty(0, dtype=int)
@@ -287,7 +291,7 @@ for n, filepath in enumerate(file_set['filename']):
             'peak_idx': filtered_final_peak_idc,
             'trough_idx': filtered_final_trough_idc,
             'eod_channel': filtered_eod_chan,
-            'is_differential': filtered_is_differential,
+            # 'is_differential': filtered_is_differential,
             'eod_amplitude': filtered_eod_amp,
             'pulse_width': filtered_unique_widths,
             'pulse_orientation': filtered_original_pulse_orientation,
@@ -349,46 +353,64 @@ for n, filepath in enumerate(file_set['filename']):
         
         print(f"Saved {len(eod_table)} filtered EOD events to {fname[:-4]}_eod_table.csv")
         
-        # Enhanced quality control plots (memory optimized)
+        # Control plots
         if len(filtered_unique_midpoints) > 0:
             # Only differential events are kept after filtering
-            differential_idc = np.arange(len(filtered_is_differential))  # All events are differential now
+            # differential_idc = np.arange(len(filtered_is_differential))  # All events are differential now
             
             # Plot: Differential detections with differential data
-            if len(differential_idc) > 0:
-                data_diff = np.diff(data, axis=1)
-                offset_diff = np.max(filtered_eod_amp) * 1.5
+            # if len(differential_idc) > 0:
+            eod_idc = np.arange(len(filtered_eod_waveforms))
+            data_diff = np.diff(data, axis=1)
+            offset_diff = np.max(filtered_eod_amp) * 1.5
+            
+            plt.figure(figsize=(20, 8))
+            for i in range(data_diff.shape[1]):
+                # Find events detected on this differential channel
+                ch_diff_idc = np.where(filtered_eod_chan == i)[0]
+                actual_diff_idc = eod_idc[ch_diff_idc]
                 
-                plt.figure(figsize=(20, 8))
-                for i in range(data_diff.shape[1]):
-                    # Find events detected on this differential channel
-                    ch_diff_idc = np.where(filtered_eod_chan[differential_idc] == i)[0]
-                    actual_diff_idc = differential_idc[ch_diff_idc]
+                # Plot only every nth sample for large datasets to save memory
+                step = max(1, len(data_diff) // 15000000)  # Limit to ~15 mio points per channel
+                x_coords = np.arange(0, len(data_diff), step)
+                plt.plot(x_coords, data_diff[::step, i] + i * offset_diff, linewidth=0.5, label=f'Ch{i}-{i+1}')
+                
+                # Plot filtered (accepted) events
+                if len(actual_diff_idc) > 0:
+                    plt.plot(filtered_final_peak_idc[actual_diff_idc], 
+                            data_diff[filtered_final_peak_idc[actual_diff_idc], i] + i * offset_diff, 
+                            'o', markersize=1, color='red')
+                    plt.plot(filtered_final_trough_idc[actual_diff_idc], 
+                            data_diff[filtered_final_trough_idc[actual_diff_idc], i] + i * offset_diff, 
+                            'o', markersize=1, color='blue')
+                
+                # Plot filtered-out events in grey
+                if len(filtered_out_indices) > 0:
+                    # Find filtered-out events detected on this differential channel
+                    filteredout_eod_chan = eod_chan[filtered_out_indices]
+                    filteredout_final_peak_idc = final_peak_idc[filtered_out_indices]
+                    filteredout_final_trough_idc = final_trough_idc[filtered_out_indices]
                     
-                    # Plot only every nth sample for large datasets to save memory
-                    step = max(1, len(data_diff) // 15000000)  # Limit to ~15 mio points per channel
-                    x_coords = np.arange(0, len(data_diff), step)
-                    plt.plot(x_coords, data_diff[::step, i] + i * offset_diff, linewidth=0.5, label=f'Ch{i}-{i+1}')
-                    
-                    if len(actual_diff_idc) > 0:
-                        plt.plot(filtered_final_peak_idc[actual_diff_idc], 
-                                data_diff[filtered_final_peak_idc[actual_diff_idc], i] + i * offset_diff, 
-                                'o', markersize=1, color='red')
-                        plt.plot(filtered_final_trough_idc[actual_diff_idc], 
-                                data_diff[filtered_final_trough_idc[actual_diff_idc], i] + i * offset_diff, 
-                                'o', markersize=1, color='blue')
-                
-                plt.ylim(bottom=None, top=(data_diff.shape[1]-0.5)*offset_diff)
-                plt.title(f'{fname} - Differential EOD Detections (n={len(differential_idc)}) - Red=Peaks, Blue=Troughs')
-                plt.legend(loc='upper right')
-                plt.xlabel('Sample')
-                plt.ylabel('Voltage')
-                plt.savefig(f'{output_path}\\{fname[:-4]}_differential_detection_plot.png', dpi=150, bbox_inches='tight')
-                plt.close()
-                
-                # Clear differential data from memory
-                del data_diff
-                gc.collect()
+                    filteredout_ch_diff_idc = np.where(filteredout_eod_chan == i)[0]
+                    if len(filteredout_ch_diff_idc) > 0:
+                        plt.plot(filteredout_final_peak_idc[filteredout_ch_diff_idc], 
+                                data_diff[filteredout_final_peak_idc[filteredout_ch_diff_idc], i] + i * offset_diff, 
+                                'o', markersize=1, color='grey', alpha=0.6)
+                        plt.plot(filteredout_final_trough_idc[filteredout_ch_diff_idc], 
+                                data_diff[filteredout_final_trough_idc[filteredout_ch_diff_idc], i] + i * offset_diff, 
+                                'o', markersize=1, color='grey', alpha=0.6)
+            
+            plt.ylim(bottom=None, top=(data_diff.shape[1]-0.5)*offset_diff)
+            plt.title(f'{fname} - Differential EOD Detections - Red=Peaks, Blue=Troughs, Grey=Filtered Out (n={len(eod_idc)} kept, {len(filtered_out_indices)} filtered)')
+            plt.legend(loc='upper right')
+            plt.xlabel('Sample')
+            plt.ylabel('Voltage')
+            plt.savefig(f'{output_path}\\{fname[:-4]}_differential_detection_plot.png', dpi=150, bbox_inches='tight')
+            plt.close()
+            
+            # Clear differential data from memory
+            del data_diff
+            gc.collect()
             
             # Summary analysis plots (simplified for memory efficiency)
             plt.figure(figsize=(12, 8))  # Reduced size
@@ -419,7 +441,7 @@ for n, filepath in enumerate(file_set['filename']):
             
             # Plot channel usage (only differential channels now)
             plt.subplot(2, 3, 3)
-            if len(filtered_eod_chan) > 0:
+            if len(filtered_eod_waveforms) > 0:
                 diff_channel_counts = np.bincount(filtered_eod_chan, minlength=n_channels-1)
                 plt.bar(range(len(diff_channel_counts)), diff_channel_counts, alpha=0.7, 
                         label=f'Differential ({len(filtered_eod_chan)})', width=0.8)
@@ -436,16 +458,16 @@ for n, filepath in enumerate(file_set['filename']):
             
             # Plot detection type distribution (only differential now)
             plt.subplot(2, 3, 4)
-            if len(filtered_is_differential) > 0:
-                plt.bar([0], [len(filtered_is_differential)], alpha=0.7, label='Differential')
+            if len(filtered_eod_waveforms) > 0:
+                plt.bar([0], [len(filtered_eod_waveforms)], alpha=0.7, label='Differential')
                 plt.title('Detection Type (All Differential)')
                 plt.xlabel('Detection Type')
                 plt.ylabel('Count')
                 plt.xticks([0], ['Differential'])
                 
                 # Add count label on bar
-                plt.text(0, len(filtered_is_differential) + max(1, len(filtered_is_differential)*0.01), 
-                        str(len(filtered_is_differential)), ha='center', va='bottom')
+                plt.text(0, len(filtered_eod_waveforms) + max(1, len(filtered_eod_waveforms)*0.01), 
+                        str(len(filtered_eod_waveforms)), ha='center', va='bottom')
             else:
                 plt.text(0.5, 0.5, 'No data', ha='center', va='center', transform=plt.gca().transAxes)
                 plt.title('Detection Type')
@@ -484,10 +506,6 @@ for n, filepath in enumerate(file_set['filename']):
         
         # --- Save filtered-out events for QC if requested ---
         if save_filtered_out:
-            # Indices of all events after duplicate removal
-            all_indices = np.arange(len(eod_waveforms))
-            # Indices of filtered-out events
-            filtered_out_indices = np.setdiff1d(all_indices, keep_indices)
             if len(filtered_out_indices) > 0:
                 filteredout_eod_waveforms = [eod_waveforms[i] for i in filtered_out_indices]
                 filteredout_amps = amps[filtered_out_indices]
