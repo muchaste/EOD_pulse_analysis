@@ -3,8 +3,6 @@
 import thunderfish.pulses as pulses
 import matplotlib.pyplot as plt
 import audioio as aio
-from scipy.signal import find_peaks, correlate, windows
-from scipy.interpolate import interp1d
 import numpy as np
 import pandas as pd
 import tkinter as tk
@@ -12,15 +10,11 @@ from tkinter import filedialog
 import gc
 import glob
 import datetime as dt
-# from sklearn.preprocessing import StandardScaler
-import matplotlib as mpl
 
 # Import consolidated EOD functions
 from eod_functions import (
     save_variable_length_waveforms,
-    load_variable_length_waveforms,
     calculate_storage_efficiency,
-    analyze_waveform_fft_proper,
     remove_noise_artifacts,
     extract_pulse_snippets
 )
@@ -80,7 +74,12 @@ parameters = {'thresh':thresh,
               'return_data':False,
               # Additional filtering parameters
               'amplitude_ratio_min':0.1,  # Minimum peak-to-peak amplitude ratio
-              'amplitude_ratio_max':10     # Maximum peak-to-peak amplitude ratio
+              'amplitude_ratio_max':10,     # Maximum peak-to-peak amplitude ratio
+              'save_filtered_out':True, # Option to save filtered-out pulses for quality control
+              'noise_removal':True,
+              'max_freq_content':0.9,  # Allow some high freq for species differences
+              'min_snr':1.5,
+              'max_ipi_ratio':100.0
               }
 
 print(parameters)
@@ -102,9 +101,6 @@ parameters = pd.DataFrame({k: [v] for k, v in parameters.items()})
 parameters.to_csv('%s\\analysis_parameters.csv' % output_path, index=False)
 plt.close()
 
-
-# Option to save filtered-out pulses for quality control
-save_filtered_out = True  # Set to True to save filtered-out events for QC
 
 # Process each file
 for n, filepath in enumerate(file_set['filename']):
@@ -201,21 +197,25 @@ for n, filepath in enumerate(file_set['filename']):
             basic_filtered_waveforms = [eod_waveforms[i] for i in basic_keep_indices]
             basic_filtered_timestamps = unique_midpoints[basic_keep_indices] / rate
             
-            # # Remove noise artifacts (now handles variable-length waveforms properly)
-            # noise_clean_mask = remove_noise_artifacts(
-            #     basic_filtered_waveforms,  # Pass list of variable-length waveforms
-            #     basic_filtered_timestamps, 
-            #     rate,
-            #     max_freq_content=0.75,  # Allow some high freq for species differences
-            #     min_snr=2.0,
-            #     max_ipi_ratio=20.0
-            # )
-            
-            # # Combine filters: basic + noise removal
-            # final_keep_indices = basic_keep_indices[noise_clean_mask]
-            # keep_mask = np.zeros(len(eod_waveforms), dtype=bool)
-            # keep_mask[final_keep_indices] = True
-            # keep_indices = final_keep_indices
+            if parameters['noise_removal']:
+                # Remove noise artifacts (now handles variable-length waveforms properly)
+                noise_clean_mask = remove_noise_artifacts(
+                    basic_filtered_waveforms,  # Pass list of variable-length waveforms
+                    basic_filtered_timestamps, 
+                    rate,
+                    max_freq_content=0.75,  # Allow some high freq for species differences
+                    min_snr=2.0,
+                    max_ipi_ratio=20.0
+                )
+                
+                # Combine filters: basic + noise removal
+                final_keep_indices = basic_keep_indices[noise_clean_mask]
+                keep_mask = np.zeros(len(eod_waveforms), dtype=bool)
+                keep_mask[final_keep_indices] = True
+                keep_indices = final_keep_indices
+            else:
+                keep_mask = basic_filter_mask
+                keep_indices = basic_keep_indices
         else:
             keep_mask = basic_filter_mask
             keep_indices = basic_keep_indices
@@ -445,7 +445,7 @@ for n, filepath in enumerate(file_set['filename']):
                 diff_channel_counts = np.bincount(filtered_eod_chan, minlength=n_channels-1)
                 plt.bar(range(len(diff_channel_counts)), diff_channel_counts, alpha=0.7, 
                         label=f'Differential ({len(filtered_eod_chan)})', width=0.8)
-                plt.title(f'Differential Channel Usage')
+                plt.title('Differential Channel Usage')
                 plt.xlabel('Channel Pair Index')
                 plt.ylabel('Count')
                 plt.xticks(range(len(diff_channel_counts)), [f'{i}-{i+1}' for i in range(len(diff_channel_counts))], rotation=45)
@@ -505,7 +505,7 @@ for n, filepath in enumerate(file_set['filename']):
             plt.close()
         
         # --- Save filtered-out events for QC if requested ---
-        if save_filtered_out:
+        if parameters['save_filtered_out']:
             if len(filtered_out_indices) > 0:
                 filteredout_eod_waveforms = [eod_waveforms[i] for i in filtered_out_indices]
                 filteredout_amps = amps[filtered_out_indices]
