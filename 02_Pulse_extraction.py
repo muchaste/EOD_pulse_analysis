@@ -203,9 +203,9 @@ for n, filepath in enumerate(file_set['filename']):
                     basic_filtered_waveforms,  # Pass list of variable-length waveforms
                     basic_filtered_timestamps, 
                     rate,
-                    max_freq_content=0.75,  # Allow some high freq for species differences
-                    min_snr=2.0,
-                    max_ipi_ratio=20.0
+                    max_freq_content=parameters['max_freq_content'],  # Allow some high freq for species differences
+                    min_snr=parameters['min_snr'],
+                    max_ipi_ratio=parameters['max_ipi_ratio']
                 )
                 
                 # Combine filters: basic + noise removal
@@ -227,8 +227,8 @@ for n, filepath in enumerate(file_set['filename']):
         
         print(f"EODs after differential + amplitude ratio + noise filtering: {len(keep_indices)} out of {len(eod_waveforms)}")
         print(f"  - Differential events: {np.sum(is_differential == 1)}")
-        print(f"  - Single-ended events (excluded): {np.sum(is_differential == 0)}")
-        print(f"  - Amplitude ratio passed: {np.sum((amplitude_ratios >= parameters['amplitude_ratio_min'][0]) & (amplitude_ratios <= parameters['amplitude_ratio_max'][0]))}")
+        # print(f"  - Single-ended events (excluded): {np.sum(is_differential == 0)}")
+        print(f"  - Amplitude ratio passed: {np.sum((amplitude_ratios >= parameters['amplitude_ratio_min']) & (amplitude_ratios <= parameters['amplitude_ratio_max']))}")
         if len(basic_keep_indices) > 0:
             print(f"  - Noise artifacts removed: {len(basic_keep_indices) - len(keep_indices)}")
         
