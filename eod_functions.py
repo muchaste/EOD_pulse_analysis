@@ -359,7 +359,7 @@ def remove_noise_artifacts(waveforms, timestamps, rate,
 # WAVEFORM PROCESSING FUNCTIONS
 # =============================================================================
 
-def extract_pulse_snippets(data, midpoints, peaks, troughs, widths, 
+def extract_pulse_snippets(data, rate, midpoints, peaks, troughs, widths, 
                             width_factor=5.0, interp_factor=1, center_on_zero_crossing=False, return_diff=False):
     """
     Extract and analyze EOD snippets with variable widths based on detected pulse widths.
@@ -369,6 +369,8 @@ def extract_pulse_snippets(data, midpoints, peaks, troughs, widths,
     ----------
     data : 2-D array
         The full recording data with channels in columns
+    rate : int
+        Sampling rate    
     midpoints : 1-D array
         Midpoint indices of unique events
     peaks : 1-D array
@@ -377,8 +379,6 @@ def extract_pulse_snippets(data, midpoints, peaks, troughs, widths,
         Trough indices of unique events
     widths : 1-D array
         Width (in seconds) of unique events
-    rate : int
-        Sampling rate
     width_factor : float
         Factor to multiply width to get snippet length
     interp_factor : int
@@ -394,6 +394,8 @@ def extract_pulse_snippets(data, midpoints, peaks, troughs, widths,
         Variable-length EOD waveform snippets (no zero-padding)
     eod_amp : 1-D array
         Amplitude of extracted waveform
+    eod_width : 1-D array
+        Width in microseconds between peak and trough of the extracted waveform
     amps : 2-D array
         Max amplitudes across channels for each snippet
     cor_coeffs : 2-D array
@@ -429,6 +431,7 @@ def extract_pulse_snippets(data, midpoints, peaks, troughs, widths,
     pulse_orientation = np.array(['HP'] * n_events)  # Store original orientation
     amplitude_ratios = np.zeros(n_events)  # For amplitude ratio filtering
     waveform_lengths = np.zeros(n_events, dtype=int)  # Track actual lengths
+    eod_width = np.zeros(n_events, dtype=int)  # Width between peak and trough
     
     for i in range(n_events):
         # Calculate snippet length based on width
@@ -568,6 +571,9 @@ def extract_pulse_snippets(data, midpoints, peaks, troughs, widths,
             eod_waveforms.append(eod_waveform)
             waveform_lengths[i] = len(eod_waveform)
             
+            # Calculate width between peak and trough in uS
+            eod_width[i] = abs(eod_peak_idx - eod_trough_idx)*1e6//rate
+            
             # Store final indices (adjust for snippet position)
             final_peak_idc[i] = start_idx + eod_peak_idx
             final_trough_idc[i] = start_idx + eod_trough_idx
@@ -577,6 +583,7 @@ def extract_pulse_snippets(data, midpoints, peaks, troughs, widths,
             # Empty waveform case
             eod_waveforms.append(np.array([]))
             waveform_lengths[i] = 0
+            eod_width[i] = 0
             final_peak_idc[i] = peaks[i]
             final_trough_idc[i] = troughs[i]
             final_midpoint_idc[i] = midpoints[i]
@@ -596,9 +603,10 @@ def extract_pulse_snippets(data, midpoints, peaks, troughs, widths,
         pulse_orientation = pulse_orientation[diff_mask]
         amplitude_ratios = amplitude_ratios[diff_mask]
         waveform_lengths = waveform_lengths[diff_mask]
+        eod_width = eod_width[diff_mask]
     
     # Return variable-length waveforms as list (no zero-padding)
-    return (eod_waveforms, eod_amp, amps, cor_coeffs, eod_chan, 
+    return (eod_waveforms, eod_amp, eod_width, amps, cor_coeffs, eod_chan, 
             is_differential, final_peak_idc, final_trough_idc, final_midpoint_idc,
             pulse_orientation, amplitude_ratios, waveform_lengths)
 
