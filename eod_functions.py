@@ -359,8 +359,8 @@ def remove_noise_artifacts(waveforms, timestamps, rate,
 # WAVEFORM PROCESSING FUNCTIONS
 # =============================================================================
 
-def extract_pulse_snippets(data, unique_midpoints, unique_peaks, unique_troughs, unique_widths, 
-                                rate, width_factor=5.0, interp_factor=1, center_on_zero_crossing=False, return_diff=False):
+def extract_pulse_snippets(data, midpoints, peaks, troughs, widths, 
+                            width_factor=5.0, interp_factor=1, center_on_zero_crossing=False, return_diff=False):
     """
     Extract and analyze EOD snippets with variable widths based on detected pulse widths.
     Optimized to store variable-length waveforms without zero-padding for maximum efficiency.
@@ -369,13 +369,13 @@ def extract_pulse_snippets(data, unique_midpoints, unique_peaks, unique_troughs,
     ----------
     data : 2-D array
         The full recording data with channels in columns
-    unique_midpoints : 1-D array
+    midpoints : 1-D array
         Midpoint indices of unique events
-    unique_peaks : 1-D array
+    peaks : 1-D array
         Peak indices of unique events
-    unique_troughs : 1-D array
+    troughs : 1-D array
         Trough indices of unique events
-    unique_widths : 1-D array
+    widths : 1-D array
         Width (in seconds) of unique events
     rate : int
         Sampling rate
@@ -392,8 +392,6 @@ def extract_pulse_snippets(data, unique_midpoints, unique_peaks, unique_troughs,
     -------
     eod_waveforms : list of 1-D arrays
         Variable-length EOD waveform snippets (no zero-padding)
-    amps : 2-D array
-        Max amplitudes across channels for each snippet
     eod_amp : 1-D array
         Amplitude of extracted waveform
     cor_coeffs : 2-D array
@@ -414,7 +412,7 @@ def extract_pulse_snippets(data, unique_midpoints, unique_peaks, unique_troughs,
         Length of each variable-length waveform
     """
     n_channels = data.shape[1]
-    n_events = len(unique_midpoints)
+    n_events = len(midpoints)
     
     # Preallocate arrays
     eod_waveforms = []  # Store as list for variable lengths
@@ -425,17 +423,18 @@ def extract_pulse_snippets(data, unique_midpoints, unique_peaks, unique_troughs,
     is_differential = np.ones(n_events, dtype=int)  # 1=differential, 0=single-ended
     final_peak_idc = np.zeros(n_events, dtype=int)
     final_trough_idc = np.zeros(n_events, dtype=int)
+    final_midpoint_idc = np.zeros(n_events, dtype=int)
     pulse_orientation = np.array(['HP'] * n_events)  # Store original orientation
     amplitude_ratios = np.zeros(n_events)  # For amplitude ratio filtering
     waveform_lengths = np.zeros(n_events, dtype=int)  # Track actual lengths
     
     for i in range(n_events):
         # Calculate snippet length based on width
-        snippet_samples = int(unique_widths[i] * width_factor)
+        snippet_samples = int(widths[i] * width_factor)
         snippet_samples = max(snippet_samples, 20)  # Minimum 20 samples
         
         # Extract snippet around midpoint
-        center_idx = int(unique_midpoints[i])
+        center_idx = int(midpoints[i])
         half_len = snippet_samples // 2
         
         # Calculate bounds and extract only necessary data (no pre-padding)
@@ -570,32 +569,36 @@ def extract_pulse_snippets(data, unique_midpoints, unique_peaks, unique_troughs,
             # Store final indices (adjust for snippet position)
             final_peak_idc[i] = start_idx + eod_peak_idx
             final_trough_idc[i] = start_idx + eod_trough_idx
+            final_midpoint_idc[i] = final_peak_idc[i] + (final_trough_idc[i] - final_peak_idc[i]) // 2
+
         else:
             # Empty waveform case
             eod_waveforms.append(np.array([]))
             waveform_lengths[i] = 0
-            final_peak_idc[i] = unique_peaks[i]
-            final_trough_idc[i] = unique_troughs[i]
+            final_peak_idc[i] = peaks[i]
+            final_trough_idc[i] = troughs[i]
+            final_midpoint_idc[i] = midpoints[i]
     
     # Filter for differential events only if requested
     if return_diff:
         diff_mask = is_differential == 1
         eod_waveforms = [eod_waveforms[i] for i in range(len(eod_waveforms)) if diff_mask[i]]
-        amps = amps[diff_mask]
+        # amps = amps[diff_mask]
         eod_amp = eod_amp[diff_mask]
         cor_coeffs = cor_coeffs[diff_mask]
         eod_chan = eod_chan[diff_mask]
         is_differential = is_differential[diff_mask]
         final_peak_idc = final_peak_idc[diff_mask]
         final_trough_idc = final_trough_idc[diff_mask]
+        final_midpoint_idc = final_midpoint_idc[diff_mask]
         pulse_orientation = pulse_orientation[diff_mask]
         amplitude_ratios = amplitude_ratios[diff_mask]
         waveform_lengths = waveform_lengths[diff_mask]
     
     # Return variable-length waveforms as list (no zero-padding)
-    return (eod_waveforms, amps, eod_amp, cor_coeffs, eod_chan, 
-            is_differential, final_peak_idc, final_trough_idc, pulse_orientation, 
-            amplitude_ratios, waveform_lengths)
+    return (eod_waveforms, eod_amp, cor_coeffs, eod_chan, 
+            is_differential, final_peak_idc, final_trough_idc, final_midpoint_idc,
+            pulse_orientation, amplitude_ratios, waveform_lengths)
 
 # =============================================================================
 # EVENT EXTRACTION FUNCTIONS
@@ -1709,3 +1712,341 @@ def calculate_waveform_stats(waveforms_list, label=""):
     }
     
     return stats_dict
+
+# =============================================================================
+# QC FUNCTIONS
+# =============================================================================
+
+def plot_waveform_comparison(accepted_waveforms, filtered_waveforms, output_path, file_prefix, save_fig=True, show_fig=False):
+    """Create comprehensive comparison plots."""
+    
+    # Filter out empty waveforms
+    acc_valid = [wf for wf in accepted_waveforms if len(wf) > 0]
+    filt_valid = [wf for wf in filtered_waveforms if len(wf) > 0]
+    
+    # Create figure with subplots
+    fig = plt.figure(figsize=(20, 16))
+    
+    # 1. Overlay plot of example waveforms
+    plt.subplot(3, 4, 1)
+    n_examples = min(100, len(acc_valid))  # Show up to 100 examples
+    for i in range(n_examples):
+        plt.plot(acc_valid[i], 'b-', alpha=0.1, linewidth=0.5)
+    plt.title(f'Accepted Waveforms (n={len(acc_valid)})\nShowing {n_examples} examples')
+    plt.xlabel('Sample')
+    plt.ylabel('Normalized Amplitude')
+    plt.grid(True, alpha=0.3)
+    
+    plt.subplot(3, 4, 2)
+    n_examples = min(100, len(filt_valid))  # Show up to 100 examples
+    for i in range(n_examples):
+        plt.plot(filt_valid[i], 'r-', alpha=0.1, linewidth=0.5)
+    plt.title(f'Filtered-Out Waveforms (n={len(filt_valid)})\nShowing {n_examples} examples')
+    plt.xlabel('Sample')
+    plt.ylabel('Normalized Amplitude')
+    plt.grid(True, alpha=0.3)
+    
+    # 2. Length distribution comparison
+    plt.subplot(3, 4, 3)
+    acc_lengths = [len(wf) for wf in acc_valid]
+    filt_lengths = [len(wf) for wf in filt_valid]
+    
+    bins = np.linspace(0, max(max(acc_lengths) if acc_lengths else 0, 
+                             max(filt_lengths) if filt_lengths else 0), 50)
+    
+    plt.hist(acc_lengths, bins=bins, alpha=0.7, label=f'Accepted (n={len(acc_lengths)})', 
+             color='blue', density=True)
+    plt.hist(filt_lengths, bins=bins, alpha=0.7, label=f'Filtered (n={len(filt_lengths)})', 
+             color='red', density=True)
+    plt.title('Waveform Length Distribution')
+    plt.xlabel('Length (samples)')
+    plt.ylabel('Density')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # 3. Amplitude distribution comparison
+    plt.subplot(3, 4, 4)
+    acc_amps = [np.max(wf) - np.min(wf) for wf in acc_valid]
+    filt_amps = [np.max(wf) - np.min(wf) for wf in filt_valid]
+    
+    bins = np.linspace(0, max(max(acc_amps) if acc_amps else 0, 
+                             max(filt_amps) if filt_amps else 0), 50)
+    
+    plt.hist(acc_amps, bins=bins, alpha=0.7, label=f'Accepted (n={len(acc_amps)})', 
+             color='blue', density=True)
+    plt.hist(filt_amps, bins=bins, alpha=0.7, label=f'Filtered (n={len(filt_amps)})', 
+             color='red', density=True)
+    plt.title('Peak-to-Trough Amplitude Distribution')
+    plt.xlabel('Amplitude')
+    plt.ylabel('Density')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # 4. Average waveform shapes
+    plt.subplot(3, 4, 5)
+    if acc_valid:
+        # Normalize all waveforms to same length for averaging
+        target_length = int(np.median([len(wf) for wf in acc_valid]))
+        normalized_acc = []
+        for wf in acc_valid[:200]:  # Use first 200 for averaging
+            if len(wf) > 5:
+                x_old = np.linspace(0, 1, len(wf))
+                x_new = np.linspace(0, 1, target_length)
+                wf_interp = np.interp(x_new, x_old, wf)
+                normalized_acc.append(wf_interp)
+        
+        if normalized_acc:
+            mean_acc = np.mean(normalized_acc, axis=0)
+            std_acc = np.std(normalized_acc, axis=0)
+            x = np.arange(target_length)
+            plt.plot(x, mean_acc, 'b-', linewidth=2, label='Mean')
+            plt.fill_between(x, mean_acc - std_acc, mean_acc + std_acc, 
+                           alpha=0.3, color='blue', label='±1 STD')
+    
+    plt.title('Average Accepted Waveform Shape')
+    plt.xlabel('Normalized Sample')
+    plt.ylabel('Normalized Amplitude')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    plt.subplot(3, 4, 6)
+    if filt_valid:
+        # Normalize all waveforms to same length for averaging
+        target_length = int(np.median([len(wf) for wf in filt_valid]))
+        normalized_filt = []
+        for wf in filt_valid[:200]:  # Use first 200 for averaging
+            if len(wf) > 5:
+                x_old = np.linspace(0, 1, len(wf))
+                x_new = np.linspace(0, 1, target_length)
+                wf_interp = np.interp(x_new, x_old, wf)
+                normalized_filt.append(wf_interp)
+        
+        if normalized_filt:
+            mean_filt = np.mean(normalized_filt, axis=0)
+            std_filt = np.std(normalized_filt, axis=0)
+            x = np.arange(target_length)
+            plt.plot(x, mean_filt, 'r-', linewidth=2, label='Mean')
+            plt.fill_between(x, mean_filt - std_filt, mean_filt + std_filt, 
+                           alpha=0.3, color='red', label='±1 STD')
+    
+    plt.title('Average Filtered-Out Waveform Shape')
+    plt.xlabel('Normalized Sample')
+    plt.ylabel('Normalized Amplitude')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # 5. Skewness comparison
+    plt.subplot(3, 4, 7)
+    acc_skew = [stats.skew(wf) for wf in acc_valid if len(wf) > 3]
+    filt_skew = [stats.skew(wf) for wf in filt_valid if len(wf) > 3]
+    
+    bins = np.linspace(-3, 3, 50)
+    plt.hist(acc_skew, bins=bins, alpha=0.7, label=f'Accepted (n={len(acc_skew)})', 
+             color='blue', density=True)
+    plt.hist(filt_skew, bins=bins, alpha=0.7, label=f'Filtered (n={len(filt_skew)})', 
+             color='red', density=True)
+    plt.title('Skewness Distribution')
+    plt.xlabel('Skewness')
+    plt.ylabel('Density')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # 6. Kurtosis comparison
+    plt.subplot(3, 4, 8)
+    acc_kurt = [stats.kurtosis(wf) for wf in acc_valid if len(wf) > 3]
+    filt_kurt = [stats.kurtosis(wf) for wf in filt_valid if len(wf) > 3]
+    
+    bins = np.linspace(-2, 10, 50)
+    plt.hist(acc_kurt, bins=bins, alpha=0.7, label=f'Accepted (n={len(acc_kurt)})', 
+             color='blue', density=True)
+    plt.hist(filt_kurt, bins=bins, alpha=0.7, label=f'Filtered (n={len(filt_kurt)})', 
+             color='red', density=True)
+    plt.title('Kurtosis Distribution')
+    plt.xlabel('Kurtosis')
+    plt.ylabel('Density')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # 7-8. Peak and trough position distributions
+    plt.subplot(3, 4, 9)
+    acc_peak_pos = [np.argmax(wf) / len(wf) for wf in acc_valid if len(wf) > 0]
+    filt_peak_pos = [np.argmax(wf) / len(wf) for wf in filt_valid if len(wf) > 0]
+    
+    bins = np.linspace(0, 1, 50)
+    plt.hist(acc_peak_pos, bins=bins, alpha=0.7, label=f'Accepted (n={len(acc_peak_pos)})', 
+             color='blue', density=True)
+    plt.hist(filt_peak_pos, bins=bins, alpha=0.7, label=f'Filtered (n={len(filt_peak_pos)})', 
+             color='red', density=True)
+    plt.title('Peak Position Distribution')
+    plt.xlabel('Relative Peak Position')
+    plt.ylabel('Density')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    plt.subplot(3, 4, 10)
+    acc_trough_pos = [np.argmin(wf) / len(wf) for wf in acc_valid if len(wf) > 0]
+    filt_trough_pos = [np.argmin(wf) / len(wf) for wf in filt_valid if len(wf) > 0]
+    
+    bins = np.linspace(0, 1, 50)
+    plt.hist(acc_trough_pos, bins=bins, alpha=0.7, label=f'Accepted (n={len(acc_trough_pos)})', 
+             color='blue', density=True)
+    plt.hist(filt_trough_pos, bins=bins, alpha=0.7, label=f'Filtered (n={len(filt_trough_pos)})', 
+             color='red', density=True)
+    plt.title('Trough Position Distribution')
+    plt.xlabel('Relative Trough Position')
+    plt.ylabel('Density')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # 9. Length vs Amplitude scatter plot
+    plt.subplot(3, 4, 11)
+    acc_lengths = [len(wf) for wf in acc_valid]
+    acc_amps = [np.max(wf) - np.min(wf) for wf in acc_valid]
+    
+    # Subsample for plotting if too many points
+    if len(acc_lengths) > 5000:
+        indices = np.random.choice(len(acc_lengths), 5000, replace=False)
+        acc_lengths = [acc_lengths[i] for i in indices]
+        acc_amps = [acc_amps[i] for i in indices]
+    
+    plt.scatter(acc_lengths, acc_amps, alpha=0.5, color='blue', s=1, label='Accepted')
+    
+    filt_lengths = [len(wf) for wf in filt_valid]
+    filt_amps = [np.max(wf) - np.min(wf) for wf in filt_valid]
+    
+    # Subsample for plotting if too many points
+    if len(filt_lengths) > 5000:
+        indices = np.random.choice(len(filt_lengths), 5000, replace=False)
+        filt_lengths = [filt_lengths[i] for i in indices]
+        filt_amps = [filt_amps[i] for i in indices]
+    
+    plt.scatter(filt_lengths, filt_amps, alpha=0.5, color='red', s=1, label='Filtered')
+    plt.title('Length vs Amplitude')
+    plt.xlabel('Length (samples)')
+    plt.ylabel('Peak-to-Trough Amplitude')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # 10. Summary statistics text
+    plt.subplot(3, 4, 12)
+    plt.axis('off')
+    
+    summary_text = f"""
+    FILTERING SUMMARY:
+    
+    Total Pulses: {len(accepted_waveforms) + len(filtered_waveforms)}
+    Accepted: {len(accepted_waveforms)} ({len(accepted_waveforms)/(len(accepted_waveforms)+len(filtered_waveforms))*100:.1f}%)
+    Filtered: {len(filtered_waveforms)} ({len(filtered_waveforms)/(len(accepted_waveforms)+len(filtered_waveforms))*100:.1f}%)
+    
+    ACCEPTED WAVEFORMS:
+    Length: {np.mean([len(wf) for wf in acc_valid]):.1f} ± {np.std([len(wf) for wf in acc_valid]):.1f}
+    Amplitude: {np.mean([np.max(wf)-np.min(wf) for wf in acc_valid]):.3f} ± {np.std([np.max(wf)-np.min(wf) for wf in acc_valid]):.3f}
+    
+    FILTERED WAVEFORMS:
+    Length: {np.mean([len(wf) for wf in filt_valid]):.1f} ± {np.std([len(wf) for wf in filt_valid]):.1f}
+    Amplitude: {np.mean([np.max(wf)-np.min(wf) for wf in filt_valid]):.3f} ± {np.std([np.max(wf)-np.min(wf) for wf in filt_valid]):.3f}
+    
+    WIDTH FACTOR ASSESSMENT:
+    Width factor of 50 appears {'appropriate' if np.mean([len(wf) for wf in acc_valid]) > 100 else 'potentially too high'}
+    based on average waveform length.
+    """
+    
+    plt.text(0.05, 0.95, summary_text, transform=plt.gca().transAxes, 
+             verticalalignment='top', fontsize=10, fontfamily='monospace')
+    
+    plt.tight_layout()
+    if save_fig:
+        plt.savefig(f'{output_path}\\{file_prefix}_QC_comparison.png', dpi=300, bbox_inches='tight')
+    if show_fig:
+        plt.show()
+
+def compare_table_features(accepted_table, filtered_table, output_path, file_prefix, save_fig=True, show_fig=False):
+    """Compare tabular features between accepted and filtered events."""
+    
+    if accepted_table.empty and filtered_table.empty:
+        print("No data to compare")
+        return
+    
+    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+    
+    # 1. Amplitude ratio comparison
+    if 'pp_ratio' in accepted_table.columns and 'pp_ratio' in filtered_table.columns:
+        axes[0, 0].hist(accepted_table['pp_ratio'], bins=50, alpha=0.7, 
+                       label=f'Accepted (n={len(accepted_table)})', color='blue', density=True)
+        axes[0, 0].hist(filtered_table['pp_ratio'], bins=50, alpha=0.7, 
+                       label=f'Filtered (n={len(filtered_table)})', color='red', density=True)
+        axes[0, 0].set_title('Amplitude Ratio Distribution')
+        axes[0, 0].set_xlabel('Peak-to-Peak Ratio')
+        axes[0, 0].set_ylabel('Density')
+        axes[0, 0].legend()
+        axes[0, 0].grid(True, alpha=0.3)
+    
+    # 2. Duration comparison
+    if 'pp_dur_us' in accepted_table.columns and 'pp_dur_us' in filtered_table.columns:
+        axes[0, 1].hist(accepted_table['pp_dur_us'], bins=50, alpha=0.7, 
+                       label=f'Accepted (n={len(accepted_table)})', color='blue', density=True)
+        axes[0, 1].hist(filtered_table['pp_dur_us'], bins=50, alpha=0.7, 
+                       label=f'Filtered (n={len(filtered_table)})', color='red', density=True)
+        axes[0, 1].set_title('Pulse Duration Distribution')
+        axes[0, 1].set_xlabel('Duration (μs)')
+        axes[0, 1].set_ylabel('Density')
+        axes[0, 1].legend()
+        axes[0, 1].grid(True, alpha=0.3)
+    
+    # 3. Differential vs single-ended
+    if 'is_differential' in accepted_table.columns and 'is_differential' in filtered_table.columns:
+        acc_diff = accepted_table['is_differential'].value_counts()
+        filt_diff = filtered_table['is_differential'].value_counts()
+        
+        x = np.arange(len(acc_diff))
+        width = 0.35
+        
+        axes[0, 2].bar(x - width/2, acc_diff.values, width, label='Accepted', color='blue', alpha=0.7)
+        axes[0, 2].bar(x + width/2, filt_diff.values, width, label='Filtered', color='red', alpha=0.7)
+        axes[0, 2].set_title('Differential vs Single-ended')
+        axes[0, 2].set_xlabel('Type (0=Single, 1=Differential)')
+        axes[0, 2].set_ylabel('Count')
+        axes[0, 2].legend()
+        axes[0, 2].grid(True, alpha=0.3)
+    
+    # 4. Amplitude by channel
+    if 'eod_amplitude' in accepted_table.columns and 'eod_amplitude' in filtered_table.columns:
+        axes[1, 0].hist(accepted_table['eod_amplitude'], bins=50, alpha=0.7, 
+                       label=f'Accepted (n={len(accepted_table)})', color='blue', density=True)
+        axes[1, 0].hist(filtered_table['eod_amplitude'], bins=50, alpha=0.7, 
+                       label=f'Filtered (n={len(filtered_table)})', color='red', density=True)
+        axes[1, 0].set_title('EOD Amplitude Distribution')
+        axes[1, 0].set_xlabel('Amplitude')
+        axes[1, 0].set_ylabel('Density')
+        axes[1, 0].legend()
+        axes[1, 0].grid(True, alpha=0.3)
+    
+    # 5. Pulse width distribution
+    if 'pulse_width' in accepted_table.columns and 'pulse_width' in filtered_table.columns:
+        axes[1, 1].hist(accepted_table['pulse_width'], bins=50, alpha=0.7, 
+                       label=f'Accepted (n={len(accepted_table)})', color='blue', density=True)
+        axes[1, 1].hist(filtered_table['pulse_width'], bins=50, alpha=0.7, 
+                       label=f'Filtered (n={len(filtered_table)})', color='red', density=True)
+        axes[1, 1].set_title('Pulse Width Distribution')
+        axes[1, 1].set_xlabel('Width (s)')
+        axes[1, 1].set_ylabel('Density')
+        axes[1, 1].legend()
+        axes[1, 1].grid(True, alpha=0.3)
+    
+    # 6. Waveform length distribution
+    if 'waveform_length' in accepted_table.columns and 'waveform_length' in filtered_table.columns:
+        axes[1, 2].hist(accepted_table['waveform_length'], bins=50, alpha=0.7, 
+                       label=f'Accepted (n={len(accepted_table)})', color='blue', density=True)
+        axes[1, 2].hist(filtered_table['waveform_length'], bins=50, alpha=0.7, 
+                       label=f'Filtered (n={len(filtered_table)})', color='red', density=True)
+        axes[1, 2].set_title('Waveform Length Distribution')
+        axes[1, 2].set_xlabel('Length (samples)')
+        axes[1, 2].set_ylabel('Density')
+        axes[1, 2].legend()
+        axes[1, 2].grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    if save_fig:
+        plt.savefig(f'{output_path}\\{file_prefix}_QC_table_features.png', dpi=300, bbox_inches='tight')
+    if show_fig:
+        plt.show()
