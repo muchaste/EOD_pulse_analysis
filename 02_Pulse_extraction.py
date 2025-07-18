@@ -16,7 +16,9 @@ from eod_functions import (
     save_variable_length_waveforms,
     calculate_storage_efficiency,
     remove_noise_artifacts,
-    extract_pulse_snippets
+    extract_pulse_snippets,
+    plot_waveform_comparison,
+    compare_table_features
 )
 
 # Set directories
@@ -181,7 +183,7 @@ for n, filepath in enumerate(file_set['filename']):
         print(f"Analyzing {len(unique_midpoints)} unique events...")
         
         # Analyze snippets with variable widths
-        eod_waveforms, amps, eod_amp, cor_coeffs, eod_chan, is_differential, final_peak_idc, final_trough_idc, original_pulse_orientation, amplitude_ratios, waveform_lengths = \
+        eod_waveforms, eod_amp, ch_amps,  ch_cor_coeffs, eod_chan, is_differential, final_peak_idc, final_trough_idc, final_midpoint_idc, original_pulse_orientation, amplitude_ratios, waveform_lengths = \
             extract_pulse_snippets(data, unique_midpoints, unique_peaks, unique_troughs, 
                                        unique_widths, rate, width_factor=parameters['width_fac_extraction'][0], 
                                        interp_factor=1, center_on_zero_crossing=False, return_diff=True)  # Skip centering for storage efficiency
@@ -195,17 +197,17 @@ for n, filepath in enumerate(file_set['filename']):
         if len(basic_keep_indices) > 0:
             # Get variable-length waveforms for basic filtered events
             basic_filtered_waveforms = [eod_waveforms[i] for i in basic_keep_indices]
-            basic_filtered_timestamps = unique_midpoints[basic_keep_indices] / rate
+            basic_filtered_timestamps = final_midpoint_idc[basic_keep_indices] / rate
             
-            if parameters['noise_removal']:
+            if parameters['noise_removal'][0]:
                 # Remove noise artifacts (now handles variable-length waveforms properly)
                 noise_clean_mask = remove_noise_artifacts(
                     basic_filtered_waveforms,  # Pass list of variable-length waveforms
                     basic_filtered_timestamps, 
                     rate,
-                    max_freq_content=parameters['max_freq_content'],  # Allow some high freq for species differences
-                    min_snr=parameters['min_snr'],
-                    max_ipi_ratio=parameters['max_ipi_ratio']
+                    max_freq_content=parameters['max_freq_content'][0],  # Allow some high freq for species differences
+                    min_snr=parameters['min_snr'][0],               # Minimum SNR for noise removal
+                    max_ipi_ratio=parameters['max_ipi_ratio'][0]  # Maximum IPI ratio for noise removal
                 )
                 
                 # Combine filters: basic + noise removal
@@ -226,9 +228,9 @@ for n, filepath in enumerate(file_set['filename']):
         filtered_out_indices = np.setdiff1d(all_indices, keep_indices)
         
         print(f"EODs after differential + amplitude ratio + noise filtering: {len(keep_indices)} out of {len(eod_waveforms)}")
-        print(f"  - Differential events: {np.sum(is_differential == 1)}")
+        # print(f"  - Differential events: {np.sum(is_differential == 1)}")
         # print(f"  - Single-ended events (excluded): {np.sum(is_differential == 0)}")
-        print(f"  - Amplitude ratio passed: {np.sum((amplitude_ratios >= parameters['amplitude_ratio_min']) & (amplitude_ratios <= parameters['amplitude_ratio_max']))}")
+        print(f"  - Amplitude ratio passed: {np.sum((amplitude_ratios >= parameters['amplitude_ratio_min'][0]) & (amplitude_ratios <= parameters['amplitude_ratio_max'][0]))}")
         if len(basic_keep_indices) > 0:
             print(f"  - Noise artifacts removed: {len(basic_keep_indices) - len(keep_indices)}")
         
@@ -236,16 +238,16 @@ for n, filepath in enumerate(file_set['filename']):
         if len(keep_indices) > 0:
             # Filter all arrays
             filtered_eod_waveforms = [eod_waveforms[i] for i in keep_indices]  # List of variable-length waveforms
-            filtered_amps = amps[keep_indices]
             filtered_eod_amp = eod_amp[keep_indices]
-            filtered_cor_coeffs = cor_coeffs[keep_indices]
+            filtered_ch_amps = ch_amps[keep_indices]
+            filtered_ch_cor_coeffs = ch_cor_coeffs[keep_indices]
             filtered_eod_chan = eod_chan[keep_indices]
             # filtered_is_differential = is_differential[keep_indices]
             filtered_final_peak_idc = final_peak_idc[keep_indices]
             filtered_final_trough_idc = final_trough_idc[keep_indices]
-            filtered_unique_midpoints = unique_midpoints[keep_indices]
-            filtered_unique_peaks = unique_peaks[keep_indices]
-            filtered_unique_troughs = unique_troughs[keep_indices]
+            filtered_final_midpoints = final_midpoint_idc[keep_indices]
+            # filtered_unique_peaks = unique_peaks[keep_indices]
+            # filtered_unique_troughs = unique_troughs[keep_indices]
             filtered_unique_widths = unique_widths[keep_indices]
             filtered_original_pulse_orientation = original_pulse_orientation[keep_indices]
             filtered_waveform_lengths = waveform_lengths[keep_indices]
@@ -257,14 +259,14 @@ for n, filepath in enumerate(file_set['filename']):
                 'pp_ratio': amplitude_ratios[keep_indices],
             })
             
-            print(f"After filtering: {len(filtered_original_pulse_orientation)} events with orientations: {np.unique(filtered_original_pulse_orientation, return_counts=True)}")
+            # print(f"After filtering: {len(filtered_original_pulse_orientation)} events with orientations: {np.unique(filtered_original_pulse_orientation, return_counts=True)}")
         else:
             # No events passed filtering - create empty arrays with correct structure
             print("No events passed amplitude ratio filtering. Creating empty results.")
             filtered_eod_waveforms = []  # Empty list for variable-length waveforms
-            filtered_amps = np.empty((0, n_channels))
+            filtered_ch_amps = np.empty((0, n_channels))
             filtered_eod_amp = np.empty(0)
-            filtered_cor_coeffs = np.empty((0, n_channels - 1))
+            filtered_ch_cor_coeffs = np.empty((0, n_channels - 1))
             filtered_eod_chan = np.empty(0, dtype=int)
             # filtered_is_differential = np.empty(0, dtype=int)
             filtered_final_peak_idc = np.empty(0, dtype=int)
@@ -301,12 +303,12 @@ for n, filepath in enumerate(file_set['filename']):
         
         # Add amplitude information for each channel
         for ch in range(n_channels):
-            eod_table[f'amplitude_ch{ch}'] = filtered_amps[:, ch] if len(filtered_amps) > 0 else []
-        
+            eod_table[f'amplitude_ch{ch}'] = filtered_ch_amps[:, ch] if len(filtered_ch_amps) > 0 else []
+
         # Add correlation coefficients
         for ch in range(n_channels - 1):
-            eod_table[f'correlation_ch{ch}_{ch+1}'] = filtered_cor_coeffs[:, ch] if len(filtered_cor_coeffs) > 0 else []
-        
+            eod_table[f'correlation_ch{ch}_{ch+1}'] = filtered_ch_cor_coeffs[:, ch] if len(filtered_ch_cor_coeffs) > 0 else []
+
         # Add waveform length information
         eod_table['waveform_length'] = filtered_waveform_lengths if len(filtered_waveform_lengths) > 0 else []
         
@@ -327,12 +329,12 @@ for n, filepath in enumerate(file_set['filename']):
                 f'{output_path}\\{fname[:-4]}_eod_waveforms'
             )
             
-            print(f"Saved {len(filtered_eod_waveforms)} variable-length waveforms efficiently")
-            print(f"  Total samples: {waveform_metadata['total_samples']:,}")
-            print(f"  Length range: {min(waveform_metadata['lengths'])} - {max(waveform_metadata['lengths'])} samples")
-            print(f"  Storage efficiency: {storage_metrics['efficiency_percent']:.1f}% space saved")
-            print(f"  Compression ratio: {storage_metrics['compression_ratio']:.2f}:1")
-            print(f"  Disk space saved: {storage_metrics['space_saved_mb']:.2f} MB")
+            # print(f"Saved {len(filtered_eod_waveforms)} variable-length waveforms efficiently")
+            # print(f"  Total samples: {waveform_metadata['total_samples']:,}")
+            # print(f"  Length range: {min(waveform_metadata['lengths'])} - {max(waveform_metadata['lengths'])} samples")
+            # print(f"  Storage efficiency: {storage_metrics['efficiency_percent']:.1f}% space saved")
+            # print(f"  Compression ratio: {storage_metrics['compression_ratio']:.2f}:1")
+            # print(f"  Disk space saved: {storage_metrics['space_saved_mb']:.2f} MB")
             
             # Optionally save a compatibility CSV with zero-padded waveforms for legacy code
             # Only generate if explicitly requested to save disk space
@@ -406,7 +408,8 @@ for n, filepath in enumerate(file_set['filename']):
             plt.xlabel('Sample')
             plt.ylabel('Voltage')
             plt.savefig(f'{output_path}\\{fname[:-4]}_differential_detection_plot.png', dpi=150, bbox_inches='tight')
-            plt.close()
+            plt.show(block=False)
+            # plt.close()
             
             # Clear differential data from memory
             del data_diff
@@ -503,52 +506,57 @@ for n, filepath in enumerate(file_set['filename']):
             plt.tight_layout()
             plt.savefig(f'{output_path}\\{fname[:-4]}_analysis_summary.png', dpi=150, bbox_inches='tight')  # Reduced DPI
             plt.close()
+
         
         # --- Save filtered-out events for QC if requested ---
-        if parameters['save_filtered_out']:
-            if len(filtered_out_indices) > 0:
-                filteredout_eod_waveforms = [eod_waveforms[i] for i in filtered_out_indices]
-                filteredout_amps = amps[filtered_out_indices]
-                filteredout_eod_amp = eod_amp[filtered_out_indices]
-                filteredout_cor_coeffs = cor_coeffs[filtered_out_indices]
-                filteredout_eod_chan = eod_chan[filtered_out_indices]
-                filteredout_is_differential = is_differential[filtered_out_indices]
-                filteredout_final_peak_idc = final_peak_idc[filtered_out_indices]
-                filteredout_final_trough_idc = final_trough_idc[filtered_out_indices]
-                filteredout_unique_midpoints = unique_midpoints[filtered_out_indices]
-                filteredout_unique_peaks = unique_peaks[filtered_out_indices]
-                filteredout_unique_troughs = unique_troughs[filtered_out_indices]
-                filteredout_unique_widths = unique_widths[filtered_out_indices]
-                filteredout_original_pulse_orientation = original_pulse_orientation[filtered_out_indices]
-                filteredout_waveform_lengths = waveform_lengths[filtered_out_indices]
-                # Features
-                filteredout_durations_us = np.abs(filteredout_final_peak_idc - filteredout_final_trough_idc) / rate * 1e6
-                filteredout_features = pd.DataFrame({
-                    'pp_dur_us': filteredout_durations_us,
-                    'pp_ratio': amplitude_ratios[filtered_out_indices],
-                })
-                # Timestamps
-                filteredout_eod_timestamps = [file_set['timestamp'][n] + dt.timedelta(seconds=filteredout_unique_midpoints[i]/rate) for i in range(len(filteredout_unique_midpoints))]
-                # Table
-                filteredout_eod_table = pd.DataFrame({
-                    'timestamp': filteredout_eod_timestamps,
-                    'midpoint_idx': filteredout_unique_midpoints,
-                    'peak_idx': filteredout_final_peak_idc,
-                    'trough_idx': filteredout_final_trough_idc,
-                    'eod_channel': filteredout_eod_chan,
-                    'is_differential': filteredout_is_differential,
-                    'eod_amplitude': filteredout_eod_amp,
-                    'pulse_width': filteredout_unique_widths,
-                    'pulse_orientation': filteredout_original_pulse_orientation,
-                    'original_peak_idx': filteredout_unique_peaks,
-                    'original_trough_idx': filteredout_unique_troughs
-                })
-                for ch in range(n_channels):
-                    filteredout_eod_table[f'amplitude_ch{ch}'] = filteredout_amps[:, ch] if len(filteredout_amps) > 0 else []
-                for ch in range(n_channels - 1):
-                    filteredout_eod_table[f'correlation_ch{ch}_{ch+1}'] = filteredout_cor_coeffs[:, ch] if len(filteredout_cor_coeffs) > 0 else []
-                filteredout_eod_table['waveform_length'] = filteredout_waveform_lengths if len(filteredout_waveform_lengths) > 0 else []
-                filteredout_eod_table = filteredout_eod_table.join(filteredout_features)
+        if len(filtered_out_indices) > 0:
+            filteredout_eod_waveforms = [eod_waveforms[i] for i in filtered_out_indices]
+            filteredout_ch_amps = ch_amps[filtered_out_indices]
+            filteredout_eod_amp = eod_amp[filtered_out_indices]
+            filteredout_ch_cor_coeffs = ch_cor_coeffs[filtered_out_indices]
+            filteredout_eod_chan = eod_chan[filtered_out_indices]
+            filteredout_is_differential = is_differential[filtered_out_indices]
+            filteredout_final_peak_idc = final_peak_idc[filtered_out_indices]
+            filteredout_final_trough_idc = final_trough_idc[filtered_out_indices]
+            filteredout_unique_midpoints = unique_midpoints[filtered_out_indices]
+            filteredout_unique_peaks = unique_peaks[filtered_out_indices]
+            filteredout_unique_troughs = unique_troughs[filtered_out_indices]
+            filteredout_unique_widths = unique_widths[filtered_out_indices]
+            filteredout_original_pulse_orientation = original_pulse_orientation[filtered_out_indices]
+            filteredout_waveform_lengths = waveform_lengths[filtered_out_indices]
+            # Features
+            filteredout_durations_us = np.abs(filteredout_final_peak_idc - filteredout_final_trough_idc) / rate * 1e6
+            filteredout_features = pd.DataFrame({
+                'pp_dur_us': filteredout_durations_us,
+                'pp_ratio': amplitude_ratios[filtered_out_indices],
+            })
+            # Timestamps
+            filteredout_eod_timestamps = [file_set['timestamp'][n] + dt.timedelta(seconds=filteredout_unique_midpoints[i]/rate) for i in range(len(filteredout_unique_midpoints))]
+            # Table
+            filteredout_eod_table = pd.DataFrame({
+                'timestamp': filteredout_eod_timestamps,
+                'midpoint_idx': filteredout_unique_midpoints,
+                'peak_idx': filteredout_final_peak_idc,
+                'trough_idx': filteredout_final_trough_idc,
+                'eod_channel': filteredout_eod_chan,
+                'is_differential': filteredout_is_differential,
+                'eod_amplitude': filteredout_eod_amp,
+                'pulse_width': filteredout_unique_widths,
+                'pulse_orientation': filteredout_original_pulse_orientation,
+                'original_peak_idx': filteredout_unique_peaks,
+                'original_trough_idx': filteredout_unique_troughs
+            })
+            for ch in range(n_channels):
+                filteredout_eod_table[f'amplitude_ch{ch}'] = filteredout_ch_amps[:, ch] if len(filteredout_ch_amps) > 0 else []
+            for ch in range(n_channels - 1):
+                filteredout_eod_table[f'correlation_ch{ch}_{ch+1}'] = filteredout_ch_cor_coeffs[:, ch] if len(filteredout_ch_cor_coeffs) > 0 else []
+            filteredout_eod_table['waveform_length'] = filteredout_waveform_lengths if len(filteredout_waveform_lengths) > 0 else []
+            filteredout_eod_table = filteredout_eod_table.join(filteredout_features)
+
+            plot_waveform_comparison(filtered_eod_waveforms, filteredout_eod_waveforms, output_path, fname[:-4])
+            compare_table_features(eod_table, filteredout_eod_table, output_path, fname[:-4])
+
+            if parameters['save_filtered_out'][0]:
                 # Save table and waveforms
                 filteredout_eod_table.to_csv(f'{output_path}\\{fname[:-4]}_eod_table_filteredout.csv', index=False)
                 if len(filteredout_eod_waveforms) > 0:
