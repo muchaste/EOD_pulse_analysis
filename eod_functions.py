@@ -394,6 +394,8 @@ def extract_pulse_snippets(data, midpoints, peaks, troughs, widths,
         Variable-length EOD waveform snippets (no zero-padding)
     eod_amp : 1-D array
         Amplitude of extracted waveform
+    amps : 2-D array
+        Max amplitudes across channels for each snippet
     cor_coeffs : 2-D array
         Correlation coefficients between adjacent channels
     eod_chan : 1-D array
@@ -583,7 +585,7 @@ def extract_pulse_snippets(data, midpoints, peaks, troughs, widths,
     if return_diff:
         diff_mask = is_differential == 1
         eod_waveforms = [eod_waveforms[i] for i in range(len(eod_waveforms)) if diff_mask[i]]
-        # amps = amps[diff_mask]
+        amps = amps[diff_mask]
         eod_amp = eod_amp[diff_mask]
         cor_coeffs = cor_coeffs[diff_mask]
         eod_chan = eod_chan[diff_mask]
@@ -596,7 +598,7 @@ def extract_pulse_snippets(data, midpoints, peaks, troughs, widths,
         waveform_lengths = waveform_lengths[diff_mask]
     
     # Return variable-length waveforms as list (no zero-padding)
-    return (eod_waveforms, eod_amp, cor_coeffs, eod_chan, 
+    return (eod_waveforms, eod_amp, amps, cor_coeffs, eod_chan, 
             is_differential, final_peak_idc, final_trough_idc, final_midpoint_idc,
             pulse_orientation, amplitude_ratios, waveform_lengths)
 
