@@ -14,9 +14,8 @@ import datetime as dt
 # Import consolidated EOD functions
 from eod_functions import (
     save_variable_length_waveforms,
-    calculate_storage_efficiency,
+    extract_pulse_snippets_control,
     remove_noise_artifacts,
-    extract_pulse_snippets,
     plot_waveform_comparison,
     compare_table_features,
     filter_waveforms
@@ -122,18 +121,12 @@ for n, filepath in enumerate(filelist):
         print(f"Analyzing {len(midpoints)} unique events...")
 
         # Analyze snippets with variable widths
-        eod_waveforms, eod_amps, eod_widths, ch_amps,  ch_cor_coeffs, eod_chan, is_differential, final_peak_idc, final_trough_idc, final_midpoint_idc, original_pulse_orientation, amplitude_ratios, waveform_lengths = \
-            extract_pulse_snippets(data, rate, unique_midpoints, unique_peaks, unique_troughs, 
-                                       unique_widths, width_factor=parameters['width_fac_extraction'][0], 
-                                       interp_factor=1, center_on_zero_crossing=False, return_diff=True)  # Skip centering for storage efficiency
+        eod_waveforms, eod_amps, eod_widths, snippet_peak_idc, snippet_trough_idc, snippet_midpoint_idc, \
+            final_peak_idc, final_trough_idc, final_midpoint_idc, pulse_orientation, amplitude_ratios, waveform_lengths = \
+            extract_pulse_snippets_control(data, rate, midpoints, peaks, troughs, 
+                                       idths, width_factor=parameters['width_fac_extraction'][0], 
+                                       interp_factor=1, center_on_zero_crossing=False)  # Skip centering for storage efficiency
         
-        # 1. Create filter mask (only differential waveforms + amplitude ratio)
-        # basic_filter_mask = (amplitude_ratios >= parameters['amplitude_ratio_min'][0]) & \
-        #                    (amplitude_ratios <= parameters['amplitude_ratio_max'][0]) & \
-        #                    (eod_widths <= parameters['max_width_s'][0]*1e6) & \
-        #                    (eod_widths >= parameters['min_width_s'][0]*1e6)  # Ensure width is within limits
-        # basic_keep_indices = np.where(basic_filter_mask)[0]
-
         basic_keep_indices = filter_waveforms(
             eod_waveforms, eod_widths, amplitude_ratios, rate,
             dur_min=parameters['min_width_s'][0]*1e6, 
