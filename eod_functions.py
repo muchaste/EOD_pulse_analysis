@@ -354,6 +354,140 @@ def remove_noise_artifacts(waveforms, timestamps, rate,
         return clean_mask, freq_stats
     else:
         return clean_mask
+    
+def calc_fft_peak(signal, rate, lower_thresh=0, upper_thresh=100000, zero_padding_factor=100):
+    """
+    Calculate the frequency with the highest power in the signal using FFT with zero-padding.
+
+    Parameters
+    ----------
+    signal : 1-D array
+        The input signal to analyze.
+    rate : int
+        The sample rate of the signal.
+    lower_thresh : float, optional
+        The lower threshold frequency (default is 0).
+    upper_thresh : float, optional
+        The upper threshold frequency (default is 100000).
+    zero_padding_factor : int, optional
+        The factor by which to zero-pad the signal (default is 10).
+
+    Returns
+    -------
+    peak_freq : float
+        The frequency with the highest power in the signal.
+    """
+    # Zero-pad the signal
+    padded_length = len(signal) * zero_padding_factor
+    fft_spectrum = np.fft.fft(signal, n=padded_length)
+    freqs = np.fft.fftfreq(padded_length, 1/rate)
+
+    # Only consider positive frequencies and within specified range
+    valid_idx = np.where((freqs > lower_thresh) & (freqs < upper_thresh))
+    peak_freq = freqs[valid_idx][np.argmax(np.abs(fft_spectrum[valid_idx]))]
+
+    return peak_freq
+
+def filter_waveforms(eod_waveforms, eod_width, amplitude_ratios, rate,
+                     dur_min=20, dur_max=300,
+                     pp_r_min=0.1, pp_r_max=5,
+                     fft_freq_min=1000, fft_freq_max=10000,
+                     interp_factor=1, return_features=False,
+                     return_params=False):
+    """
+    Filter variable-length waveforms based on duration, amplitude ratio, and FFT frequency.
+    Updated to work with extract_pulse_snippets output format.
+
+    Parameters
+    ----------
+    eod_waveforms : list of 1-D arrays
+        List of variable-length EOD waveforms from extract_pulse_snippets.
+    eod_width : 1-D array
+        Width in microseconds between peak and trough from extract_pulse_snippets.
+    amplitude_ratios : 1-D array
+        Peak-to-trough amplitude ratios from extract_pulse_snippets.
+    rate : int
+        Sample rate of the original signal.
+    dur_min : float, optional
+        Minimum duration threshold in microseconds (default is 20).
+    dur_max : float, optional
+        Maximum duration threshold in microseconds (default is 300).
+    pp_r_min : float, optional
+        Minimum peak-to-peak ratio (default is 0.1).
+    pp_r_max : float, optional
+        Maximum peak-to-peak ratio (default is 5).
+    fft_freq_min : float, optional
+        Minimum FFT frequency threshold (default is 1000).
+    fft_freq_max : float, optional
+        Maximum FFT frequency threshold (default is 10000).
+    interp_factor : int, optional
+        Factor by which the signal is interpolated (default is 1).
+    return_features : bool, optional
+        Returns dataframe with waveform features if True.
+    return_params : bool, optional
+        Returns dataframe with filter parameters if True.
+
+    Returns
+    -------
+    eod_waveforms_keep : list of 1-D arrays
+        Filtered list of variable-length EOD waveforms.
+    keep_indices : 1-D array
+        Indices of the kept waveforms.
+    """
+    n_snippets = len(eod_waveforms)
+    wf_rate = rate * interp_factor
+
+    # Use the pre-calculated eod_width (already in microseconds)
+    wf_durs = eod_width.copy()
+    
+    # Use the pre-calculated amplitude ratios
+    wf_ratios = amplitude_ratios.copy()
+
+    # Calculate FFT peak frequencies for each waveform
+    fft_freqs = np.zeros(n_snippets)
+    for i in range(n_snippets):
+        if len(eod_waveforms[i]) > 0:  # Check for non-empty waveforms
+            try:
+                fft_freqs[i] = calc_fft_peak(eod_waveforms[i], wf_rate, zero_padding_factor=100)
+            except:
+                # If FFT calculation fails, set to a value that will be filtered out
+                fft_freqs[i] = 0
+        else:
+            fft_freqs[i] = 0
+
+    # Apply filters
+    keep_mask = (
+        (wf_durs >= dur_min) & (wf_durs <= dur_max) &
+        (wf_ratios >= pp_r_min) & (wf_ratios <= pp_r_max) &
+        (fft_freqs >= fft_freq_min) & (fft_freqs <= fft_freq_max)
+    )
+
+    keep_indices = np.where(keep_mask)[0]
+    # eod_waveforms_keep = [eod_waveforms[i] for i in keep_indices]
+
+    return_vars = [keep_indices]
+
+    if return_features:
+        features = pd.DataFrame({
+            'pp_dur_us': wf_durs[keep_indices],
+            'pp_ratio': wf_ratios[keep_indices],
+            'fft_freq': fft_freqs[keep_indices]
+        })
+        return_vars.append(features)
+
+    if return_params:
+        params = pd.DataFrame({
+            'dur_min': [dur_min],
+            'dur_max': [dur_max],
+            'pp_r_min': [pp_r_min],
+            'pp_r_max': [pp_r_max],
+            'fft_freq_min': [fft_freq_min],
+            'fft_freq_max': [fft_freq_max]
+        })
+        return_vars.append(params)
+
+    return return_vars
+
 
 # =============================================================================
 # WAVEFORM PROCESSING FUNCTIONS
@@ -1955,10 +2089,6 @@ def plot_waveform_comparison(accepted_waveforms, filtered_waveforms, output_path
     FILTERED WAVEFORMS:
     Length: {np.mean([len(wf) for wf in filt_valid]):.1f} ± {np.std([len(wf) for wf in filt_valid]):.1f}
     Amplitude: {np.mean([np.max(wf)-np.min(wf) for wf in filt_valid]):.3f} ± {np.std([np.max(wf)-np.min(wf) for wf in filt_valid]):.3f}
-    
-    WIDTH FACTOR ASSESSMENT:
-    Width factor of 50 appears {'appropriate' if np.mean([len(wf) for wf in acc_valid]) > 100 else 'potentially too high'}
-    based on average waveform length.
     """
     
     plt.text(0.05, 0.95, summary_text, transform=plt.gca().transAxes, 
@@ -2003,21 +2133,21 @@ def compare_table_features(accepted_table, filtered_table, output_path, file_pre
         axes[0, 1].legend()
         axes[0, 1].grid(True, alpha=0.3)
     
-    # 3. Differential vs single-ended
-    if 'is_differential' in accepted_table.columns and 'is_differential' in filtered_table.columns:
-        acc_diff = accepted_table['is_differential'].value_counts()
-        filt_diff = filtered_table['is_differential'].value_counts()
+    # # 3. Differential vs single-ended
+    # if 'is_differential' in accepted_table.columns and 'is_differential' in filtered_table.columns:
+    #     acc_diff = accepted_table['is_differential'].value_counts()
+    #     filt_diff = filtered_table['is_differential'].value_counts()
         
-        x = np.arange(len(acc_diff))
-        width = 0.35
+    #     x = np.arange(len(acc_diff))
+    #     width = 0.35
         
-        axes[0, 2].bar(x - width/2, acc_diff.values, width, label='Accepted', color='blue', alpha=0.7)
-        axes[0, 2].bar(x + width/2, filt_diff.values, width, label='Filtered', color='red', alpha=0.7)
-        axes[0, 2].set_title('Differential vs Single-ended')
-        axes[0, 2].set_xlabel('Type (0=Single, 1=Differential)')
-        axes[0, 2].set_ylabel('Count')
-        axes[0, 2].legend()
-        axes[0, 2].grid(True, alpha=0.3)
+    #     axes[0, 2].bar(x - width/2, acc_diff.values, width, label='Accepted', color='blue', alpha=0.7)
+    #     axes[0, 2].bar(x + width/2, filt_diff.values, width, label='Filtered', color='red', alpha=0.7)
+    #     axes[0, 2].set_title('Differential vs Single-ended')
+    #     axes[0, 2].set_xlabel('Type (0=Single, 1=Differential)')
+    #     axes[0, 2].set_ylabel('Count')
+    #     axes[0, 2].legend()
+    #     axes[0, 2].grid(True, alpha=0.3)
     
     # 4. Amplitude by channel
     if 'eod_amplitude' in accepted_table.columns and 'eod_amplitude' in filtered_table.columns:
@@ -2032,13 +2162,13 @@ def compare_table_features(accepted_table, filtered_table, output_path, file_pre
         axes[1, 0].grid(True, alpha=0.3)
     
     # 5. Pulse width distribution
-    if 'pulse_width' in accepted_table.columns and 'pulse_width' in filtered_table.columns:
-        axes[1, 1].hist(accepted_table['pulse_width'], bins=50, alpha=0.7, 
+    if 'eod_width_uS' in accepted_table.columns and 'eod_width_uS' in filtered_table.columns:
+        axes[1, 1].hist(accepted_table['eod_width_uS'], bins=50, alpha=0.7, 
                        label=f'Accepted (n={len(accepted_table)})', color='blue', density=True)
-        axes[1, 1].hist(filtered_table['pulse_width'], bins=50, alpha=0.7, 
+        axes[1, 1].hist(filtered_table['eod_width_uS'], bins=50, alpha=0.7, 
                        label=f'Filtered (n={len(filtered_table)})', color='red', density=True)
         axes[1, 1].set_title('Pulse Width Distribution')
-        axes[1, 1].set_xlabel('Width (s)')
+        axes[1, 1].set_xlabel('Width (us)')
         axes[1, 1].set_ylabel('Density')
         axes[1, 1].legend()
         axes[1, 1].grid(True, alpha=0.3)
