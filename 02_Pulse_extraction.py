@@ -18,7 +18,8 @@ from eod_functions import (
     remove_noise_artifacts,
     extract_pulse_snippets,
     plot_waveform_comparison,
-    compare_table_features
+    compare_table_features,
+    filter_waveforms
 )
 
 # Set directories
@@ -78,10 +79,12 @@ parameters = {'thresh':thresh,
               'amplitude_ratio_min':0.1,  # Minimum peak-to-peak amplitude ratio
               'amplitude_ratio_max':3,     # Maximum peak-to-peak amplitude ratio
               'save_filtered_out':True, # Option to save filtered-out pulses for quality control
-              'noise_removal':True,
+              'noise_removal':False,
               'max_freq_content':0.9,  # Allow some high freq for species differences
               'min_snr':1.5,
-              'max_ipi_ratio':100.0
+              'max_ipi_ratio':100.0,
+              'peak_fft_freq_min':500,
+              'peak_fft_freq_max':20000
               }
 
 print(parameters)
@@ -189,12 +192,22 @@ for n, filepath in enumerate(file_set['filename']):
                                        interp_factor=1, center_on_zero_crossing=False, return_diff=True)  # Skip centering for storage efficiency
         
         # 1. Create filter mask (only differential waveforms + amplitude ratio)
-        basic_filter_mask = (amplitude_ratios >= parameters['amplitude_ratio_min'][0]) & \
-                           (amplitude_ratios <= parameters['amplitude_ratio_max'][0]) & \
-                           (eod_widths <= parameters['max_width_s'][0]*1e6) & \
-                           (eod_widths >= parameters['min_width_s'][0]*1e6)  # Ensure width is within limits
-        basic_keep_indices = np.where(basic_filter_mask)[0]
-        
+        # basic_filter_mask = (amplitude_ratios >= parameters['amplitude_ratio_min'][0]) & \
+        #                    (amplitude_ratios <= parameters['amplitude_ratio_max'][0]) & \
+        #                    (eod_widths <= parameters['max_width_s'][0]*1e6) & \
+        #                    (eod_widths >= parameters['min_width_s'][0]*1e6)  # Ensure width is within limits
+        # basic_keep_indices = np.where(basic_filter_mask)[0]
+
+        basic_keep_indices = filter_waveforms(
+            eod_waveforms, eod_widths, amplitude_ratios, rate,
+            dur_min=parameters['min_width_s'][0]*1e6, 
+            dur_max=parameters['max_width_s'][0]*1e6,
+            pp_r_min=parameters['amplitude_ratio_min'][0], 
+            pp_r_max=parameters['amplitude_ratio_max'][0],
+            fft_freq_min=parameters['peak_fft_freq_min'][0], 
+            fft_freq_max=parameters['peak_fft_freq_max'][0]
+        )[0]        
+
         # 2. Apply noise removal to basic filtered events
         if len(basic_keep_indices) > 0:
             # Get variable-length waveforms for basic filtered events
@@ -214,14 +227,14 @@ for n, filepath in enumerate(file_set['filename']):
                 
                 # Combine filters: basic + noise removal
                 final_keep_indices = basic_keep_indices[noise_clean_mask]
-                keep_mask = np.zeros(len(eod_waveforms), dtype=bool)
-                keep_mask[final_keep_indices] = True
+                # keep_mask = np.zeros(len(eod_waveforms), dtype=bool)
+                # keep_mask[final_keep_indices] = True
                 keep_indices = final_keep_indices
             else:
-                keep_mask = basic_filter_mask
+                # keep_mask = basic_filter_mask
                 keep_indices = basic_keep_indices
         else:
-            keep_mask = basic_filter_mask
+            # keep_mask = basic_filter_mask
             keep_indices = basic_keep_indices
 
         # Indices of all events after duplicate removal
@@ -519,6 +532,7 @@ for n, filepath in enumerate(file_set['filename']):
             filteredout_eod_waveforms = [eod_waveforms[i] for i in filtered_out_indices]
             filteredout_ch_amps = ch_amps[filtered_out_indices]
             filteredout_eod_amp = eod_amps[filtered_out_indices]
+            filteredout_eod_widths = eod_widths[filtered_out_indices]
             filteredout_ch_cor_coeffs = ch_cor_coeffs[filtered_out_indices]
             filteredout_eod_chan = eod_chan[filtered_out_indices]
             filteredout_is_differential = is_differential[filtered_out_indices]
@@ -547,7 +561,7 @@ for n, filepath in enumerate(file_set['filename']):
                 'eod_channel': filteredout_eod_chan,
                 # 'is_differential': filteredout_is_differential,
                 'eod_amplitude': filteredout_eod_amp,
-                'pulse_width': filteredout_unique_widths,
+                'eod_width_uS': filteredout_eod_widths,
                 'pulse_orientation': filteredout_original_pulse_orientation,
                 # 'original_peak_idx': filteredout_unique_peaks,
                 # 'original_trough_idx': filteredout_unique_troughs
