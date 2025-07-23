@@ -492,6 +492,184 @@ def filter_waveforms(eod_waveforms, eod_width, amplitude_ratios, rate,
 # =============================================================================
 # WAVEFORM PROCESSING FUNCTIONS
 # =============================================================================
+def extract_pulse_snippets_control(data, rate, midpoints, peaks, troughs, widths, 
+                            width_factor=5.0, interp_factor=1, center_on_zero_crossing=False):
+    """
+    Extract and analyze EOD snippets with variable widths based on detected pulse widths.
+    Optimized to store variable-length waveforms without zero-padding for maximum efficiency.
+    
+    Parameters
+    ----------
+    data : 1-D array
+        The full recording data
+    rate : int
+        Sampling rate    
+    midpoints : 1-D array
+        Midpoint indices of unique events
+    peaks : 1-D array
+        Peak indices of unique events
+    troughs : 1-D array
+        Trough indices of unique events
+    widths : 1-D array
+        Width (in seconds) of unique events
+    width_factor : float
+        Factor to multiply width to get snippet length
+    interp_factor : int
+        Interpolation factor for final waveforms
+    center_on_zero_crossing : bool
+        Whether to center waveforms on zero-crossing (False for storage efficiency)
+    
+    Returns
+    -------
+    eod_waveforms : list of 1-D arrays
+        Variable-length EOD waveform snippets (no zero-padding)
+    eod_amp : 1-D array
+        Amplitude of extracted waveform
+    eod_width : 1-D array
+        Width in microseconds between peak and trough of the extracted waveform
+    snippet_peak_idc : 1-D array
+        Peak indices in the snippet
+    snippet_trough_idc : 1-D array
+        Trough indices in the snippet
+    snippet_midpoint_idc : 1-D array
+        Midpoint indices in the snippet
+    final_peak_idc : 1-D array
+        Final peak indices in original data
+    final_trough_idc : 1-D array
+        Final trough indices in original data
+    pulse_orientation : 1-D array
+        Original pulse orientation before normalization ('HP' or 'HN')
+    amplitude_ratios : 1-D array
+        Peak-to-trough amplitude ratios for filtering
+    waveform_lengths : 1-D array
+        Length of each variable-length waveform
+    """
+    n_events = len(midpoints)
+    
+    # Preallocate arrays
+    eod_waveforms = []  # Store as list for variable lengths
+    eod_amps = np.zeros(n_events)
+    snippet_peak_idc = np.zeros(n_events, dtype=int)
+    snippet_trough_idc = np.zeros(n_events, dtype=int)
+    snippet_midpoint_idc = np.zeros(n_events, dtype=int)
+    final_peak_idc = np.zeros(n_events, dtype=int)
+    final_trough_idc = np.zeros(n_events, dtype=int)
+    final_midpoint_idc = np.zeros(n_events, dtype=int)
+    pulse_orientation = np.array(['HP'] * n_events)  # Store original orientation
+    amplitude_ratios = np.zeros(n_events)  # For amplitude ratio filtering
+    waveform_lengths = np.zeros(n_events, dtype=int)  # Track actual lengths
+    eod_widths = np.zeros(n_events, dtype=int)  # Width between peak and trough
+
+    for i in range(n_events):
+        # Calculate snippet length based on width
+        snippet_samples = int(widths[i] * width_factor)
+        snippet_samples = max(snippet_samples, 20)  # Minimum 20 samples
+        
+        # Extract snippet around midpoint
+        center_idx = int(midpoints[i])
+        half_len = snippet_samples // 2
+        
+        # Calculate bounds and extract only necessary data (no pre-padding)
+        start_idx = max(0, center_idx - half_len)
+        end_idx = min(data.shape[0], center_idx + half_len)
+        actual_length = end_idx - start_idx
+        
+        # Extract actual data without padding initially - MAKE A COPY to avoid modifying original data
+        snippet = data[start_idx:end_idx].copy()
+        
+        # Only pad if absolutely necessary and keep track of padding
+        padding_needed = snippet_samples - actual_length
+        padding_start = max(0, -center_idx + half_len)  # How much padding at start
+        padding_end = max(0, center_idx + half_len - data.shape[0])  # How much padding at end
+        
+        if padding_needed > 0:
+            # Minimal padding - only what's needed
+            if padding_start > 0:
+                snippet = np.pad(snippet, ((padding_start, 0)), mode='constant')
+            if padding_end > 0:
+                snippet = np.pad(snippet, ((0, padding_end)), mode='constant')
+
+        # Calculate amplitudes for each channel
+        if snippet.shape[0] > 0:
+            snippet_peak_idc[i] = np.argmax(snippet)
+            snippet_trough_idc[i] = np.argmin(snippet)
+            snippet_midpoint_idc[i] = (snippet_peak_idc[i] + snippet_trough_idc[i]) // 2
+            eod_amps[i] = abs(snippet[snippet_peak_idc[i]] - snippet[snippet_trough_idc[i]])
+            amplitude_ratios[i] = abs(snippet[snippet_peak_idc[i]] / snippet[snippet_trough_idc[i]]) if snippet[snippet_trough_idc[i]] != 0 else np.inf
+
+            # Normalize amplitude
+            # max_abs = np.max(np.abs(snippet))
+            if snippet[snippet_peak_idc[i]] > 0:
+                snippet /= snippet_peak_idc[i]
+
+            # Determine pulse orientation based on peak and trough indices
+            if snippet_trough_idc[i] < snippet_peak_idc[i]:
+                pulse_orientation[i] = 'HN'  # Head-negative (trough before peak)
+            else:
+                pulse_orientation[i] = 'HP'  # Head-positive (peak before trough)
+            
+            # Normalize orientation (peak before trough) for consistent waveform analysis
+            if snippet_trough_idc[i] < snippet_peak_idc[i]:
+                snippet *= -1
+                snippet_peak_idc[i], snippet_trough_idc[i] = snippet_trough_idc[i], snippet_peak_idc[i]
+
+            # Interpolate if needed
+            if interp_factor > 1:
+                interp_samples = len(snippet) * interp_factor
+                if len(snippet) > 1:
+                    interper = interp1d(np.arange(len(snippet)), snippet, kind='linear')
+                    snippet = interper(np.linspace(0, len(snippet)-1, interp_samples))
+
+            # Optional: Center the waveform on the zero-crossing between peak and trough
+            # Skip this for storage efficiency unless specifically requested
+            if center_on_zero_crossing and len(snippet) > 2:
+                zero_crossing_pos = snippet_peak_idc[i]  # fallback to peak if no zero-crossing found
+                for j in range(snippet_peak_idc[i], min(snippet_trough_idc[i], len(snippet)-1)):
+                    if (snippet[j] >= 0 and snippet[j+1] <= 0) or \
+                       (snippet[j] <= 0 and snippet[j+1] >= 0):
+                        # Interpolate to find exact zero-crossing position
+                        if snippet[j+1] != snippet[j]:
+                            zero_crossing_pos = j - snippet[j] / (snippet[j+1] - snippet[j])
+                        else:
+                            zero_crossing_pos = j
+                        break
+
+                center_pos = len(snippet) // 2
+                shift = center_pos - int(zero_crossing_pos)
+                if abs(shift) < len(snippet):  # Avoid excessive shifts
+                    snippet = np.roll(snippet, shift)
+
+
+            # Store variable-length waveform and its length
+            eod_waveforms.append(snippet)
+            waveform_lengths[i] = len(snippet)
+
+            # Calculate width between peak and trough in uS
+            eod_widths[i] = abs(snippet_peak_idc[i] - snippet_trough_idc[i])*1e6//rate
+
+            # Store final indices (adjust for snippet position)
+            final_peak_idc[i] = start_idx + snippet_peak_idc[i]
+            final_trough_idc[i] = start_idx + snippet_trough_idc[i]
+            final_midpoint_idc[i] = final_peak_idc[i] + (final_trough_idc[i] - final_peak_idc[i]) // 2
+
+        else:
+            # Empty waveform case
+            eod_waveforms.append(np.array([]))
+            waveform_lengths[i] = 0
+            snippet_peak_idc[i] = 0
+            snippet_trough_idc[i] = 0
+            snippet_midpoint_idc[i] = 0
+            eod_amps[i] = 0
+            amplitude_ratios[i] = 0
+            eod_widths[i] = 0
+            final_peak_idc[i] = 0
+            final_trough_idc[i] = 0
+            final_midpoint_idc[i] = 0
+
+    # Return variable-length waveforms as list (no zero-padding)
+    return (eod_waveforms, eod_amps, eod_widths, snippet_peak_idc, snippet_trough_idc, snippet_midpoint_idc,
+            final_peak_idc, final_trough_idc, final_midpoint_idc, pulse_orientation, amplitude_ratios, waveform_lengths)
+
 
 def extract_pulse_snippets(data, rate, midpoints, peaks, troughs, widths, 
                             width_factor=5.0, interp_factor=1, center_on_zero_crossing=False, return_diff=False):
