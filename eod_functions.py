@@ -595,12 +595,6 @@ def extract_pulse_snippets_control(data, rate, midpoints, peaks, troughs, widths
             snippet_trough_idc[i] = np.argmin(snippet)
             snippet_midpoint_idc[i] = (snippet_peak_idc[i] + snippet_trough_idc[i]) // 2
             eod_amps[i] = abs(snippet[snippet_peak_idc[i]] - snippet[snippet_trough_idc[i]])
-            amplitude_ratios[i] = abs(snippet[snippet_peak_idc[i]] / snippet[snippet_trough_idc[i]]) if snippet[snippet_trough_idc[i]] != 0 else np.inf
-
-            # Normalize amplitude
-            # max_abs = np.max(np.abs(snippet))
-            if snippet[snippet_peak_idc[i]] > 0:
-                snippet /= snippet_peak_idc[i]
 
             # Determine pulse orientation based on peak and trough indices
             if snippet_trough_idc[i] < snippet_peak_idc[i]:
@@ -612,6 +606,14 @@ def extract_pulse_snippets_control(data, rate, midpoints, peaks, troughs, widths
             if snippet_trough_idc[i] < snippet_peak_idc[i]:
                 snippet *= -1
                 snippet_peak_idc[i], snippet_trough_idc[i] = snippet_trough_idc[i], snippet_peak_idc[i]
+
+            # Calculate amplitude ratio for filtering
+            amplitude_ratios[i] = abs(snippet[snippet_peak_idc[i]] / snippet[snippet_trough_idc[i]]) if snippet[snippet_trough_idc[i]] != 0 else np.inf
+
+            # Normalize amplitude
+            # max_abs = np.max(np.abs(snippet))
+            # if snippet[snippet_peak_idc[i]] > 0:
+            snippet /= snippet[snippet_peak_idc[i]]  # Normalize to peak
 
             # Interpolate if needed
             if interp_factor > 1:
