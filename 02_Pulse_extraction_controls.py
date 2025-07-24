@@ -72,7 +72,7 @@ def main():
     data = data[:,0]  # Use only the first channel
 
     # Pulse extraction parameters
-    parameters = {'thresh':0.03,  # Threshold for pulse detection
+    parameters = {'thresh':0.005,  # Threshold for pulse detection
                 'min_rel_slope_diff':0.25,
                 'min_width_s':3e-05,  # Minimum pulse width in seconds
                 'max_width_s':0.001,  # Maximum pulse width in seconds
