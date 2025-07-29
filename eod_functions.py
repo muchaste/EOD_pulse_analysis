@@ -34,10 +34,11 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import json
 from pathlib import Path
-from scipy.signal import find_peaks, correlate, windows
+from scipy.signal import find_peaks, correlate, windows, find_peaks
 from scipy.interpolate import interp1d
 from scipy import stats
 import glob
+from thunderfish import pulses
 
 
 # =============================================================================
@@ -414,11 +415,12 @@ def calc_fft_peak(signal, rate, lower_thresh=0, upper_thresh=100000, zero_paddin
 
     return peak_freq
 
-def filter_waveforms(eod_waveforms, eod_widths, amplitude_ratios, rate,
+def filter_waveforms(eod_waveforms, eod_widths, amplitude_ratios, fft_peak_freqs, rate,
                      dur_min=20, dur_max=300,
                      pp_r_min=0.1, pp_r_max=5,
                      fft_freq_min=1000, fft_freq_max=10000,
                      interp_factor=1, return_features=False,
+                     return_filteredout_features=False,
                      return_params=False):
     """
     Filter variable-length waveforms based on duration, amplitude ratio, and FFT frequency.
@@ -432,6 +434,8 @@ def filter_waveforms(eod_waveforms, eod_widths, amplitude_ratios, rate,
         Width in microseconds between peak and trough from extract_pulse_snippets.
     amplitude_ratios : 1-D array
         Peak-to-trough amplitude ratios from extract_pulse_snippets.
+    fft_peak_freqs : 1-D array
+        Pre-calculated FFT peak frequencies from extract_pulse_snippets.
     rate : int
         Sample rate of the original signal.
     dur_min : float, optional
@@ -450,13 +454,13 @@ def filter_waveforms(eod_waveforms, eod_widths, amplitude_ratios, rate,
         Factor by which the signal is interpolated (default is 1).
     return_features : bool, optional
         Returns dataframe with waveform features if True.
+    return_filteredout_features : bool, optional
+        Returns dataframe with filtered out features if True.
     return_params : bool, optional
         Returns dataframe with filter parameters if True.
 
     Returns
     -------
-    eod_waveforms_keep : list of 1-D arrays
-        Filtered list of variable-length EOD waveforms.
     keep_indices : 1-D array
         Indices of the kept waveforms.
     """
@@ -469,17 +473,8 @@ def filter_waveforms(eod_waveforms, eod_widths, amplitude_ratios, rate,
     # Use the pre-calculated amplitude ratios
     wf_ratios = amplitude_ratios.copy()
 
-    # Calculate FFT peak frequencies for each waveform
-    fft_freqs = np.zeros(n_snippets)
-    for i in range(n_snippets):
-        if len(eod_waveforms[i]) > 0:  # Check for non-empty waveforms
-            try:
-                fft_freqs[i] = calc_fft_peak(eod_waveforms[i], wf_rate, zero_padding_factor=100)
-            except:
-                # If FFT calculation fails, set to a value that will be filtered out
-                fft_freqs[i] = 0
-        else:
-            fft_freqs[i] = 0
+    # Use the pre-calculated FFT peak frequencies
+    fft_freqs = fft_peak_freqs.copy()
 
     # Apply filters
     keep_mask = (
@@ -500,6 +495,16 @@ def filter_waveforms(eod_waveforms, eod_widths, amplitude_ratios, rate,
             'fft_freq': fft_freqs[keep_indices]
         })
         return_vars.append(features)
+
+    if return_filteredout_features:
+        all_indices = np.arange(len(eod_waveforms))
+        filtered_out_indices = np.setdiff1d(all_indices, keep_indices)
+        filteredout_features = pd.DataFrame({
+            'pp_dur_us': wf_durs[filtered_out_indices],
+            'pp_ratio': wf_ratios[filtered_out_indices],
+            'fft_freq': fft_freqs[filtered_out_indices]
+        })
+        return_vars.append(filteredout_features)
 
     if return_params:
         params = pd.DataFrame({
@@ -574,7 +579,7 @@ def _extract_snippet_with_padding(data, center_idx, snippet_samples, data_is_2d=
     
     return snippet, start_idx
 
-def _process_waveform_common(waveform, rate, interp_factor=1, center_on_zero_crossing=False):
+def _process_waveform_common(waveform, parameters, rate, interp_factor=1, center_on_zero_crossing=False):
     """
     Apply common processing steps to a waveform snippet.
     
@@ -582,13 +587,14 @@ def _process_waveform_common(waveform, rate, interp_factor=1, center_on_zero_cro
     ----------
     waveform : 1-D array
         Input waveform
+    parameters : pandas DataFrame
+        Parameters DataFrame containing 'thresh', 'min_width_us', 'max_width_us', and 'width_fac_detection'
     rate : int
         Sampling rate
     interp_factor : int
         Interpolation factor
     center_on_zero_crossing : bool
         Whether to center on zero-crossing
-    
     Returns
     -------
     processed_waveform : 1-D array
@@ -607,20 +613,52 @@ def _process_waveform_common(waveform, rate, interp_factor=1, center_on_zero_cro
         Peak-to-trough amplitude ratio
     eod_width : int
         Width in microseconds
+    fft_peak_freq : float
+        Peak FFT frequency of the processed waveform
     """
     if len(waveform) == 0:
         return (np.array([]), 0, 0, 0, 0.0, 'HP', 0.0, 0)
     
+    # # Extract original peak/trough indices
+    # original_peak_idx = np.argmax(waveform)
+    # original_trough_idx = np.argmin(waveform)
+    # original_midpoint_idx = (original_peak_idx + original_trough_idx) // 2
+
     # Interpolate if needed
-    if interp_factor > 1:
-        interp_samples = len(waveform) * interp_factor
+    if parameters['interp_factor'][0] > 1:
+        interp_samples = len(waveform) * parameters['interp_factor'][0]
         if len(waveform) > 1:
-            interper = interp1d(np.arange(len(waveform)), waveform, kind='linear')
+            interper = interp1d(np.arange(len(waveform)), waveform, kind='quadratic')
             waveform = interper(np.linspace(0, len(waveform)-1, interp_samples))
     
     # Find peak and trough in the waveform
-    snippet_peak_idx = np.argmax(waveform)
-    snippet_trough_idx = np.argmin(waveform)
+    snippet_peak_idx = find_peaks(waveform, height=parameters['thresh'][0]/10)[0]
+    snippet_trough_idx = find_peaks(-waveform, height= parameters['thresh'][0]/10)[0]
+    # print(snippet_peak_idx)
+    # print(snippet_trough_idx)
+
+    # If no peaks/troughs found, return empty waveform
+    if len(snippet_peak_idx) == 0 or len(snippet_trough_idx) == 0:  
+        return (np.array([]), 0, 0, 0, 0.0, 'HP', 0.0, 0, 0.0)
+    
+    # If multiple peaks/troughs found, take the first one
+    if len(snippet_peak_idx) > 1:
+        snippet_peak_idx = int(snippet_peak_idx[np.argmax(waveform[snippet_peak_idx])])
+    else:
+        snippet_peak_idx = int(snippet_peak_idx[0])
+
+    if len(snippet_trough_idx) > 1:
+        snippet_trough_idx = int(snippet_trough_idx[np.argmin(waveform[snippet_trough_idx])])
+    else:
+        # Convert to int
+        snippet_trough_idx = int(snippet_trough_idx[0])
+    
+
+    
+    # Calculate width between peak and trough in microseconds
+    eod_width = abs(snippet_peak_idx - snippet_trough_idx) * 1e6 // (rate * parameters['interp_factor'][0])
+    # snippet_peak_idx = np.argmax(waveform)
+    # snippet_trough_idx = np.argmin(waveform)
     snippet_midpoint_idx = (snippet_peak_idx + snippet_trough_idx) // 2
     eod_amp = abs(waveform[snippet_peak_idx] - waveform[snippet_trough_idx])
     
@@ -659,11 +697,18 @@ def _process_waveform_common(waveform, rate, interp_factor=1, center_on_zero_cro
         if abs(shift) < len(waveform):  # Avoid excessive shifts
             waveform = np.roll(waveform, shift)
     
-    # Calculate width between peak and trough in microseconds
-    eod_width = abs(snippet_peak_idx - snippet_trough_idx) * 1e6 // rate
-    
-    return (waveform, snippet_peak_idx, snippet_trough_idx, snippet_midpoint_idx, 
-            eod_amp, pulse_orientation, amplitude_ratio, eod_width)
+    # Calculate FFT peak frequency for the processed waveform
+    if len(waveform) > 0:
+        try:
+            fft_peak_freq = calc_fft_peak(waveform, rate * parameters['interp_factor'][0], zero_padding_factor=100)
+        except:
+            # If FFT calculation fails, set to 0
+            fft_peak_freq = 0.0
+    else:
+        fft_peak_freq = 0.0
+
+    return (waveform, snippet_peak_idx, snippet_trough_idx, snippet_midpoint_idx,
+            eod_amp, pulse_orientation, amplitude_ratio, eod_width, fft_peak_freq)
 
 def _select_differential_channel(snippet, n_channels):
     """
@@ -742,8 +787,8 @@ def _select_differential_channel(snippet, n_channels):
     
     return eod_waveform, eod_chan, is_differential, amps, cor_coeffs
 
-def extract_pulse_snippets_control(data, rate, midpoints, peaks, troughs, widths, 
-                            width_factor=5.0, interp_factor=1, center_on_zero_crossing=False):
+def extract_pulse_snippets_control(data, parameters, rate, midpoints, peaks, troughs, widths, 
+                            center_on_zero_crossing=False):
     """
     Extract and analyze EOD snippets with variable widths based on detected pulse widths.
     For 1-D differential data (already processed control recordings).
@@ -753,6 +798,8 @@ def extract_pulse_snippets_control(data, rate, midpoints, peaks, troughs, widths
     ----------
     data : 1-D array
         The full recording data (differential signal)
+    parameters : pandas DataFrame
+        Parameters DataFrame containing 'thresh', 'min_width_us', 'max_width_us', and 'width_fac_detection'
     rate : int
         Sampling rate    
     midpoints : 1-D array
@@ -763,10 +810,6 @@ def extract_pulse_snippets_control(data, rate, midpoints, peaks, troughs, widths
         Trough indices of unique events
     widths : 1-D array
         Width (in seconds) of unique events
-    width_factor : float
-        Factor to multiply width to get snippet length
-    interp_factor : int
-        Interpolation factor for final waveforms
     center_on_zero_crossing : bool
         Whether to center waveforms on zero-crossing (False for storage efficiency)
     
@@ -788,12 +831,16 @@ def extract_pulse_snippets_control(data, rate, midpoints, peaks, troughs, widths
         Final peak indices in original data
     final_trough_idc : 1-D array
         Final trough indices in original data
+    final_midpoint_idc : 1-D array
+        Final midpoint indices in original data
     pulse_orientation : 1-D array
         Original pulse orientation before normalization ('HP' or 'HN')
     amplitude_ratios : 1-D array
         Peak-to-trough amplitude ratios for filtering
     waveform_lengths : 1-D array
         Length of each variable-length waveform
+    fft_peak_freqs : 1-D array
+        Peak FFT frequency for each waveform
     """
     n_events = len(midpoints)
     
@@ -810,10 +857,11 @@ def extract_pulse_snippets_control(data, rate, midpoints, peaks, troughs, widths
     amplitude_ratios = np.zeros(n_events)  # For amplitude ratio filtering
     waveform_lengths = np.zeros(n_events, dtype=int)  # Track actual lengths
     eod_widths = np.zeros(n_events, dtype=int)  # Width between peak and trough
+    fft_peak_freqs = np.zeros(n_events)  # FFT peak frequencies
 
     for i in range(n_events):
         # Calculate snippet length based on width
-        snippet_samples = int(widths[i] * width_factor)
+        snippet_samples = int(widths[i] * parameters['width_fac_detection'][0])
         snippet_samples = max(snippet_samples, 20)  # Minimum 20 samples
         
         # Extract snippet around midpoint using helper function
@@ -823,17 +871,18 @@ def extract_pulse_snippets_control(data, rate, midpoints, peaks, troughs, widths
         # Process waveform using common helper function
         if snippet.shape[0] > 0:
             (processed_waveform, snippet_peak_idc[i], snippet_trough_idc[i], snippet_midpoint_idc[i],
-             eod_amps[i], pulse_orientation[i], amplitude_ratios[i], eod_widths[i]) = _process_waveform_common(
-                snippet, rate, interp_factor, center_on_zero_crossing)
-            
+             eod_amps[i], pulse_orientation[i], amplitude_ratios[i], eod_widths[i], fft_peak_freqs[i]) = _process_waveform_common(
+                snippet, parameters, rate, center_on_zero_crossing)
+
             # Store variable-length waveform and its length
             eod_waveforms.append(processed_waveform)
             waveform_lengths[i] = len(processed_waveform)
             
             # Store final indices (adjust for snippet position)
-            final_peak_idc[i] = start_idx + snippet_peak_idc[i]
-            final_trough_idc[i] = start_idx + snippet_trough_idc[i]
+            final_peak_idc[i] = start_idx + int(snippet_peak_idc[i]/parameters['interp_factor'][0])
+            final_trough_idc[i] = start_idx + int(snippet_trough_idc[i]/parameters['interp_factor'][0])
             final_midpoint_idc[i] = final_peak_idc[i] + (final_trough_idc[i] - final_peak_idc[i]) // 2
+
         else:
             # Empty waveform case
             eod_waveforms.append(np.array([]))
@@ -844,15 +893,17 @@ def extract_pulse_snippets_control(data, rate, midpoints, peaks, troughs, widths
             eod_amps[i] = 0
             amplitude_ratios[i] = 0
             eod_widths[i] = 0
+            fft_peak_freqs[i] = 0.0
             final_peak_idc[i] = 0
             final_trough_idc[i] = 0
             final_midpoint_idc[i] = 0
 
     # Return variable-length waveforms as list (no zero-padding)
     return (eod_waveforms, eod_amps, eod_widths, snippet_peak_idc, snippet_trough_idc, snippet_midpoint_idc,
-            final_peak_idc, final_trough_idc, final_midpoint_idc, pulse_orientation, amplitude_ratios, waveform_lengths)
-def extract_pulse_snippets(data, rate, midpoints, peaks, troughs, widths, 
-                            width_factor=5.0, interp_factor=1, center_on_zero_crossing=False, return_diff=False):
+            final_peak_idc, final_trough_idc, final_midpoint_idc, pulse_orientation, amplitude_ratios, waveform_lengths, fft_peak_freqs)
+
+def extract_pulse_snippets(data, parameters, rate, midpoints, peaks, troughs, widths, 
+                            center_on_zero_crossing=False, return_diff=False):
     """
     Extract and analyze EOD snippets with variable widths based on detected pulse widths.
     For 2-D multi-channel data (finds polarity flips and extracts differential signals).
@@ -862,6 +913,8 @@ def extract_pulse_snippets(data, rate, midpoints, peaks, troughs, widths,
     ----------
     data : 2-D array
         The full recording data with channels in columns
+    parameters : pandas DataFrame
+        Parameters DataFrame containing 'thresh', 'min_width_us', 'max_width_us', and 'width_fac_detection'
     rate : int
         Sampling rate    
     midpoints : 1-D array
@@ -872,10 +925,6 @@ def extract_pulse_snippets(data, rate, midpoints, peaks, troughs, widths,
         Trough indices of unique events
     widths : 1-D array
         Width (in seconds) of unique events
-    width_factor : float
-        Factor to multiply width to get snippet length
-    interp_factor : int
-        Interpolation factor for final waveforms
     center_on_zero_crossing : bool
         Whether to center waveforms on zero-crossing (False for storage efficiency)
     return_diff : bool
@@ -897,16 +946,26 @@ def extract_pulse_snippets(data, rate, midpoints, peaks, troughs, widths,
         Index of channel/channel-pair used for waveform extraction
     is_differential : 1-D array
         Indicator of differential vs single-ended waveform (1=differential, 0=single-ended)
+    snippet_peak_idc : 1-D array
+        Peak indices in the snippet
+    snippet_trough_idc : 1-D array
+        Trough indices in the snippet
+    snippet_midpoint_idc : 1-D array
+        Midpoint indices in the snippet
     final_peak_idc : 1-D array
         Final peak indices in original data (for normalized head-positive orientation)
     final_trough_idc : 1-D array
         Final trough indices in original data (for normalized head-positive orientation)
+    final_midpoint_idc : 1-D array
+        Final midpoint indices in original data (for normalized head-positive orientation)
     pulse_orientation : 1-D array
         Original pulse orientation before normalization ('HP' or 'HN')
     amplitude_ratios : 1-D array
         Peak-to-trough amplitude ratios for filtering
     waveform_lengths : 1-D array
         Length of each variable-length waveform
+    fft_peak_freqs : 1-D array
+        Peak FFT frequency for each waveform
     """
     n_channels = data.shape[1]
     n_events = len(midpoints)
@@ -928,10 +987,11 @@ def extract_pulse_snippets(data, rate, midpoints, peaks, troughs, widths,
     amplitude_ratios = np.zeros(n_events)  # For amplitude ratio filtering
     waveform_lengths = np.zeros(n_events, dtype=int)  # Track actual lengths
     eod_widths = np.zeros(n_events, dtype=int)  # Width between peak and trough
+    fft_peak_freqs = np.zeros(n_events)  # FFT peak frequencies
     
     for i in range(n_events):
         # Calculate snippet length based on width
-        snippet_samples = int(widths[i] * width_factor)
+        snippet_samples = int(widths[i] * parameters['width_fac_detection'][0])
         snippet_samples = max(snippet_samples, 20)  # Minimum 20 samples
         
         # Extract snippet around midpoint
@@ -944,23 +1004,25 @@ def extract_pulse_snippets(data, rate, midpoints, peaks, troughs, widths,
                 snippet, n_channels)
             
             # Process waveform
+            # print(i)
             (processed_waveform, snippet_peak_idc[i], snippet_trough_idc[i], snippet_midpoint_idc[i],
-             eod_amps[i], pulse_orientation[i], amplitude_ratios[i], eod_widths[i]) = _process_waveform_common(
-                eod_waveform, rate, interp_factor, center_on_zero_crossing)
-            
+             eod_amps[i], pulse_orientation[i], amplitude_ratios[i], eod_widths[i], fft_peak_freqs[i]) = _process_waveform_common(
+                eod_waveform, parameters, rate, center_on_zero_crossing)
+
             # Store variable-length waveform and its length
             eod_waveforms.append(processed_waveform)
             waveform_lengths[i] = len(processed_waveform)
             
             # Store final indices (adjust for snippet position)
-            final_peak_idc[i] = start_idx + snippet_peak_idc[i]
-            final_trough_idc[i] = start_idx + snippet_trough_idc[i]
+            final_peak_idc[i] = start_idx + int(snippet_peak_idc[i]/parameters['interp_factor'][0])
+            final_trough_idc[i] = start_idx + int(snippet_trough_idc[i]/parameters['interp_factor'][0])
             final_midpoint_idc[i] = final_peak_idc[i] + (final_trough_idc[i] - final_peak_idc[i]) // 2
         else:
             # Empty waveform case
             eod_waveforms.append(np.array([]))
             waveform_lengths[i] = 0
             eod_widths[i] = 0
+            fft_peak_freqs[i] = 0.0
             final_peak_idc[i] = peaks[i]
             final_trough_idc[i] = troughs[i] 
             final_midpoint_idc[i] = midpoints[i]
@@ -981,12 +1043,13 @@ def extract_pulse_snippets(data, rate, midpoints, peaks, troughs, widths,
         amplitude_ratios = amplitude_ratios[diff_mask]
         waveform_lengths = waveform_lengths[diff_mask]
         eod_widths = eod_widths[diff_mask]
+        fft_peak_freqs = fft_peak_freqs[diff_mask]
     
     # Return variable-length waveforms as list (no zero-padding)
     return (eod_waveforms, eod_amps, eod_widths, amps, cor_coeffs, eod_chan, 
             is_differential, snippet_peak_idc, snippet_trough_idc, snippet_midpoint_idc,
             final_peak_idc, final_trough_idc, final_midpoint_idc,
-            pulse_orientation, amplitude_ratios, waveform_lengths)
+            pulse_orientation, amplitude_ratios, waveform_lengths, fft_peak_freqs)
 
 # =============================================================================
 # EVENT EXTRACTION FUNCTIONS
