@@ -102,13 +102,13 @@ else:
         'max_width_us': 1000,  # in microseconds
         'width_fac_detection': 7.0,
         'interp_factor': 3,  # Interpolation factor for waveform extraction
-        'return_diff': True,  # Return differential data
         'amplitude_ratio_min': 0.2,
         'amplitude_ratio_max': 4,
         'save_filtered_out': False,
         'noise_removal': False,
         'peak_fft_freq_min': 50,
-        'peak_fft_freq_max': 10000
+        'peak_fft_freq_max': 10000,
+        'return_diff': True  # Return differential data
     }
 
 # Plot raw data
