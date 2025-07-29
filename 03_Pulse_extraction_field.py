@@ -102,6 +102,7 @@ else:
         'max_width_us': 1000,  # in microseconds
         'width_fac_detection': 7.0,
         'interp_factor': 3,  # Interpolation factor for waveform extraction
+        'return_diff': True,  # Return differential data
         'amplitude_ratio_min': 0.2,
         'amplitude_ratio_max': 4,
         'save_filtered_out': False,
@@ -229,10 +230,39 @@ for n, filepath in enumerate(file_set['filename']):
                     final_peak_idc, final_trough_idc, final_midpoint_idc,
                     original_pulse_orientation, amplitude_ratios, waveform_lengths, fft_peak_freqs
                 ) = extract_pulse_snippets(
-                    data, parameters, rate=rate, midpoints=unique_midpoints, 
-                    peaks=unique_peaks, troughs=unique_troughs, widths=unique_widths, 
+                    data, parameters, rate, unique_midpoints, unique_peaks, unique_troughs, unique_widths,
                     center_on_zero_crossing=False
                     )
+                
+                # Remove duplicates: same channel and midpoint within 3 samples
+                unique_mask = np.ones(len(final_midpoint_idc), dtype=bool)
+                for i in range(len(final_midpoint_idc)):
+                    if unique_mask[i]:
+                        for j in range(i+1, len(final_midpoint_idc)):
+                            if (eod_chan[i] == eod_chan[j] and 
+                                abs(final_midpoint_idc[i] - final_midpoint_idc[j]) <= 3):
+                                unique_mask[j] = False
+                
+                # Filter all arrays by unique_mask
+                eod_waveforms = [eod_waveforms[i] for i in range(len(eod_waveforms)) if unique_mask[i]]
+                eod_amps = eod_amps[unique_mask]
+                eod_widths = eod_widths[unique_mask]
+                ch_amps = ch_amps[unique_mask]
+                ch_cor_coeffs = ch_cor_coeffs[unique_mask]
+                eod_chan = eod_chan[unique_mask]
+                is_differential = is_differential[unique_mask]
+                snippet_peak_idc = snippet_peak_idc[unique_mask]
+                snippet_trough_idc = snippet_trough_idc[unique_mask]
+                snippet_midpoint_idc = snippet_midpoint_idc[unique_mask]
+                final_peak_idc = final_peak_idc[unique_mask]
+                final_trough_idc = final_trough_idc[unique_mask]
+                final_midpoint_idc = final_midpoint_idc[unique_mask]
+                original_pulse_orientation = original_pulse_orientation[unique_mask]
+                amplitude_ratios = amplitude_ratios[unique_mask]
+                waveform_lengths = waveform_lengths[unique_mask]
+                fft_peak_freqs = fft_peak_freqs[unique_mask]
+                
+                print(f"    Removed {np.sum(~unique_mask)} duplicate events")
                 
             except Exception as e:
                 print(f"    Error in waveform extraction: {e}")
