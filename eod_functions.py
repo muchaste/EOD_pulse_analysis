@@ -1000,33 +1000,55 @@ def extract_pulse_snippets(data, parameters, rate, midpoints, peaks, troughs, wi
             # Select best differential channel
             eod_waveform, eod_chan[i], is_differential[i], amps[i, :], cor_coeffs[i, :] = _select_differential_channel(
                 snippet, n_channels)
-            
-            # Process waveform
-            # print(i)
-            (processed_waveform, snippet_peak_idc[i], snippet_trough_idc[i], snippet_midpoint_idc[i],
-             eod_amps[i], pulse_orientation[i], amplitude_ratios[i], eod_widths[i], fft_peak_freqs[i]) = _process_waveform_common(
-                eod_waveform, parameters, rate, center_on_zero_crossing)
+            if parameters['return_diff'][0] and is_differential[i] == 0:
+                # Empty waveform case
+                eod_waveforms.append(np.array([]))
+                waveform_lengths[i] = 0
+                snippet_peak_idc[i] = 0
+                snippet_trough_idc[i] = 0
+                snippet_midpoint_idc[i] = 0
+                eod_amps[i] = 0
+                pulse_orientation[i] = 'HP'
+                amplitude_ratios[i] = 0
+                eod_widths[i] = 0
+                fft_peak_freqs[i] = 0.0
+                final_peak_idc[i] = peaks[i]
+                final_trough_idc[i] = troughs[i] 
+                final_midpoint_idc[i] = midpoints[i]
+            else:
+                # Process waveform
+                # print(i)
+                (processed_waveform, snippet_peak_idc[i], snippet_trough_idc[i], snippet_midpoint_idc[i],
+                eod_amps[i], pulse_orientation[i], amplitude_ratios[i], eod_widths[i], fft_peak_freqs[i]) = _process_waveform_common(
+                    eod_waveform, parameters, rate, center_on_zero_crossing)
 
-            # Store variable-length waveform and its length
-            eod_waveforms.append(processed_waveform)
-            waveform_lengths[i] = len(processed_waveform)
-            
-            # Store final indices (adjust for snippet position)
-            final_peak_idc[i] = start_idx + int(snippet_peak_idc[i]/parameters['interp_factor'][0])
-            final_trough_idc[i] = start_idx + int(snippet_trough_idc[i]/parameters['interp_factor'][0])
-            final_midpoint_idc[i] = final_peak_idc[i] + (final_trough_idc[i] - final_peak_idc[i]) // 2
+                # Store variable-length waveform and its length
+                eod_waveforms.append(processed_waveform)
+                waveform_lengths[i] = len(processed_waveform)
+                
+                # Store final indices (adjust for snippet position)
+                final_peak_idc[i] = start_idx + int(snippet_peak_idc[i]/parameters['interp_factor'][0])
+                final_trough_idc[i] = start_idx + int(snippet_trough_idc[i]/parameters['interp_factor'][0])
+                final_midpoint_idc[i] = final_peak_idc[i] + (final_trough_idc[i] - final_peak_idc[i]) // 2
         else:
             # Empty waveform case
             eod_waveforms.append(np.array([]))
             waveform_lengths[i] = 0
+            snippet_peak_idc[i] = 0
+            snippet_trough_idc[i] = 0
+            snippet_midpoint_idc[i] = 0
+            eod_amps[i] = 0
+            pulse_orientation[i] = 'NA'
+            amplitude_ratios[i] = 0
             eod_widths[i] = 0
             fft_peak_freqs[i] = 0.0
             final_peak_idc[i] = peaks[i]
             final_trough_idc[i] = troughs[i] 
             final_midpoint_idc[i] = midpoints[i]
     
-    # Filter for differential events only if requested
+    # Filter for differential events if requested
     if parameters['return_diff'][0]:
+        print(f"    Filtering for differential events...{len(eod_waveforms)} total, {sum(is_differential)} differential")
         diff_mask = is_differential == 1
         eod_waveforms = [eod_waveforms[i] for i in range(len(eod_waveforms)) if diff_mask[i]]
         amps = amps[diff_mask]
