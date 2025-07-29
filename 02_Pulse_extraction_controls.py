@@ -14,9 +14,6 @@ import os
 from eod_functions import (
     save_variable_length_waveforms,
     extract_pulse_snippets_control,
-    remove_noise_artifacts,
-    plot_waveform_comparison,
-    compare_table_features,
     filter_waveforms
 )
 
@@ -72,27 +69,21 @@ def main():
     data = data[:,0]  # Use only the first channel
 
     # Pulse extraction parameters
-    parameters = {'thresh':0.005,  # Threshold for pulse detection
+    parameters = {'thresh':0.004,  # Reduced threshold for pulse detection to catch low-amplitude fish
                 'min_rel_slope_diff':0.25,
-                'min_width_s':3e-05,  # Minimum pulse width in seconds
-                'max_width_s':0.001,  # Maximum pulse width in seconds
-                'width_fac_detection':10.0,
-                'width_fac_extraction':10.0,  # Factor for variable-width extraction
-                'verbose':0,
-                'return_data':False,
-                # Additional filtering parameters
+                'min_width_us':20,  # Minimum pulse width in microseconds
+                'max_width_us':1000,  # Maximum pulse width in microseconds
+                'width_fac_detection':7.0,
+                'width_fac_extraction':7.0,  # Factor for variable-width extraction
+                'interp_factor':3,  # Interpolation factor for waveform extraction
                 'amplitude_ratio_min':0.1,  # Minimum peak-to-peak amplitude ratio
-                'amplitude_ratio_max':3,     # Maximum peak-to-peak amplitude ratio
+                'amplitude_ratio_max':10,     # Maximum peak-to-peak amplitude ratio
                 'save_filtered_out':True, # Option to save filtered-out pulses for quality control
-                'noise_removal':False,
-                'max_freq_content':0.9,  # Allow some high freq for species differences
-                'min_snr':1.5,
-                'max_ipi_ratio':100.0,
-                'peak_fft_freq_min':500,
+                'peak_fft_freq_min':100,
                 'peak_fft_freq_max':20000,
-                'clip_threshold':1.6  # Threshold for clipping detection (1.6 is conservative, adjust as needed)
+                'clip_threshold':1.6,  # Threshold for clipping detection (1.6 is conservative, adjust as needed)
+                'top_amplitude_percent':40  # Only keep top x% highest amplitude EODs
                 }
-
 
     # Plot raw data
     plt.figure(figsize=(20, 6))
@@ -188,11 +179,11 @@ def main():
             pulses.detect_pulses(data, rate, 
                                     thresh = parameters['thresh'][0], 
                                     min_rel_slope_diff=parameters['min_rel_slope_diff'][0],
-                                    min_width=parameters['min_width_s'][0],  # in seconds
-                                    max_width=parameters['max_width_s'][0],  # in seconds
+                                    min_width=parameters['min_width_us'][0]/1e6,  # in seconds
+                                    max_width=parameters['max_width_us'][0]/1e6,  # in seconds
                                     width_fac=parameters['width_fac_detection'][0],
-                                    verbose=parameters['verbose'][0],
-                                    return_data=parameters['return_data'][0])
+                                    verbose=0,
+                                    return_data=False)
         
         midpoints = (peaks + troughs) // 2  # Midpoint indices of pulses
 
@@ -203,15 +194,14 @@ def main():
 
             # Analyze snippets with variable widths
             eod_waveforms, eod_amps, eod_widths, snippet_peak_idc, snippet_trough_idc, snippet_midpoint_idc, \
-                final_peak_idc, final_trough_idc, final_midpoint_idc, pulse_orientation, amplitude_ratios, waveform_lengths = \
-                extract_pulse_snippets_control(data, rate, midpoints, peaks, troughs, pulse_widths,
-                                        width_factor=parameters['width_fac_extraction'][0], 
-                                        interp_factor=1, center_on_zero_crossing=False)  # Skip centering for storage efficiency
+                final_peak_idc, final_trough_idc, final_midpoint_idc, pulse_orientation, amplitude_ratios, waveform_lengths, fft_peak_freqs = \
+                extract_pulse_snippets_control(data, parameters, rate=rate, midpoints=midpoints, peaks=peaks, troughs=troughs, widths=pulse_widths,
+                                        center_on_zero_crossing=False)  # Skip centering for storage efficiency
 
             keep_indices, filtered_features = filter_waveforms(
-                eod_waveforms, eod_widths, amplitude_ratios, rate,
-                dur_min=parameters['min_width_s'][0]*1e6, 
-                dur_max=parameters['max_width_s'][0]*1e6,
+                eod_waveforms, eod_widths, amplitude_ratios, fft_peak_freqs, rate*parameters['interp_factor'][0],
+                dur_min=parameters['min_width_us'][0], 
+                dur_max=parameters['max_width_us'][0],
                 pp_r_min=parameters['amplitude_ratio_min'][0], 
                 pp_r_max=parameters['amplitude_ratio_max'][0],
                 fft_freq_min=parameters['peak_fft_freq_min'][0], 
@@ -219,124 +209,99 @@ def main():
                 return_features=True
             )    
 
-            # Indices of all events after duplicate removal
-            all_indices = np.arange(len(eod_waveforms))
-            # Indices of filtered-out events
-            filtered_out_indices = np.setdiff1d(all_indices, keep_indices)
+            # Create complete DataFrame with all extracted data first (without fft_freq_max)
+            complete_eod_table = pd.DataFrame({
+                'species_code': [species_code] * len(eod_waveforms),
+                'individual_id': [individual_id] * len(eod_waveforms),
+                'peak_idx': final_peak_idc,
+                'trough_idx': final_trough_idc,
+                'midpoint_idx': final_midpoint_idc,
+                'snippet_peak_idx': snippet_peak_idc,
+                'snippet_trough_idx': snippet_trough_idc,
+                'snippet_midpoint_idx': snippet_midpoint_idc,
+                'eod_amplitude': eod_amps,
+                'eod_width_uS': eod_widths,
+                'pulse_orientation': pulse_orientation,
+                'amplitude_ratio': amplitude_ratios,
+                'waveform_length': waveform_lengths,
+                'fft_freq_max': fft_peak_freqs
+            })
             
-            # Detect clipped pulses (amplitude >= clip_threshold)
+            # Apply amplitude-based filtering: only keep top X% highest amplitude EODs
+            # First, filter by the initial criteria (duration, ratio, frequency)
+            initially_filtered_table = complete_eod_table.iloc[keep_indices].copy()
+            
+            # Detect clipped pulses (amplitude >= clip_threshold) among the initially filtered events
+            initially_filtered_clipped_mask = initially_filtered_table['eod_amplitude'] >= parameters['clip_threshold'][0]
+            
+            # Get non-clipped events from the initially filtered table
+            non_clipped_filtered_table = initially_filtered_table[~initially_filtered_clipped_mask].copy()
+            
+            if len(non_clipped_filtered_table) > 0:
+                # Check if we have enough non-clipped events to apply percentage filtering
+                if len(non_clipped_filtered_table) >= 50:
+                    # Calculate amplitude threshold for top X% of non-clipped events
+                    amplitude_threshold_percentile = 100 - parameters['top_amplitude_percent'][0]
+                    amplitude_threshold = np.percentile(non_clipped_filtered_table['eod_amplitude'], amplitude_threshold_percentile)
+                    
+                    # Create mask for high-amplitude events among non-clipped
+                    high_amplitude_mask = non_clipped_filtered_table['eod_amplitude'] >= amplitude_threshold
+                    
+                    print(f"  Amplitude filtering: keeping top {parameters['top_amplitude_percent'][0]}% of {len(non_clipped_filtered_table)} non-clipped events")
+                    print(f"    Amplitude threshold: {amplitude_threshold:.4f}")
+                else:
+                    # Take all non-clipped events if fewer than 50
+                    high_amplitude_mask = np.ones(len(non_clipped_filtered_table), dtype=bool)
+                    amplitude_threshold = non_clipped_filtered_table['eod_amplitude'].min() if len(non_clipped_filtered_table) > 0 else 0.0
+                    
+                    print(f"  Amplitude filtering: taking all {len(non_clipped_filtered_table)} non-clipped events (< 50 available)")
+                    print(f"    Minimum amplitude: {amplitude_threshold:.4f}")
+                
+                # Get the indices in the original keep_indices array that correspond to high-amplitude non-clipped events
+                non_clipped_indices_in_keep = np.where(~initially_filtered_clipped_mask)[0]
+                selected_non_clipped_indices = non_clipped_indices_in_keep[high_amplitude_mask]
+                high_amplitude_indices = keep_indices[selected_non_clipped_indices]
+                
+                print(f"    Events after amplitude filtering: {len(high_amplitude_indices)}")
+            else:
+                high_amplitude_indices = np.array([])
+                amplitude_threshold = 0.0
+                print(f"  No non-clipped events available for amplitude filtering")
+            
+            # Detect all clipped pulses (amplitude >= clip_threshold) in original data
             clipped_mask = eod_amps >= parameters['clip_threshold'][0]
-            clipped_indices = np.where(clipped_mask)[0]
             
-            # Separate clipped from normal events
-            normal_keep_indices = keep_indices[~np.isin(keep_indices, clipped_indices)]
-            clipped_keep_indices = keep_indices[np.isin(keep_indices, clipped_indices)]
+            # Create filtering masks using high-amplitude indices
+            keep_mask = np.isin(np.arange(len(eod_waveforms)), high_amplitude_indices)
+            normal_mask = keep_mask & ~clipped_mask
+            clipped_mask = keep_mask & clipped_mask
             
-            print(f"  EODs after filtering: {len(keep_indices)} out of {len(eod_waveforms)}")
-            print(f"    Normal events: {len(normal_keep_indices)}")
-            print(f"    Clipped events (amp >= {parameters['clip_threshold'][0]}): {len(clipped_keep_indices)}")
-
-            # Process normal (non-clipped) events
-            if len(normal_keep_indices) > 0:
-                # Filter all arrays for normal events
-                filtered_eod_waveforms = [eod_waveforms[i] for i in normal_keep_indices]
-                filtered_eod_amps = eod_amps[normal_keep_indices]
-                filtered_eod_widths = eod_widths[normal_keep_indices]
-                filtered_snippet_peak_idc = snippet_peak_idc[normal_keep_indices]
-                filtered_snippet_trough_idc = snippet_trough_idc[normal_keep_indices]
-                filtered_snippet_midpoint_idc = snippet_midpoint_idc[normal_keep_indices]
-                filtered_final_peak_idc = final_peak_idc[normal_keep_indices]
-                filtered_final_trough_idc = final_trough_idc[normal_keep_indices]
-                filtered_final_midpoints = final_midpoint_idc[normal_keep_indices]
-                filtered_pulse_orientation = pulse_orientation[normal_keep_indices]
-                filtered_amplitude_ratios = amplitude_ratios[normal_keep_indices]
-                filtered_waveform_lengths = waveform_lengths[normal_keep_indices]
-                filtered_fft_peaks = np.array([filtered_features['fft_freq'][i] for i, orig_idx in enumerate(keep_indices) if orig_idx in normal_keep_indices])
+            # Filter DataFrames and waveforms using masks
+            eod_table = complete_eod_table[normal_mask].copy()
+            clipped_table = complete_eod_table[clipped_mask].copy()
+            
+            # Add fft_freq_max to the filtered tables
+            # filtered_features['fft_freq'] has the same length as keep_indices
+            if len(filtered_features) > 0 and 'fft_freq' in filtered_features:
+                # Create full-length array with zeros, then fill in the filtered values
+                full_fft_freq = np.zeros(len(eod_waveforms))
+                full_fft_freq[keep_indices] = filtered_features['fft_freq']
+                
+                # Add to the filtered tables
+                eod_table['fft_freq_max'] = full_fft_freq[normal_mask]
+                clipped_table['fft_freq_max'] = full_fft_freq[clipped_mask]
             else:
-                # No normal events
-                filtered_eod_waveforms = []
-                filtered_eod_amps = np.empty(0)
-                filtered_eod_widths = np.empty(0)
-                filtered_snippet_peak_idc = np.empty(0)
-                filtered_snippet_trough_idc = np.empty(0)
-                filtered_snippet_midpoint_idc = np.empty(0)
-                filtered_final_peak_idc = np.empty(0)
-                filtered_final_trough_idc = np.empty(0)
-                filtered_final_midpoints = np.empty(0)
-                filtered_pulse_orientation = np.empty(0)
-                filtered_amplitude_ratios = np.empty(0)
-                filtered_waveform_lengths = np.empty(0)
-                filtered_fft_peaks = np.empty(0)
-
-            # Process clipped events
-            if len(clipped_keep_indices) > 0:
-                # Filter all arrays for clipped events
-                clipped_eod_waveforms = [eod_waveforms[i] for i in clipped_keep_indices]
-                clipped_eod_amps = eod_amps[clipped_keep_indices]
-                clipped_eod_widths = eod_widths[clipped_keep_indices]
-                clipped_snippet_peak_idc = snippet_peak_idc[clipped_keep_indices]
-                clipped_snippet_trough_idc = snippet_trough_idc[clipped_keep_indices]
-                clipped_snippet_midpoint_idc = snippet_midpoint_idc[clipped_keep_indices]
-                clipped_final_peak_idc = final_peak_idc[clipped_keep_indices]
-                clipped_final_trough_idc = final_trough_idc[clipped_keep_indices]
-                clipped_final_midpoints = final_midpoint_idc[clipped_keep_indices]
-                clipped_pulse_orientation = pulse_orientation[clipped_keep_indices]
-                clipped_amplitude_ratios = amplitude_ratios[clipped_keep_indices]
-                clipped_waveform_lengths = waveform_lengths[clipped_keep_indices]
-                clipped_fft_peaks = np.array([filtered_features['fft_freq'][i] for i, orig_idx in enumerate(keep_indices) if orig_idx in clipped_keep_indices])
-            else:
-                # No clipped events
-                clipped_eod_waveforms = []
-                clipped_eod_amps = np.empty(0)
-                clipped_eod_widths = np.empty(0)
-                clipped_snippet_peak_idc = np.empty(0)
-                clipped_snippet_trough_idc = np.empty(0)
-                clipped_snippet_midpoint_idc = np.empty(0)
-                clipped_final_peak_idc = np.empty(0)
-                clipped_final_trough_idc = np.empty(0)
-                clipped_final_midpoints = np.empty(0)
-                clipped_pulse_orientation = np.empty(0)
-                clipped_amplitude_ratios = np.empty(0)
-                clipped_waveform_lengths = np.empty(0)
-                clipped_fft_peaks = np.empty(0)
-
-            # Create results DataFrames with species and individual info
+                # Add zeros if no filtered features
+                eod_table['fft_freq_max'] = np.zeros(len(eod_table))
+                clipped_table['fft_freq_max'] = np.zeros(len(clipped_table))
             
-            # Normal events table
-            eod_table = pd.DataFrame({
-                'species_code': [species_code] * len(filtered_final_peak_idc),
-                'individual_id': [individual_id] * len(filtered_final_peak_idc),
-                'peak_idx': filtered_final_peak_idc,
-                'trough_idx': filtered_final_trough_idc,
-                'midpoint_idx': filtered_final_midpoints,
-                'snippet_peak_idx': filtered_snippet_peak_idc,
-                'snippet_trough_idx': filtered_snippet_trough_idc,
-                'snippet_midpoint_idx': filtered_snippet_midpoint_idc,
-                'eod_amplitude': filtered_eod_amps,
-                'eod_width_uS': filtered_eod_widths,
-                'pulse_orientation': filtered_pulse_orientation,
-                'amplitude_ratio': filtered_amplitude_ratios,
-                'waveform_length': filtered_waveform_lengths,
-                'fft_freq_max': filtered_fft_peaks
-            })
+            # Filter waveforms using the same masks
+            filtered_eod_waveforms = [eod_waveforms[i] for i in np.where(normal_mask)[0]]
+            clipped_eod_waveforms = [eod_waveforms[i] for i in np.where(clipped_mask)[0]]
             
-            # Clipped events table
-            clipped_table = pd.DataFrame({
-                'species_code': [species_code] * len(clipped_final_peak_idc),
-                'individual_id': [individual_id] * len(clipped_final_peak_idc),
-                'peak_idx': clipped_final_peak_idc,
-                'trough_idx': clipped_final_trough_idc,
-                'midpoint_idx': clipped_final_midpoints,
-                'snippet_peak_idx': clipped_snippet_peak_idc,
-                'snippet_trough_idx': clipped_snippet_trough_idc,
-                'snippet_midpoint_idx': clipped_snippet_midpoint_idc,
-                'eod_amplitude': clipped_eod_amps,
-                'eod_width_uS': clipped_eod_widths,
-                'pulse_orientation': clipped_pulse_orientation,
-                'amplitude_ratio': clipped_amplitude_ratios,
-                'waveform_length': clipped_waveform_lengths,
-                'fft_freq_max': clipped_fft_peaks
-            })
+            print(f"  Final EODs after all filtering: {len(high_amplitude_indices)} out of {len(eod_waveforms)} total")
+            print(f"    Normal high-amplitude events: {len(eod_table)}")
+            print(f"    Clipped high-amplitude events (amp >= {parameters['clip_threshold'][0]}): {len(clipped_table)}")
                     
             # Save individual results
             eod_table.to_csv(f'{output_path}\\{individual_id}_eod_table.csv', index=False)
@@ -387,7 +352,7 @@ def main():
             print(f"  Saved {len(eod_table)} normal EOD events and {len(clipped_table)} clipped events")
             
             # Multi-panel summary plot
-            if len(filtered_final_midpoints) > 0:
+            if len(midpoints) > 0:  # Show plot if we have any detections at all
                 
                 # Create figure with custom layout
                 fig = plt.figure(figsize=(20, 12))
@@ -399,14 +364,31 @@ def main():
                 ax1 = fig.add_subplot(gs[0, :])
                 ax1.plot(data, 'k-', linewidth=0.5, alpha=0.7)
                 
-                # Plot filtered (accepted) events
-                if len(filtered_final_peak_idc) > 0:
-                    ax1.plot(filtered_final_peak_idc, 
-                            data[filtered_final_peak_idc], 'o', markersize=4, color='red', alpha=0.8, label='Peaks')
-                    ax1.plot(filtered_final_trough_idc, 
-                            data[filtered_final_trough_idc], 'o', markersize=4, color='blue', alpha=0.8, label='Troughs')
+                # Plot all initially filtered events (before amplitude filtering)
+                if len(keep_indices) > 0:
+                    all_filtered_peaks = final_peak_idc[keep_indices]
+                    all_filtered_troughs = final_trough_idc[keep_indices]
+                    ax1.plot(all_filtered_peaks, 
+                            data[all_filtered_peaks], 'o', markersize=3, color='red', alpha=0.6, label='All filtered')
+                    ax1.plot(all_filtered_troughs, 
+                            data[all_filtered_troughs], 'o', markersize=3, color='blue', alpha=0.6)
                 
-                ax1.set_title(f'{individual_id} - EOD Detections (n: {len(filtered_eod_amps)})', fontsize=14)
+                # Highlight the high-amplitude events (top 30%) in yellow
+                if len(eod_table) > 0:
+                    ax1.plot(eod_table['peak_idx'].values, 
+                            data[eod_table['peak_idx'].values], 'o', markersize=4, color='yellow', alpha=0.8, 
+                            label=f'Selected high-amplitude peaks')
+                    ax1.plot(eod_table['trough_idx'].values, 
+                            data[eod_table['trough_idx'].values], 'o', markersize=4, color='orange', alpha=0.8, 
+                            label=f'Selected high-amplitude troughs')
+                
+                # Update title based on filtering approach
+                if 'non_clipped_filtered_table' in locals() and len(non_clipped_filtered_table) >= 50:
+                    title_suffix = f"Top {parameters['top_amplitude_percent'][0]}%: {len(eod_table)}"
+                else:
+                    title_suffix = f"All non-clipped: {len(eod_table)}"
+                
+                ax1.set_title(f'{individual_id} - EOD Detections (Total: {len(keep_indices)}, {title_suffix})', fontsize=14)
                 ax1.set_xlabel('Sample')
                 ax1.set_ylabel('Voltage')
                 ax1.legend()
@@ -417,8 +399,8 @@ def main():
                     # Waveforms are already normalized, just center them by their midpoint
                     centered_waveforms = []
                     for i, wf in enumerate(filtered_eod_waveforms):
-                        # Get the midpoint index for this waveform
-                        midpoint_idx = filtered_snippet_midpoint_idc[i]
+                        # Get the midpoint index for this waveform (from the corresponding DataFrame row)
+                        midpoint_idx = eod_table.iloc[i]['snippet_midpoint_idx']
                         
                         # Center the waveform by shifting so midpoint is at index 0
                         # Create indices relative to midpoint
@@ -498,7 +480,7 @@ def main():
                         if len(wf) > nperseg:
                             # Use scipy.signal.welch for PSD with fixed nperseg
                             from scipy import signal as scipy_signal
-                            f, psd = scipy_signal.welch(wf, fs=rate, nperseg=nperseg)
+                            f, psd = scipy_signal.welch(wf, fs=rate*parameters['interp_factor'][0], nperseg=nperseg)
                             if freqs is None:
                                 freqs = f
                             psds.append(psd)
@@ -526,12 +508,21 @@ def main():
 
 
                 # Add summary statistics as text
-                stats_text = f"Total detections: {len(filtered_eod_amps)}\n"
-                if len(filtered_eod_amps) > 0:
-                    stats_text += f"Mean amplitude: {np.mean(filtered_eod_amps):.4f}\n"
-                    stats_text += f"Mean width: {np.mean(filtered_eod_widths):.1f} μs\n"
-                    stats_text += f"Mean amp ratio: {np.mean(filtered_amplitude_ratios):.2f}\n"
-                    stats_text += f"Mean fft peak: {np.mean(filtered_fft_peaks):.2f}\n"
+                total_initially_filtered = len(keep_indices) if 'keep_indices' in locals() else 0
+                non_clipped_count = len(non_clipped_filtered_table) if 'non_clipped_filtered_table' in locals() else 0
+                stats_text = f"Total initial detections: {len(midpoints)}\n"
+                stats_text += f"After quality filtering: {total_initially_filtered}\n"
+                stats_text += f"Non-clipped after filtering: {non_clipped_count}\n"
+                stats_text += f"Selected high-amplitude: {len(eod_table)}\n"
+                if len(eod_table) > 0:
+                    if non_clipped_count >= 50:
+                        stats_text += f"Top {parameters['top_amplitude_percent'][0]}% threshold: {amplitude_threshold:.4f}\n"
+                    else:
+                        stats_text += f"All non-clipped taken (< 50)\n"
+                    stats_text += f"Mean amplitude: {eod_table['eod_amplitude'].mean():.4f}\n"
+                    stats_text += f"Mean width: {eod_table['eod_width_uS'].mean():.1f} μs\n"
+                    stats_text += f"Mean amp ratio: {eod_table['amplitude_ratio'].mean():.2f}\n"
+                    stats_text += f"Mean fft peak: {eod_table['fft_freq_max'].mean():.2f}\n"
 
                 # Place stats in middle right panel
                 ax4 = fig.add_subplot(gs[1, 2])
@@ -543,9 +534,10 @@ def main():
 
                 # Bottom left: Amplitude ratios histogram
                 ax5 = fig.add_subplot(gs[2, 0])
-                if len(filtered_amplitude_ratios) > 0:
-                    ax5.hist(filtered_amplitude_ratios, bins=20, alpha=0.7, color='skyblue', edgecolor='black')
-                    mean_amp_ratio = np.mean(filtered_amplitude_ratios)
+                if len(eod_table) > 0:
+                    amplitude_ratios = eod_table['amplitude_ratio'].values
+                    ax5.hist(amplitude_ratios, bins=20, alpha=0.7, color='skyblue', edgecolor='black')
+                    mean_amp_ratio = amplitude_ratios.mean()
                     ax5.axvline(mean_amp_ratio, color='red', linestyle='--', linewidth=2, 
                             label=f'Mean: {mean_amp_ratio:.2f}')
                     ax5.set_title('Amplitude Ratios')
@@ -556,13 +548,14 @@ def main():
                 else:
                     ax5.text(0.5, 0.5, 'No data available', ha='center', va='center', transform=ax5.transAxes)
                     ax5.set_title('Amplitude Ratios')
+                    
                 # Bottom middle: Waveform lengths histogram
                 ax6 = fig.add_subplot(gs[2, 1])
-                if len(filtered_eod_widths) > 0:
+                if len(eod_table) > 0:
                     # Convert to microseconds for display
-                    eod_widths_us = filtered_eod_widths
+                    eod_widths_us = eod_table['eod_width_uS'].values
                     ax6.hist(eod_widths_us, bins=20, alpha=0.7, color='lightgreen', edgecolor='black')
-                    mean_width = np.mean(eod_widths_us)
+                    mean_width = eod_widths_us.mean()
                     ax6.axvline(mean_width, color='red', linestyle='--', linewidth=2, 
                             label=f'Mean: {mean_width:.1f} μs')
                     ax6.set_title('EOD Widths')
@@ -576,9 +569,10 @@ def main():
                 
                 # Bottom right: peak FFT frequencies histogram
                 ax7 = fig.add_subplot(gs[2, 2])
-                if len(filtered_fft_peaks) > 0:
-                    ax7.hist(filtered_fft_peaks, bins=20, alpha=0.7, color='salmon', edgecolor='black')
-                    mean_peak_freq = np.mean(filtered_fft_peaks)
+                if len(eod_table) > 0:
+                    fft_peaks = eod_table['fft_freq_max'].values
+                    ax7.hist(fft_peaks, bins=20, alpha=0.7, color='salmon', edgecolor='black')
+                    mean_peak_freq = fft_peaks.mean()
                     ax7.axvline(mean_peak_freq, color='red', linestyle='--', linewidth=2, 
                             label=f'Mean: {mean_peak_freq:.1f} Hz')
                     ax7.set_title('Peak FFT Frequencies')
@@ -597,67 +591,75 @@ def main():
                 # Clear data from memory
                 del data
                 gc.collect()
+        else:
+            print(f"  No midpoints detected in {individual_id}, skipping...")
+            # Clear data from memory
+            del data
+            gc.collect()
         
-        # After processing all individuals, create and save master files
-        print("\nCreating master files...")
+    # After processing all individuals, create and save master files
+    print("\nCreating master files...")
+    
+    if all_eod_tables:
+        # Combine all normal EOD tables
+        master_eod_table = pd.concat(all_eod_tables, ignore_index=True)
+        master_eod_table.to_csv(f'{output_path}\\master_eod_table.csv', index=False)
+        print(f"Master EOD table saved: master_eod_table.csv ({len(master_eod_table)} events)")
         
-        if all_eod_tables:
-            # Combine all normal EOD tables
-            master_eod_table = pd.concat(all_eod_tables, ignore_index=True)
-            master_eod_table.to_csv(f'{output_path}\\master_eod_table.csv', index=False)
-            print(f"Master EOD table saved: master_eod_table.csv ({len(master_eod_table)} events)")
+        # Combine all normal waveforms
+        if all_waveform_data:
+            all_combined_waveforms = []
+            for wf_data in all_waveform_data:
+                all_combined_waveforms.extend(wf_data['waveforms'])
             
-            # Combine all normal waveforms
-            if all_waveform_data:
-                all_combined_waveforms = []
-                for wf_data in all_waveform_data:
-                    all_combined_waveforms.extend(wf_data['waveforms'])
-                
-                if all_combined_waveforms:
-                    master_waveform_metadata = save_variable_length_waveforms(
-                        all_combined_waveforms, 
-                        f'{output_path}\\master_eod_waveforms'
-                    )
-                    print(f"Master waveforms saved: master_eod_waveforms_concatenated.npz ({len(all_combined_waveforms)} waveforms)")
+            if all_combined_waveforms:
+                master_waveform_metadata = save_variable_length_waveforms(
+                    all_combined_waveforms, 
+                    f'{output_path}\\master_eod_waveforms'
+                )
+                print(f"Master waveforms saved: master_eod_waveforms_concatenated.npz ({len(all_combined_waveforms)} waveforms)")
+    
+    if all_clipped_tables:
+        # Combine all clipped EOD tables
+        master_clipped_table = pd.concat(all_clipped_tables, ignore_index=True)
+        master_clipped_table.to_csv(f'{output_path}\\master_clipped_eod_table.csv', index=False)
+        print(f"Master clipped table saved: master_clipped_eod_table.csv ({len(master_clipped_table)} events)")
         
-        if all_clipped_tables:
-            # Combine all clipped EOD tables
-            master_clipped_table = pd.concat(all_clipped_tables, ignore_index=True)
-            master_clipped_table.to_csv(f'{output_path}\\master_clipped_eod_table.csv', index=False)
-            print(f"Master clipped table saved: master_clipped_eod_table.csv ({len(master_clipped_table)} events)")
+        # Combine all clipped waveforms
+        if all_clipped_waveforms:
+            all_combined_clipped_waveforms = []
+            for wf_data in all_clipped_waveforms:
+                all_combined_clipped_waveforms.extend(wf_data['waveforms'])
             
-            # Combine all clipped waveforms
-            if all_clipped_waveforms:
-                all_combined_clipped_waveforms = []
-                for wf_data in all_clipped_waveforms:
-                    all_combined_clipped_waveforms.extend(wf_data['waveforms'])
-                
-                if all_combined_clipped_waveforms:
-                    master_clipped_waveform_metadata = save_variable_length_waveforms(
-                        all_combined_clipped_waveforms, 
-                        f'{output_path}\\master_clipped_eod_waveforms'
-                    )
-                    print(f"Master clipped waveforms saved: master_clipped_eod_waveforms_concatenated.npz ({len(all_combined_clipped_waveforms)} waveforms)")
-        
-        # Print final summary
-        total_individuals = len(individual_folders)
-        total_normal_events = len(master_eod_table) if all_eod_tables else 0
-        total_clipped_events = len(master_clipped_table) if all_clipped_tables else 0
-        
-        print(f"\n{'='*60}")
-        print("PROCESSING COMPLETE")
-        print(f"{'='*60}")
-        print(f"Total individuals processed: {total_individuals}")
-        print(f"Total normal EOD events: {total_normal_events}")
-        print(f"Total clipped events: {total_clipped_events}")
-        
-        if all_eod_tables:
-            species_counts = master_eod_table['species_code'].value_counts()
-            print(f"Species distribution:")
-            for species, count in species_counts.items():
-                print(f"  {species}: {count} events")
-        
-        print(f"Output directory: {output_path}")
+            if all_combined_clipped_waveforms:
+                master_clipped_waveform_metadata = save_variable_length_waveforms(
+                    all_combined_clipped_waveforms, 
+                    f'{output_path}\\master_clipped_eod_waveforms'
+                )
+                print(f"Master clipped waveforms saved: master_clipped_eod_waveforms_concatenated.npz ({len(all_combined_clipped_waveforms)} waveforms)")
+    
+    # Print final summary
+    total_individuals = len(individual_folders)
+    total_normal_events = len(master_eod_table) if all_eod_tables else 0
+    total_clipped_events = len(master_clipped_table) if all_clipped_tables else 0
+    
+    print(f"\n{'='*60}")
+    print("PROCESSING COMPLETE")
+    print(f"{'='*60}")
+    print(f"Processing parameters:")
+    print(f"  Detection threshold: {parameters['thresh'][0]}")
+    print(f"  Top amplitude percentile: {parameters['top_amplitude_percent'][0]}%")
+    print(f"Total individuals processed: {total_individuals}")
+    print(f"Total high-amplitude EOD events: {total_normal_events}")
+    print(f"Total clipped events: {total_clipped_events}")
+    
+    if all_eod_tables:
+        species_counts = master_eod_table['species_code'].value_counts()
+        print(f"Species distribution:")
+        for species, count in species_counts.items():
+            print(f"  {species}: {count} events")
+    
+    print(f"Output directory: {output_path}")
 
 if __name__ == "__main__":
     main()
