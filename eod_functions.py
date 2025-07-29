@@ -588,7 +588,7 @@ def _process_waveform_common(waveform, parameters, rate, interp_factor=1, center
     waveform : 1-D array
         Input waveform
     parameters : pandas DataFrame
-        Parameters DataFrame containing 'thresh', 'min_width_us', 'max_width_us', and 'width_fac_detection'
+        Parameters DataFrame containing 'thresh', 'width_fac_detection', 'interp_factor', 'return_diff'
     rate : int
         Sampling rate
     interp_factor : int
@@ -903,7 +903,7 @@ def extract_pulse_snippets_control(data, parameters, rate, midpoints, peaks, tro
             final_peak_idc, final_trough_idc, final_midpoint_idc, pulse_orientation, amplitude_ratios, waveform_lengths, fft_peak_freqs)
 
 def extract_pulse_snippets(data, parameters, rate, midpoints, peaks, troughs, widths, 
-                            center_on_zero_crossing=False, return_diff=False):
+                            center_on_zero_crossing=False):
     """
     Extract and analyze EOD snippets with variable widths based on detected pulse widths.
     For 2-D multi-channel data (finds polarity flips and extracts differential signals).
@@ -914,7 +914,7 @@ def extract_pulse_snippets(data, parameters, rate, midpoints, peaks, troughs, wi
     data : 2-D array
         The full recording data with channels in columns
     parameters : pandas DataFrame
-        Parameters DataFrame containing 'thresh', 'min_width_us', 'max_width_us', and 'width_fac_detection'
+        Parameters DataFrame containing 'thresh', 'width_fac_detection', 'interp_factor', 'return_diff'
     rate : int
         Sampling rate    
     midpoints : 1-D array
@@ -927,8 +927,6 @@ def extract_pulse_snippets(data, parameters, rate, midpoints, peaks, troughs, wi
         Width (in seconds) of unique events
     center_on_zero_crossing : bool
         Whether to center waveforms on zero-crossing (False for storage efficiency)
-    return_diff : bool
-        If True, only return differential events (is_differential=1), default False
     
     Returns
     -------
@@ -1028,7 +1026,7 @@ def extract_pulse_snippets(data, parameters, rate, midpoints, peaks, troughs, wi
             final_midpoint_idc[i] = midpoints[i]
     
     # Filter for differential events only if requested
-    if return_diff:
+    if parameters['return_diff'][0]:
         diff_mask = is_differential == 1
         eod_waveforms = [eod_waveforms[i] for i in range(len(eod_waveforms)) if diff_mask[i]]
         amps = amps[diff_mask]
