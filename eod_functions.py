@@ -1246,7 +1246,7 @@ def extract_events(combined_table, max_ipi_seconds=5.0, min_eods_per_event=20, m
             'median_ipi_seconds': time_diffs.iloc[start_idx+1:end_idx].median() if len(event_eods) > 1 else 0,
             'mean_amplitude': event_eods['eod_amplitude'].mean(),
             'max_amplitude': event_eods['eod_amplitude'].max(),
-            'mean_width_ms': event_eods['pulse_width'].mean() * 1000,
+            'mean_width_ms': event_eods['eod_width_us'].mean() * 1000,
             'n_files': event_eods['file_index'].nunique() if 'file_index' in event_eods.columns else 1,
             'file_names': ','.join(event_eods['filename'].unique()) if 'filename' in event_eods.columns else 'unknown'
         }
@@ -1757,7 +1757,7 @@ def cluster_session_eods(event_table, event_waveforms, event_summary, min_cluste
     print(f"Starting hierarchical clustering on {len(event_summary)} events with {n_events} EODs...")
     
     # Step 1: Cluster by pulse width
-    widths = event_table['pulse_width'].values * 1000  # Convert to ms
+    widths = event_table['eod_width_us'].values * 1000  # Convert to ms
     width_labels = bgm_clustering(widths, n_components=5, merge_threshold=0.2)
     
     print(f"Width clustering: {len(np.unique(width_labels))} clusters")
@@ -1943,7 +1943,7 @@ def save_clustering_results(event_table, event_summary, species_labels, individu
                 'individual_ids': ','.join(map(str, individuals)),
                 'event_ids': ','.join(map(str, species_events)),
                 'mean_amplitude': np.mean(event_table.loc[event_table.index[species_mask], 'eod_amplitude']),
-                'mean_width_ms': np.mean(event_table.loc[event_table.index[species_mask], 'pulse_width']) * 1000
+                'mean_width_ms': np.mean(event_table.loc[event_table.index[species_mask], 'eod_width_us']) * 1000
             })
     
     species_df = pd.DataFrame(species_summary)
@@ -1966,7 +1966,7 @@ def create_clustering_plots(event_table, event_waveforms, event_summary, species
     
     valid_mask = species_labels >= 0
     if np.sum(valid_mask) > 0:
-        widths = event_table.loc[event_table.index[valid_mask], 'pulse_width'].values * 1000
+        widths = event_table.loc[event_table.index[valid_mask], 'eod_width_us'].values * 1000
         amplitudes = event_table.loc[event_table.index[valid_mask], 'eod_amplitude'].values
         colors = species_labels[valid_mask]
         
@@ -2492,10 +2492,10 @@ def compare_table_features(accepted_table, filtered_table, output_path, file_pre
         axes[1, 0].grid(True, alpha=0.3)
     
     # 5. Pulse width distribution
-    if 'eod_width_uS' in accepted_table.columns and 'eod_width_uS' in filtered_table.columns:
-        axes[1, 1].hist(accepted_table['eod_width_uS'], bins=50, alpha=0.7, 
+    if 'eod_width_us' in accepted_table.columns and 'eod_width_us' in filtered_table.columns:
+        axes[1, 1].hist(accepted_table['eod_width_us'], bins=50, alpha=0.7, 
                        label=f'Accepted (n={len(accepted_table)})', color='blue', density=True)
-        axes[1, 1].hist(filtered_table['eod_width_uS'], bins=50, alpha=0.7, 
+        axes[1, 1].hist(filtered_table['eod_width_us'], bins=50, alpha=0.7, 
                        label=f'Filtered (n={len(filtered_table)})', color='red', density=True)
         axes[1, 1].set_title('Pulse Width Distribution')
         axes[1, 1].set_xlabel('Width (us)')
