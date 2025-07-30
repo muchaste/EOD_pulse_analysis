@@ -182,41 +182,41 @@ for n, filepath in enumerate(file_set['filename']):
             troughs.append(ch_troughs)
             pulse_widths.append(ch_pulse_widths)
 
-        # Unify events across channels
-        all_events = []
+        # Unify pulses across channels
+        all_pulses = []
         for ch_peaks, ch_troughs, ch_widths in zip(peaks, troughs, pulse_widths):
             n_pairs = min(len(ch_peaks), len(ch_troughs))
             for j in range(n_pairs):
                 mp = (ch_peaks[j] + ch_troughs[j]) // 2
-                all_events.append((mp, ch_peaks[j], ch_troughs[j], ch_widths[j]))
+                all_pulses.append((mp, ch_peaks[j], ch_troughs[j], ch_widths[j]))
 
         # Sort by midpoint and remove duplicates
-        all_events.sort(key=lambda x: x[0])
-        unique_events = []
+        all_pulses.sort(key=lambda x: x[0])
+        unique_pulses = []
         
-        if all_events:
-            last_mp = all_events[0][0]
-            unique_events.append(all_events[0])
-            for event in all_events[1:]:
+        if all_pulses:
+            last_mp = all_pulses[0][0]
+            unique_pulses.append(all_pulses[0])
+            for event in all_pulses[1:]:
                 if event[0] - last_mp > 3:
-                    unique_events.append(event)
+                    unique_pulses.append(event)
                     last_mp = event[0]
-            del all_events
+            del all_pulses
             gc.collect()
         
         # Unpack to arrays for further analysis
-        if unique_events:
-            unique_midpoints = np.array([e[0] for e in unique_events])
-            unique_peaks = np.array([e[1] for e in unique_events])
-            unique_troughs = np.array([e[2] for e in unique_events])
-            unique_widths = np.array([e[3] for e in unique_events])
+        if unique_pulses:
+            unique_midpoints = np.array([e[0] for e in unique_pulses])
+            unique_peaks = np.array([e[1] for e in unique_pulses])
+            unique_troughs = np.array([e[2] for e in unique_pulses])
+            unique_widths = np.array([e[3] for e in unique_pulses])
         else:
             unique_midpoints = np.array([])
             unique_peaks = np.array([])
             unique_troughs = np.array([])
             unique_widths = np.array([])
 
-        print(f"  Found {len(unique_midpoints)} unique events")
+        print(f"  Found {len(unique_midpoints)} unique pulses")
         del peaks, troughs, pulse_widths
         gc.collect()
 
@@ -262,7 +262,7 @@ for n, filepath in enumerate(file_set['filename']):
                 waveform_lengths = waveform_lengths[unique_mask]
                 fft_peak_freqs = fft_peak_freqs[unique_mask]
                 
-                print(f"    Removed {np.sum(~unique_mask)} duplicate events")
+                print(f"    Removed {np.sum(~unique_mask)} duplicate pulses")
                 
             except Exception as e:
                 print(f"    Error in waveform extraction: {e}")
@@ -280,13 +280,13 @@ for n, filepath in enumerate(file_set['filename']):
                     fft_freq_max=parameters['peak_fft_freq_max'][0],
                     return_features=True, return_filteredout_features=True
                 )
-                print(f"    Filtered {len(eod_waveforms) - len(keep_indices)} out of {len(eod_waveforms)} events")
+                print(f"    Filtered {len(eod_waveforms) - len(keep_indices)} out of {len(eod_waveforms)} pulses")
                 
             except Exception as e:
                 print(f"    Error in basic filtering: {e}")
                 keep_indices = np.arange(len(eod_waveforms))
 
-            # Get indices of filtered-out events for QC
+            # Get indices of filtered-out pulses for QC
             all_indices = np.arange(len(eod_waveforms))
             filtered_out_indices = np.setdiff1d(all_indices, keep_indices)
             
@@ -312,7 +312,7 @@ for n, filepath in enumerate(file_set['filename']):
                 'snippet_trough_idx': snippet_trough_idc,
                 'snippet_midpoint_idx': snippet_midpoint_idc,
                 'eod_amplitude': eod_amps,
-                'eod_width_uS': eod_widths,
+                'eod_width_us': eod_widths,
                 'eod_amplitude_ratio': amplitude_ratios,
                 'pulse_orientation': original_pulse_orientation,
                 'waveform_length': waveform_lengths,
@@ -367,7 +367,7 @@ for n, filepath in enumerate(file_set['filename']):
 
                 plt.figure(figsize=(20, 8))
                 for i in range(data.shape[1]-1):
-                    # Find events detected on this differential channel
+                    # Find pulses detected on this differential channel
                     data_diff = np.diff(data[:,i:i+2])
                     ch_diff_idc = np.where(eod_table['eod_channel'] == i)[0]
                     actual_diff_idc = eod_idc[ch_diff_idc]
@@ -377,7 +377,7 @@ for n, filepath in enumerate(file_set['filename']):
                     x_coords = np.arange(0, len(data_diff), step)
                     plt.plot(x_coords, data_diff[::step] + i * offset_diff, linewidth=0.5, label=f'Ch{i}-{i+1}')
                     
-                    # Plot filtered (accepted) events
+                    # Plot filtered (accepted) pulses
                     if len(actual_diff_idc) > 0:
                         plt.plot(eod_table['peak_idx'].iloc[actual_diff_idc], 
                                 data_diff[eod_table['peak_idx'].iloc[actual_diff_idc]] + i * offset_diff, 
@@ -386,9 +386,9 @@ for n, filepath in enumerate(file_set['filename']):
                                 data_diff[eod_table['trough_idx'].iloc[actual_diff_idc]] + i * offset_diff, 
                                 'o', markersize=1, color='blue')
                     
-                    # Plot filtered-out events in grey
+                    # Plot filtered-out pulses in grey
                     if len(filtered_out_indices) > 0:
-                        # Find filtered-out events detected on this differential channel
+                        # Find filtered-out pulses detected on this differential channel
                         filteredout_eod_chan = filteredout_eod_table['eod_channel']
                         filteredout_final_peak_idc = filteredout_eod_table['peak_idx']
                         filteredout_final_trough_idc = filteredout_eod_table['trough_idx']
@@ -419,7 +419,7 @@ for n, filepath in enumerate(file_set['filename']):
                 
                 # Check if we have any data to plot
                 if len(filtered_eod_waveforms) == 0:
-                    plt.text(0.5, 0.5, 'No filtered events to display', ha='center', va='center', 
+                    plt.text(0.5, 0.5, 'No filtered pulses to display', ha='center', va='center', 
                             transform=plt.gcf().transFigure, fontsize=16)
                     plt.savefig(f'{output_path}\\{fname[:-4]}_analysis_summary.png', dpi=150, bbox_inches='tight')
                     plt.close()
@@ -436,7 +436,7 @@ for n, filepath in enumerate(file_set['filename']):
                 
                 # Plot width distribution
                 plt.subplot(1, 3, 2)
-                plt.hist(eod_table['eod_width_uS'], bins=20, alpha=0.7)  # Fewer bins
+                plt.hist(eod_table['eod_width_us'], bins=20, alpha=0.7)  # Fewer bins
                 plt.title(f'EOD Width Distribution (n={len(filtered_eod_waveforms)})')
                 plt.xlabel('Peak-Trough Width (uS)')
                 plt.ylabel('Count')
@@ -458,10 +458,10 @@ for n, filepath in enumerate(file_set['filename']):
             'filename': fname,
             'file_duration_s': file_duration,
             'n_channels': n_channels,
-            'raw_detections': len(unique_events) if 'unique_events' in locals() else 0,
-            'filtered_events': len(filtered_eod_waveforms),
-            'filtering_efficiency': len(filtered_eod_waveforms) / len(unique_events) * 100 if len(unique_events) > 0 else 0,
-            'events_per_second': len(filtered_eod_waveforms) / file_duration if file_duration > 0 else 0,
+            'raw_detections': len(unique_pulses) if 'unique_pulses' in locals() else 0,
+            'filtered_pulses': len(filtered_eod_waveforms),
+            'filtering_efficiency': len(filtered_eod_waveforms) / len(unique_pulses) * 100 if len(unique_pulses) > 0 else 0,
+            'pulses_per_second': len(filtered_eod_waveforms) / file_duration if file_duration > 0 else 0,
         }
         # Save processing stats
         stats_file = os.path.join(output_path, 'processing_stats.csv')
@@ -469,7 +469,7 @@ for n, filepath in enumerate(file_set['filename']):
         if not os.path.exists(stats_file):
             stats_df.to_csv(stats_file, index=False)
         
-        # Optional: Save filtered-out events for quality control
+        # Optional: Save filtered-out pulses for quality control
         if len(filtered_out_indices) > 0 and parameters['save_filtered_out'][0]:
             try:
                 # Create filtered-out data structures  
@@ -498,7 +498,7 @@ for n, filepath in enumerate(file_set['filename']):
                 #     'pp_ratio': filteredout_amplitude_ratios,
                 # })
 
-                # # Generate timestamps for filtered-out events
+                # # Generate timestamps for filtered-out pulses
                 # filteredout_eod_timestamps = []
                 # for i in range(len(filteredout_eod_waveforms)):
                 #     if pd.isna(file_set['timestamp'][n]):
@@ -518,7 +518,7 @@ for n, filepath in enumerate(file_set['filename']):
                 #     'snippet_trough_idx': filteredout_snippet_trough_idc,
                 #     'snippet_midpoint_idx': filteredout_snippet_midpoint_idc,
                 #     'eod_amplitude': filteredout_eod_amp,
-                #     'eod_width_uS': filteredout_eod_widths,
+                #     'eod_width_us': filteredout_eod_widths,
                 #     'eod_amplitude_ratio': filteredout_amplitude_ratios,
                 #     'pulse_orientation': filteredout_original_pulse_orientation,
                 #     'waveform_length': filteredout_waveform_lengths,
