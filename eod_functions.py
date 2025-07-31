@@ -325,10 +325,10 @@ def remove_noise_artifacts(waveforms, timestamps, rate,
     clean_mask : 1D boolean array
         Mask of waveforms to keep (True = keep, False = remove as noise)
     """
-    n_events = len(waveforms)
-    clean_mask = np.ones(n_events, dtype=bool)
+    n_pulses = len(waveforms)
+    clean_mask = np.ones(n_pulses, dtype=bool)
     
-    if n_events == 0:
+    if n_pulses == 0:
         return clean_mask
     
     # Pre-calculate some stats to avoid redundant computation
@@ -336,7 +336,7 @@ def remove_noise_artifacts(waveforms, timestamps, rate,
     valid_waveforms_mask = waveform_lengths > 5  # Need minimum length for analysis
     
     # 1. Remove high-frequency artifacts (electrical noise) - OPTIMIZED FFT ANALYSIS
-    for i in range(n_events):
+    for i in range(n_pulses):
         if valid_waveforms_mask[i]:
             waveform = waveforms[i]
             is_noisy, freq_stats = analyze_waveform_fft(waveform, rate, max_freq_content)
@@ -361,7 +361,7 @@ def remove_noise_artifacts(waveforms, timestamps, rate,
                 if snr_est < min_snr:
                     clean_mask[idx] = False
     
-    # 3. Remove unrealistic inter-pulse intervals (only if we have enough events)
+    # 3. Remove unrealistic inter-pulse intervals (only if we have enough pulses)
     remaining_count = np.sum(clean_mask)
     if remaining_count > 5:
         clean_timestamps = timestamps[clean_mask]
@@ -371,9 +371,9 @@ def remove_noise_artifacts(waveforms, timestamps, rate,
             # Calculate median pulse characteristics for this file
             median_ipi = np.median(ipis)
             
-            # Remove events with unrealistic IPI ratios
+            # Remove pulses with unrealistic IPI ratios
             remaining_indices = np.where(clean_mask)[0]
-            for i, orig_idx in enumerate(remaining_indices[:-1]):  # Exclude last event
+            for i, orig_idx in enumerate(remaining_indices[:-1]):  # Exclude last pulse
                 if i < len(ipis):
                     if ipis[i] < median_ipi / max_ipi_ratio or ipis[i] > median_ipi * max_ipi_ratio:
                         clean_mask[orig_idx] = False
@@ -803,13 +803,13 @@ def extract_pulse_snippets_control(data, parameters, rate, midpoints, peaks, tro
     rate : int
         Sampling rate    
     midpoints : 1-D array
-        Midpoint indices of unique events
+        Midpoint indices of unique pulses
     peaks : 1-D array
-        Peak indices of unique events
+        Peak indices of unique pulses
     troughs : 1-D array
-        Trough indices of unique events
+        Trough indices of unique pulses
     widths : 1-D array
-        Width (in seconds) of unique events
+        Width (in seconds) of unique pulses
     center_on_zero_crossing : bool
         Whether to center waveforms on zero-crossing (False for storage efficiency)
     
@@ -842,24 +842,24 @@ def extract_pulse_snippets_control(data, parameters, rate, midpoints, peaks, tro
     fft_peak_freqs : 1-D array
         Peak FFT frequency for each waveform
     """
-    n_events = len(midpoints)
+    n_pulses = len(midpoints)
     
     # Preallocate arrays
     eod_waveforms = []  # Store as list for variable lengths
-    eod_amps = np.zeros(n_events)
-    snippet_peak_idc = np.zeros(n_events, dtype=int)
-    snippet_trough_idc = np.zeros(n_events, dtype=int)
-    snippet_midpoint_idc = np.zeros(n_events, dtype=int)
-    final_peak_idc = np.zeros(n_events, dtype=int)
-    final_trough_idc = np.zeros(n_events, dtype=int)
-    final_midpoint_idc = np.zeros(n_events, dtype=int)
-    pulse_orientation = np.array(['HP'] * n_events)  # Store original orientation
-    amplitude_ratios = np.zeros(n_events)  # For amplitude ratio filtering
-    waveform_lengths = np.zeros(n_events, dtype=int)  # Track actual lengths
-    eod_widths = np.zeros(n_events, dtype=int)  # Width between peak and trough
-    fft_peak_freqs = np.zeros(n_events)  # FFT peak frequencies
+    eod_amps = np.zeros(n_pulses)
+    snippet_peak_idc = np.zeros(n_pulses, dtype=int)
+    snippet_trough_idc = np.zeros(n_pulses, dtype=int)
+    snippet_midpoint_idc = np.zeros(n_pulses, dtype=int)
+    final_peak_idc = np.zeros(n_pulses, dtype=int)
+    final_trough_idc = np.zeros(n_pulses, dtype=int)
+    final_midpoint_idc = np.zeros(n_pulses, dtype=int)
+    pulse_orientation = np.array(['HP'] * n_pulses)  # Store original orientation
+    amplitude_ratios = np.zeros(n_pulses)  # For amplitude ratio filtering
+    waveform_lengths = np.zeros(n_pulses, dtype=int)  # Track actual lengths
+    eod_widths = np.zeros(n_pulses, dtype=int)  # Width between peak and trough
+    fft_peak_freqs = np.zeros(n_pulses)  # FFT peak frequencies
 
-    for i in range(n_events):
+    for i in range(n_pulses):
         # Calculate snippet length based on width
         snippet_samples = int(widths[i] * parameters['width_fac_detection'][0])
         snippet_samples = max(snippet_samples, 20)  # Minimum 20 samples
@@ -918,13 +918,13 @@ def extract_pulse_snippets(data, parameters, rate, midpoints, peaks, troughs, wi
     rate : int
         Sampling rate    
     midpoints : 1-D array
-        Midpoint indices of unique events
+        Midpoint indices of unique pulses
     peaks : 1-D array
-        Peak indices of unique events
+        Peak indices of unique pulses
     troughs : 1-D array
-        Trough indices of unique events
+        Trough indices of unique pulses
     widths : 1-D array
-        Width (in seconds) of unique events
+        Width (in seconds) of unique pulses
     center_on_zero_crossing : bool
         Whether to center waveforms on zero-crossing (False for storage efficiency)
     
@@ -966,28 +966,28 @@ def extract_pulse_snippets(data, parameters, rate, midpoints, peaks, troughs, wi
         Peak FFT frequency for each waveform
     """
     n_channels = data.shape[1]
-    n_events = len(midpoints)
+    n_pulses = len(midpoints)
     
     # Preallocate arrays
     eod_waveforms = []  # Store as list for variable lengths
-    amps = np.zeros((n_events, n_channels))
-    eod_amps = np.zeros(n_events)
-    cor_coeffs = np.zeros((n_events, n_channels - 1))
-    eod_chan = np.zeros(n_events, dtype=int)
-    is_differential = np.ones(n_events, dtype=int)  # 1=differential, 0=single-ended
-    snippet_peak_idc = np.zeros(n_events, dtype=int)
-    snippet_trough_idc = np.zeros(n_events, dtype=int)
-    snippet_midpoint_idc = np.zeros(n_events, dtype=int)
-    final_peak_idc = np.zeros(n_events, dtype=int)
-    final_trough_idc = np.zeros(n_events, dtype=int)
-    final_midpoint_idc = np.zeros(n_events, dtype=int)
-    pulse_orientation = np.array(['HP'] * n_events)  # Store original orientation
-    amplitude_ratios = np.zeros(n_events)  # For amplitude ratio filtering
-    waveform_lengths = np.zeros(n_events, dtype=int)  # Track actual lengths
-    eod_widths = np.zeros(n_events, dtype=int)  # Width between peak and trough
-    fft_peak_freqs = np.zeros(n_events)  # FFT peak frequencies
+    amps = np.zeros((n_pulses, n_channels))
+    eod_amps = np.zeros(n_pulses)
+    cor_coeffs = np.zeros((n_pulses, n_channels - 1))
+    eod_chan = np.zeros(n_pulses, dtype=int)
+    is_differential = np.ones(n_pulses, dtype=int)  # 1=differential, 0=single-ended
+    snippet_peak_idc = np.zeros(n_pulses, dtype=int)
+    snippet_trough_idc = np.zeros(n_pulses, dtype=int)
+    snippet_midpoint_idc = np.zeros(n_pulses, dtype=int)
+    final_peak_idc = np.zeros(n_pulses, dtype=int)
+    final_trough_idc = np.zeros(n_pulses, dtype=int)
+    final_midpoint_idc = np.zeros(n_pulses, dtype=int)
+    pulse_orientation = np.array(['HP'] * n_pulses)  # Store original orientation
+    amplitude_ratios = np.zeros(n_pulses)  # For amplitude ratio filtering
+    waveform_lengths = np.zeros(n_pulses, dtype=int)  # Track actual lengths
+    eod_widths = np.zeros(n_pulses, dtype=int)  # Width between peak and trough
+    fft_peak_freqs = np.zeros(n_pulses)  # FFT peak frequencies
     
-    for i in range(n_events):
+    for i in range(n_pulses):
         # Calculate snippet length based on width
         snippet_samples = int(widths[i] * parameters['width_fac_detection'][0])
         snippet_samples = max(snippet_samples, 20)  # Minimum 20 samples
@@ -1046,9 +1046,9 @@ def extract_pulse_snippets(data, parameters, rate, midpoints, peaks, troughs, wi
             final_trough_idc[i] = troughs[i] 
             final_midpoint_idc[i] = midpoints[i]
     
-    # Filter for differential events if requested
+    # Filter for differential pulses if requested
     if parameters['return_diff'][0]:
-        print(f"    Filtering for differential events...{len(eod_waveforms)} total, {sum(is_differential)} differential")
+        print(f"    Filtering for differential pulses...{len(eod_waveforms)} total, {sum(is_differential)} differential")
         diff_mask = is_differential == 1
         eod_waveforms = [eod_waveforms[i] for i in range(len(eod_waveforms)) if diff_mask[i]]
         amps = amps[diff_mask]
@@ -1090,11 +1090,9 @@ def load_session_data(session_folder):
     Returns
     -------
     combined_table : pd.DataFrame
-        Combined EOD event table from all files
+        Combined EOD pulse table from all files
     combined_waveforms : list of np.arrays
         Combined waveform data (variable-length waveforms)
-    file_origins : np.array
-        File index for each event (for tracking origin)
     """
     # Find all EOD table files
     table_files = glob.glob(str(Path(session_folder) / "*_eod_table.csv"))
@@ -1106,10 +1104,9 @@ def load_session_data(session_folder):
     
     combined_tables = []
     combined_waveforms = []
-    file_origins = []
     
     for i, table_file in enumerate(sorted(table_files)):
-        # Load event table
+        # Load pulse table
         table = pd.read_csv(table_file)
         if len(table) > 0:
             table['file_index'] = i
@@ -1134,31 +1131,28 @@ def load_session_data(session_folder):
             
             if len(waveforms) == len(table):
                 combined_waveforms.extend(waveforms)
-                file_origins.extend([i] * len(waveforms))
-                print(f"  {Path(table_file).name}: {len(table)} events")
+                print(f"  {Path(table_file).name}: {len(table)} pulses")
             else:
-                print(f"  Warning: Mismatch in {Path(table_file).name} - {len(table)} events, {len(waveforms)} waveforms")
+                print(f"  Warning: Mismatch in {Path(table_file).name} - {len(table)} pulses, {len(waveforms)} waveforms")
                 # Skip this file or handle the mismatch
                 combined_tables.pop()  # Remove the table we just added
     
     if len(combined_tables) == 0:
-        raise ValueError("No events found in any files")
+        raise ValueError("No pulses found in any files")
     
     # Combine all data
     combined_table = pd.concat(combined_tables, ignore_index=True)
-    file_origins = np.array(file_origins)
     
-    print(f"Total events loaded: {len(combined_table)}")
+    print(f"Total pulses loaded: {len(combined_table)}")
     print(f"Total waveforms loaded: {len(combined_waveforms)}")
-    return combined_table, combined_waveforms, file_origins
+    return combined_table, combined_waveforms
 
-def extract_events(combined_table, max_ipi_seconds=5.0, min_eods_per_event=20, min_snr=2.0):
+def extract_events(combined_table, max_ipi_seconds=5.0, min_eods_per_event=20):
     """
     Extract events (fish encounters) from EOD data by temporal clustering.
     
     An event is defined as a sequence of EODs where consecutive EODs are separated
-    by no more than max_ipi_seconds, with at least min_eods_per_event total EODs
-    and at least one EOD meeting the SNR threshold.
+    by no more than max_ipi_seconds, with at least min_eods_per_event total EODs.
     
     Parameters
     ----------
@@ -1168,8 +1162,6 @@ def extract_events(combined_table, max_ipi_seconds=5.0, min_eods_per_event=20, m
         Maximum inter-pulse interval to consider EODs as part of same event
     min_eods_per_event : int
         Minimum number of EODs required per event
-    min_snr : float
-        Minimum SNR required for at least one EOD in the event
     
     Returns
     -------
@@ -1213,21 +1205,6 @@ def extract_events(combined_table, max_ipi_seconds=5.0, min_eods_per_event=20, m
         if len(event_eods) < min_eods_per_event:
             continue
         
-        # Check SNR requirement (if SNR column exists)
-        has_good_snr = True
-        if 'snr' in event_eods.columns:
-            max_snr = event_eods['snr'].max()
-            has_good_snr = max_snr >= min_snr
-        elif 'eod_amplitude' in event_eods.columns:
-            # Use amplitude as proxy for SNR if no SNR column
-            # Assume higher amplitude indicates better SNR
-            max_amplitude = event_eods['eod_amplitude'].max()
-            median_amplitude = combined_table['eod_amplitude'].median()
-            has_good_snr = max_amplitude >= median_amplitude * 1.5
-        
-        if not has_good_snr:
-            continue
-        
         # Valid event - assign labels
         event_labels[start_idx:end_idx] = len(valid_events)
         valid_events.append((start_idx, end_idx))
@@ -1250,10 +1227,6 @@ def extract_events(combined_table, max_ipi_seconds=5.0, min_eods_per_event=20, m
             'n_files': event_eods['file_index'].nunique() if 'file_index' in event_eods.columns else 1,
             'file_names': ','.join(event_eods['filename'].unique()) if 'filename' in event_eods.columns else 'unknown'
         }
-        
-        if 'snr' in event_eods.columns:
-            summary['max_snr'] = event_eods['snr'].max()
-            summary['mean_snr'] = event_eods['snr'].mean()
         
         event_summaries.append(summary)
     
@@ -1419,99 +1392,6 @@ def save_event_results(event_table, event_summary, combined_waveforms, event_lab
     
     print(f"Event extraction results saved to {output_folder}")
     return stats
-
-def create_event_plots(event_table, event_summary, output_folder):
-    """
-    Create visualization plots for event extraction results.
-    
-    Parameters
-    ----------
-    event_table : pd.DataFrame
-        Filtered EOD data
-    event_summary : pd.DataFrame
-        Event summary statistics
-    output_folder : str
-        Path to save plots
-    """
-    output_path = Path(output_folder)
-    
-    if len(event_summary) == 0:
-        print("No events to plot")
-        return
-    
-    # Plot 1: Event timeline
-    plt.figure(figsize=(15, 6))
-    
-    # Convert to datetime for plotting
-    start_times = pd.to_datetime(event_summary['start_time'])
-    durations = event_summary['duration_seconds']
-    n_eods = event_summary['n_eods']
-    
-    # Create timeline plot
-    for i, (start, duration, n_eod) in enumerate(zip(start_times, durations, n_eods)):
-        plt.barh(i, duration/60, left=(start - start_times.min()).total_seconds()/60, 
-                height=0.8, alpha=0.7, label=f'{n_eod} EODs' if i < 5 else "")
-    
-    plt.xlabel('Time (minutes)')
-    plt.ylabel('Event ID')
-    plt.title(f'Event Timeline ({len(event_summary)} events)')
-    plt.grid(True, alpha=0.3)
-    if len(event_summary) <= 5:
-        plt.legend()
-    plt.savefig(output_path / 'event_timeline.png', dpi=150, bbox_inches='tight')
-    plt.close()
-    
-    # Plot 2: Event quality metrics
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
-    
-    # Duration vs number of EODs
-    axes[0,0].scatter(event_summary['duration_seconds']/60, event_summary['n_eods'], alpha=0.6)
-    axes[0,0].set_xlabel('Duration (minutes)')
-    axes[0,0].set_ylabel('Number of EODs')
-    axes[0,0].set_title('Event Duration vs EOD Count')
-    
-    # Mean IPI distribution
-    axes[0,1].hist(event_summary['mean_ipi_seconds'], bins=20, alpha=0.7)
-    axes[0,1].set_xlabel('Mean IPI (seconds)')
-    axes[0,1].set_ylabel('Number of Events')
-    axes[0,1].set_title('Distribution of Mean Inter-Pulse Intervals')
-    
-    # Amplitude distribution
-    axes[1,0].hist(event_summary['mean_amplitude'], bins=20, alpha=0.7)
-    axes[1,0].set_xlabel('Mean Amplitude')
-    axes[1,0].set_ylabel('Number of Events')
-    axes[1,0].set_title('Distribution of Mean Amplitudes')
-    
-    # Width distribution
-    axes[1,1].hist(event_summary['mean_width_ms'], bins=20, alpha=0.7)
-    axes[1,1].set_xlabel('Mean Width (ms)')
-    axes[1,1].set_ylabel('Number of Events')
-    axes[1,1].set_title('Distribution of Mean Pulse Widths')
-    
-    plt.tight_layout()
-    plt.savefig(output_path / 'event_quality_metrics.png', dpi=150, bbox_inches='tight')
-    plt.close()
-    
-    # Plot 3: Event size distribution
-    plt.figure(figsize=(10, 6))
-    
-    plt.subplot(1, 2, 1)
-    plt.hist(event_summary['n_eods'], bins=20, alpha=0.7)
-    plt.xlabel('Number of EODs per Event')
-    plt.ylabel('Number of Events')
-    plt.title('Event Size Distribution')
-    
-    plt.subplot(1, 2, 2)
-    plt.hist(event_summary['duration_seconds']/60, bins=20, alpha=0.7)
-    plt.xlabel('Event Duration (minutes)')
-    plt.ylabel('Number of Events')
-    plt.title('Event Duration Distribution')
-    
-    plt.tight_layout()
-    plt.savefig(output_path / 'event_distributions.png', dpi=150, bbox_inches='tight')
-    plt.close()
-    
-    print(f"Event plots saved to {output_folder}")
 
 def load_event_data(input_folder):
     """
@@ -1757,7 +1637,7 @@ def cluster_session_eods(event_table, event_waveforms, event_summary, min_cluste
     print(f"Starting hierarchical clustering on {len(event_summary)} events with {n_events} EODs...")
     
     # Step 1: Cluster by pulse width
-    widths = event_table['eod_width_us'].values * 1000  # Convert to ms
+    widths = event_table['eod_width_uS'].values * 1000  # Convert to ms
     width_labels = bgm_clustering(widths, n_components=5, merge_threshold=0.2)
     
     print(f"Width clustering: {len(np.unique(width_labels))} clusters")
@@ -1943,7 +1823,7 @@ def save_clustering_results(event_table, event_summary, species_labels, individu
                 'individual_ids': ','.join(map(str, individuals)),
                 'event_ids': ','.join(map(str, species_events)),
                 'mean_amplitude': np.mean(event_table.loc[event_table.index[species_mask], 'eod_amplitude']),
-                'mean_width_ms': np.mean(event_table.loc[event_table.index[species_mask], 'eod_width_us']) * 1000
+                'mean_width_ms': np.mean(event_table.loc[event_table.index[species_mask], 'eod_width_uS']) * 1000
             })
     
     species_df = pd.DataFrame(species_summary)
@@ -1966,7 +1846,7 @@ def create_clustering_plots(event_table, event_waveforms, event_summary, species
     
     valid_mask = species_labels >= 0
     if np.sum(valid_mask) > 0:
-        widths = event_table.loc[event_table.index[valid_mask], 'eod_width_us'].values * 1000
+        widths = event_table.loc[event_table.index[valid_mask], 'eod_width_uS'].values * 1000
         amplitudes = event_table.loc[event_table.index[valid_mask], 'eod_amplitude'].values
         colors = species_labels[valid_mask]
         
@@ -2492,10 +2372,10 @@ def compare_table_features(accepted_table, filtered_table, output_path, file_pre
         axes[1, 0].grid(True, alpha=0.3)
     
     # 5. Pulse width distribution
-    if 'eod_width_us' in accepted_table.columns and 'eod_width_us' in filtered_table.columns:
-        axes[1, 1].hist(accepted_table['eod_width_us'], bins=50, alpha=0.7, 
+    if 'eod_width_uS' in accepted_table.columns and 'eod_width_uS' in filtered_table.columns:
+        axes[1, 1].hist(accepted_table['eod_width_uS'], bins=50, alpha=0.7, 
                        label=f'Accepted (n={len(accepted_table)})', color='blue', density=True)
-        axes[1, 1].hist(filtered_table['eod_width_us'], bins=50, alpha=0.7, 
+        axes[1, 1].hist(filtered_table['eod_width_uS'], bins=50, alpha=0.7, 
                        label=f'Filtered (n={len(filtered_table)})', color='red', density=True)
         axes[1, 1].set_title('Pulse Width Distribution')
         axes[1, 1].set_xlabel('Width (us)')
