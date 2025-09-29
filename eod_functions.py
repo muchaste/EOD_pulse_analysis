@@ -1147,316 +1147,6 @@ def load_session_data(session_folder):
     print(f"Total waveforms loaded: {len(combined_waveforms)}")
     return combined_table, combined_waveforms
 
-def extract_events(combined_table, max_ipi_seconds=5.0, min_eods_per_event=20):
-    """
-    Extract events (fish encounters) from EOD data by temporal clustering.
-    
-    An event is defined as a sequence of EODs where consecutive EODs are separated
-    by no more than max_ipi_seconds, with at least min_eods_per_event total EODs.
-    
-    Parameters
-    ----------
-    combined_table : pd.DataFrame
-        Combined EOD event data with timestamp column
-    max_ipi_seconds : float
-        Maximum inter-pulse interval to consider EODs as part of same event
-    min_eods_per_event : int
-        Minimum number of EODs required per event
-    
-    Returns
-    -------
-    event_table : pd.DataFrame
-        Table with event information and filtered EODs
-    event_labels : np.array
-        Event ID for each EOD (-1 if not part of valid event)
-    event_summary : pd.DataFrame
-        Summary statistics for each event
-    """
-    if len(combined_table) == 0:
-        return combined_table.copy(), np.array([]), pd.DataFrame()
-    
-    print("Extracting events from temporal patterns...")
-    
-    # Sort by timestamp
-    sorted_table = combined_table.sort_values('timestamp').copy()
-    sorted_table['timestamp_dt'] = pd.to_datetime(sorted_table['timestamp'])
-    
-    # Calculate inter-pulse intervals
-    time_diffs = sorted_table['timestamp_dt'].diff().dt.total_seconds()
-    
-    # Identify event boundaries (gaps > max_ipi_seconds)
-    event_boundaries = np.where(time_diffs > max_ipi_seconds)[0]
-    
-    # Create event segments
-    event_starts = np.concatenate([[0], event_boundaries])
-    event_ends = np.concatenate([event_boundaries, [len(sorted_table)]])
-    
-    print(f"Found {len(event_starts)} potential events before filtering...")
-    
-    # Filter events based on criteria
-    valid_events = []
-    event_labels = np.full(len(sorted_table), -1)
-    event_summaries = []
-    
-    for event_id, (start_idx, end_idx) in enumerate(zip(event_starts, event_ends)):
-        event_eods = sorted_table.iloc[start_idx:end_idx]
-        
-        # Check minimum number of EODs
-        if len(event_eods) < min_eods_per_event:
-            continue
-        
-        # Valid event - assign labels
-        event_labels[start_idx:end_idx] = len(valid_events)
-        valid_events.append((start_idx, end_idx))
-        
-        # Calculate event summary statistics
-        duration = (event_eods['timestamp_dt'].max() - event_eods['timestamp_dt'].min()).total_seconds()
-        mean_ipi = time_diffs.iloc[start_idx+1:end_idx].mean() if len(event_eods) > 1 else 0
-        
-        summary = {
-            'event_id': len(valid_events) - 1,
-            'start_time': event_eods['timestamp_dt'].min(),
-            'end_time': event_eods['timestamp_dt'].max(),
-            'duration_seconds': duration,
-            'n_eods': len(event_eods),
-            'mean_ipi_seconds': mean_ipi,
-            'median_ipi_seconds': time_diffs.iloc[start_idx+1:end_idx].median() if len(event_eods) > 1 else 0,
-            'mean_amplitude': event_eods['eod_amplitude'].mean(),
-            'max_amplitude': event_eods['eod_amplitude'].max(),
-            'mean_width_ms': event_eods['eod_width_us'].mean() * 1000,
-            'n_files': event_eods['file_index'].nunique() if 'file_index' in event_eods.columns else 1,
-            'file_names': ','.join(event_eods['filename'].unique()) if 'filename' in event_eods.columns else 'unknown'
-        }
-        
-        event_summaries.append(summary)
-    
-    print(f"Extracted {len(valid_events)} valid events")
-    print(f"Total EODs in events: {np.sum(event_labels >= 0)} / {len(combined_table)}")
-    
-    # Create filtered table with only EODs in valid events
-    valid_mask = event_labels >= 0
-    event_table = sorted_table[valid_mask].copy()
-    event_table['event_id'] = event_labels[valid_mask]
-    
-    # Create event summary DataFrame
-    event_summary = pd.DataFrame(event_summaries)
-    
-    # Reorder event_labels to match original table order
-    # Map back to original indices
-    original_event_labels = np.full(len(combined_table), -1)
-    sorted_indices = sorted_table.index.values
-    original_event_labels[sorted_indices] = event_labels
-    
-    return event_table, original_event_labels, event_summary
-
-def analyze_session_for_events(session_folder, max_ipi_seconds=5.0):
-    """
-    Analyze session data to help choose appropriate event extraction parameters.
-    
-    Parameters
-    ----------
-    session_folder : str
-        Path to folder containing EOD files
-    max_ipi_seconds : float
-        Maximum IPI to consider for event grouping
-    
-    Returns
-    -------
-    analysis : dict
-        Statistics about potential events
-    """
-    combined_table, _, _ = load_session_data(session_folder)
-    
-    if len(combined_table) == 0:
-        return {}
-    
-    # Sort by timestamp
-    sorted_table = combined_table.sort_values('timestamp')
-    sorted_table['timestamp_dt'] = pd.to_datetime(sorted_table['timestamp'])
-    
-    # Calculate inter-pulse intervals
-    time_diffs = sorted_table['timestamp_dt'].diff().dt.total_seconds()
-    
-    # Identify potential events
-    event_boundaries = np.where(time_diffs > max_ipi_seconds)[0]
-    event_starts = np.concatenate([[0], event_boundaries])
-    event_ends = np.concatenate([event_boundaries, [len(sorted_table)]])
-    
-    event_lengths = event_ends - event_starts
-    
-    analysis = {
-        'total_eods': len(combined_table),
-        'potential_events': len(event_starts),
-        'event_lengths': {
-            'min': event_lengths.min(),
-            'max': event_lengths.max(),
-            'mean': event_lengths.mean(),
-            'median': np.median(event_lengths)
-        },
-        'events_with_20_plus_eods': np.sum(event_lengths >= 20),
-        'events_with_10_plus_eods': np.sum(event_lengths >= 10),
-        'events_with_5_plus_eods': np.sum(event_lengths >= 5),
-        'ipi_percentiles': {
-            '50th': np.percentile(time_diffs.dropna(), 50),
-            '90th': np.percentile(time_diffs.dropna(), 90),
-            '95th': np.percentile(time_diffs.dropna(), 95),
-            '99th': np.percentile(time_diffs.dropna(), 99)
-        }
-    }
-    
-    return analysis
-
-def save_event_results(event_table, event_summary, combined_waveforms, event_labels, output_folder):
-    """
-    Save event extraction results to files.
-    
-    Parameters
-    ----------
-    event_table : pd.DataFrame
-        Filtered EOD data (only EODs in valid events)
-    event_summary : pd.DataFrame
-        Summary statistics for each event
-    combined_waveforms : list of np.arrays
-        Variable-length waveform data
-    event_labels : np.array
-        Event ID for each EOD (-1 if not part of valid event)
-    output_folder : str
-        Path to save results
-    """
-    output_path = Path(output_folder)
-    
-    # Save event table
-    event_table.to_csv(output_path / 'session_events_eod_table.csv', index=False)
-    
-    # Save event summary
-    event_summary.to_csv(output_path / 'session_events_summary.csv', index=False)
-    
-    # Save waveforms for events only using new efficient format
-    event_mask = event_labels >= 0
-    event_waveforms = [combined_waveforms[i] for i in range(len(combined_waveforms)) if event_mask[i]]
-    
-    # Save in new variable-length format
-    waveform_base_path = str(output_path / 'session_events_waveforms')
-    metadata = save_variable_length_waveforms(event_waveforms, waveform_base_path)
-    
-    # Also save in legacy CSV format for backward compatibility
-    # (Convert to fixed-length for CSV - pad to median length)
-    if event_waveforms:
-        lengths = [len(wf) for wf in event_waveforms if len(wf) > 0]
-        if lengths:
-            target_length = int(np.median(lengths))
-            padded_waveforms = []
-            for wf in event_waveforms:
-                if len(wf) == 0:
-                    padded_waveforms.append(np.zeros(target_length))
-                elif len(wf) < target_length:
-                    padded_wf = np.pad(wf, (0, target_length - len(wf)), mode='constant')
-                    padded_waveforms.append(padded_wf)
-                elif len(wf) > target_length:
-                    padded_waveforms.append(wf[:target_length])
-                else:
-                    padded_waveforms.append(wf)
-            
-            padded_array = np.array(padded_waveforms)
-            pd.DataFrame(padded_array).to_csv(output_path / 'session_events_waveforms.csv', index=False)
-    
-    # Save event extraction parameters and statistics
-    stats = {
-        'total_eods_loaded': len(event_labels),
-        'eods_in_events': np.sum(event_mask),
-        'eods_filtered_out': np.sum(~event_mask),
-        'total_events': len(event_summary),
-        'extraction_efficiency': np.sum(event_mask) / len(event_labels) if len(event_labels) > 0 else 0
-    }
-    
-    if len(event_summary) > 0:
-        stats.update({
-            'min_event_duration_sec': event_summary['duration_seconds'].min(),
-            'max_event_duration_sec': event_summary['duration_seconds'].max(),
-            'mean_event_duration_sec': event_summary['duration_seconds'].mean(),
-            'min_eods_per_event': event_summary['n_eods'].min(),
-            'max_eods_per_event': event_summary['n_eods'].max(),
-            'mean_eods_per_event': event_summary['n_eods'].mean()
-        })
-    
-    # Add waveform storage information
-    if event_waveforms:
-        stats['waveform_storage'] = {
-            'variable_length_format': True,
-            'total_waveforms': len(event_waveforms),
-            'space_savings_mb': metadata.get('space_savings', {}).get('space_saved_mb', 0)
-        }
-    
-    stats_df = pd.DataFrame([stats])
-    stats_df.to_csv(output_path / 'session_events_extraction_stats.csv', index=False)
-    
-    print(f"Event extraction results saved to {output_folder}")
-    return stats
-
-def load_event_data(input_folder):
-    """
-    Load extracted event data from 03_Event_Extraction.py output.
-    
-    Parameters
-    ----------
-    input_folder : str
-        Path to folder containing event extraction results
-    
-    Returns
-    -------
-    event_table : pd.DataFrame
-        EOD data for valid events
-    event_waveforms : list of np.arrays
-        Variable-length waveform data for valid events
-    event_summary : pd.DataFrame
-        Summary statistics for each event
-    """
-    input_path = Path(input_folder)
-    
-    # Load event data
-    event_table_file = input_path / 'session_events_eod_table.csv'
-    event_summary_file = input_path / 'session_events_summary.csv'
-    
-    if not event_table_file.exists():
-        raise FileNotFoundError(f"Event table not found: {event_table_file}")
-    
-    if not event_summary_file.exists():
-        raise FileNotFoundError(f"Event summary not found: {event_summary_file}")
-    
-    # Load data
-    event_table = pd.read_csv(event_table_file)
-    event_summary = pd.read_csv(event_summary_file)
-    
-    # Load waveforms using new variable-length format
-    waveform_base_path = str(input_path / 'session_events_waveforms')
-    event_waveforms = load_variable_length_waveforms(waveform_base_path)
-    
-    # Fallback to old CSV format if new format doesn't exist
-    if not event_waveforms:
-        old_waveform_file = input_path / 'session_events_waveforms.csv'
-        if old_waveform_file.exists():
-            print("Using legacy CSV format for waveforms")
-            waveforms_csv = pd.read_csv(old_waveform_file).values
-            # Convert to list of arrays for consistency
-            event_waveforms = [waveforms_csv[i, :] for i in range(waveforms_csv.shape[0])]
-        else:
-            raise FileNotFoundError(f"Event waveforms not found: {waveform_base_path} or {old_waveform_file}")
-    
-    print(f"Loaded event data:")
-    print(f"  Events: {len(event_summary)}")
-    print(f"  EODs: {len(event_table)}")
-    print(f"  Waveforms: {len(event_waveforms)}")
-    
-    # Check for length mismatch
-    if len(event_waveforms) != len(event_table):
-        print(f"Warning: Mismatch between table ({len(event_table)}) and waveforms ({len(event_waveforms)})")
-        # Truncate to shorter length
-        min_len = min(len(event_table), len(event_waveforms))
-        event_table = event_table.iloc[:min_len]
-        event_waveforms = event_waveforms[:min_len]
-        print(f"  Truncated to {min_len} entries")
-    
-    return event_table, event_waveforms, event_summary
 
 def bgm_clustering(data, n_components=10, merge_threshold=0.1, use_log=False):
     """
@@ -1637,7 +1327,7 @@ def cluster_session_eods(event_table, event_waveforms, event_summary, min_cluste
     print(f"Starting hierarchical clustering on {len(event_summary)} events with {n_events} EODs...")
     
     # Step 1: Cluster by pulse width
-    widths = event_table['eod_width_uS'].values * 1000  # Convert to ms
+    widths = event_table['eod_width_us'].values * 1000  # Convert to ms
     width_labels = bgm_clustering(widths, n_components=5, merge_threshold=0.2)
     
     print(f"Width clustering: {len(np.unique(width_labels))} clusters")
@@ -1823,7 +1513,7 @@ def save_clustering_results(event_table, event_summary, species_labels, individu
                 'individual_ids': ','.join(map(str, individuals)),
                 'event_ids': ','.join(map(str, species_events)),
                 'mean_amplitude': np.mean(event_table.loc[event_table.index[species_mask], 'eod_amplitude']),
-                'mean_width_ms': np.mean(event_table.loc[event_table.index[species_mask], 'eod_width_uS']) * 1000
+                'mean_width_ms': np.mean(event_table.loc[event_table.index[species_mask], 'eod_width_us']) * 1000
             })
     
     species_df = pd.DataFrame(species_summary)
@@ -1846,7 +1536,7 @@ def create_clustering_plots(event_table, event_waveforms, event_summary, species
     
     valid_mask = species_labels >= 0
     if np.sum(valid_mask) > 0:
-        widths = event_table.loc[event_table.index[valid_mask], 'eod_width_uS'].values * 1000
+        widths = event_table.loc[event_table.index[valid_mask], 'eod_width_us'].values * 1000
         amplitudes = event_table.loc[event_table.index[valid_mask], 'eod_amplitude'].values
         colors = species_labels[valid_mask]
         
@@ -2372,10 +2062,10 @@ def compare_table_features(accepted_table, filtered_table, output_path, file_pre
         axes[1, 0].grid(True, alpha=0.3)
     
     # 5. Pulse width distribution
-    if 'eod_width_uS' in accepted_table.columns and 'eod_width_uS' in filtered_table.columns:
-        axes[1, 1].hist(accepted_table['eod_width_uS'], bins=50, alpha=0.7, 
+    if 'eod_width_us' in accepted_table.columns and 'eod_width_us' in filtered_table.columns:
+        axes[1, 1].hist(accepted_table['eod_width_us'], bins=50, alpha=0.7, 
                        label=f'Accepted (n={len(accepted_table)})', color='blue', density=True)
-        axes[1, 1].hist(filtered_table['eod_width_uS'], bins=50, alpha=0.7, 
+        axes[1, 1].hist(filtered_table['eod_width_us'], bins=50, alpha=0.7, 
                        label=f'Filtered (n={len(filtered_table)})', color='red', density=True)
         axes[1, 1].set_title('Pulse Width Distribution')
         axes[1, 1].set_xlabel('Width (us)')
