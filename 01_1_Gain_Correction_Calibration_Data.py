@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Calibrate EOD logger 4.x recordings
+Calibrate EOD logger 4.x recordings with calibration recordings (1 kHz sine wave)
 """
 import matplotlib.pyplot as plt
 import audioio as aio

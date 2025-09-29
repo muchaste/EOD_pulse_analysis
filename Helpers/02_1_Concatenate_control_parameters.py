@@ -1,4 +1,8 @@
-
+"""
+# 02_1_Concatenate_control_parameters.py
+# Script to concatenate control parameters from extracted EODs from control/catalogue recordings and compute analysis parameters.
+# Saves a parameter file for use in field recording extraction.
+"""
 
 
 import pandas as pd
