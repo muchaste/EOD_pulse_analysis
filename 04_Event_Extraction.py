@@ -13,6 +13,9 @@ Stage 3: Apply size filtering to merged events (preserves complete multi-channel
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import matplotlib.patches as mpatches
+import matplotlib.cm as cm
 # from scipy import signal
 import matplotlib.cm as cm
 import matplotlib.patches as mpatches
@@ -1260,7 +1263,11 @@ if len(wav_files) > 0:
                         for i in range(event_data.shape[1]-1):
                             # Calculate differential signal with memory-efficient approach
                             data_diff = np.diff(event_data[::plot_step, i:i+2], axis=1).flatten()
-                            x_coords = np.arange(0, len(event_data), plot_step)[:len(data_diff)]
+                            
+                            # Create real-time x-coordinates for downsampled data
+                            time_indices = np.arange(0, len(event_data), plot_step)[:len(data_diff)]
+                            time_offsets = pd.to_timedelta(time_indices / sample_rate, unit='s')
+                            x_coords = event_start_time + time_offsets
                             plt.plot(x_coords, data_diff + i * offset_diff, linewidth=0.5, label=f'Ch{i}-{i+1}')
 
                             # Plot detected pulses for this channel
@@ -1268,24 +1275,25 @@ if len(wav_files) > 0:
                             if len(ch_eods) > 0:
                                 # Plot peaks (red)
                                 if 'peak_idx_event_snippet' in ch_eods.columns:
-                                    peak_indices = ch_eods['peak_idx_event_snippet'].values.astype(np.int64)
-                                    valid_peaks = (peak_indices >= 0) & (peak_indices < len(event_data)) & (~np.isnan(peak_indices))
+                                    peak_sample_indices = ch_eods['peak_idx_event_snippet'].values.astype(np.int64)
+                                    valid_peaks = (peak_sample_indices >= 0) & (peak_sample_indices < len(event_data)) & (~np.isnan(peak_sample_indices))
                                     if np.any(valid_peaks):
-                                        valid_peak_samples = peak_indices[valid_peaks]
-                                        if len(valid_peak_samples) > 0:
-                                            peak_diffs = np.diff(event_data[valid_peak_samples, i:i+2], axis=1).flatten()
-                                            plt.plot(valid_peak_samples, peak_diffs + i * offset_diff, 
-                                                    'o', markersize=3, color='red', alpha=0.8, label='Peaks' if i == 0 else "")
+                                        valid_peak_samples = peak_sample_indices[valid_peaks]
+                                        peak_timestamps = event_start_time + pd.to_timedelta(valid_peak_samples / sample_rate, unit='s')
+                                        peak_diffs = np.diff(event_data[valid_peak_samples, i:i+2], axis=1).flatten()
+                                        plt.plot(peak_timestamps, peak_diffs + i * offset_diff, 
+                                                'o', markersize=3, color='red', alpha=0.8, label='Peaks' if i == 0 else "")
+                                        
                                 # Plot troughs (blue)
                                 if 'trough_idx_event_snippet' in ch_eods.columns:
-                                    trough_indices = ch_eods['trough_idx_event_snippet'].values.astype(np.int64)
-                                    valid_troughs = (trough_indices >= 0) & (trough_indices < len(event_data)) & (~np.isnan(trough_indices))
+                                    trough_sample_indices = ch_eods['trough_idx_event_snippet'].values.astype(np.int64)
+                                    valid_troughs = (trough_sample_indices >= 0) & (trough_sample_indices < len(event_data)) & (~np.isnan(trough_sample_indices))
                                     if np.any(valid_troughs):
-                                        valid_trough_samples = trough_indices[valid_troughs]
-                                        if len(valid_trough_samples) > 0:
-                                            trough_diffs = np.diff(event_data[valid_trough_samples, i:i+2], axis=1).flatten()
-                                            plt.plot(valid_trough_samples, trough_diffs + i * offset_diff, 
-                                                    'o', markersize=3, color='blue', alpha=0.8, label='Troughs' if i == 0 else "")
+                                        valid_trough_samples = trough_sample_indices[valid_troughs]
+                                        trough_timestamps = event_start_time + pd.to_timedelta(valid_trough_samples / sample_rate, unit='s')
+                                        trough_diffs = np.diff(event_data[valid_trough_samples, i:i+2], axis=1).flatten()
+                                        plt.plot(trough_timestamps, trough_diffs + i * offset_diff, 
+                                                'o', markersize=3, color='blue', alpha=0.8, label='Troughs' if i == 0 else "")
                             
                             # Clean up large arrays immediately
                             del data_diff, x_coords
@@ -1299,24 +1307,34 @@ if len(wav_files) > 0:
                             if len(ce_eods) == 0:
                                 continue
                             ch = ce_eods['eod_channel'].iloc[0]
-                            # Get min/max sample for this channel event
+                            # Get min/max sample for this channel event and convert to timestamps
                             if 'midpoint_idx_event_snippet' in ce_eods.columns:
                                 min_sample = int(np.nanmin(ce_eods['midpoint_idx_event_snippet']))
                                 max_sample = int(np.nanmax(ce_eods['midpoint_idx_event_snippet']))
+                                # Convert sample indices to timestamps
+                                min_timestamp = event_start_time + pd.to_timedelta(min_sample / sample_rate, unit='s')
+                                max_timestamp = event_start_time + pd.to_timedelta(max_sample / sample_rate, unit='s')
+                                width_seconds = (max_timestamp - min_timestamp).total_seconds()
                             else:
-                                min_sample = 0
-                                max_sample = len(event_data)-1
+                                min_timestamp = event_start_time
+                                max_timestamp = event_start_time + pd.to_timedelta(len(event_data) / sample_rate, unit='s')
+                                width_seconds = (max_timestamp - min_timestamp).total_seconds()
+                            
                             # Draw a colored rectangle for this channel event
-                            rect = mpatches.Rectangle((min_sample, ch * offset_diff - 0.5 * offset_diff),
-                                                    max_sample - min_sample,
+                            # Convert timestamps to matplotlib-compatible format for Rectangle
+                            min_timestamp_mpl = mdates.date2num(min_timestamp.to_pydatetime())
+                            width_days = width_seconds / 86400.0  # Convert seconds to days for matplotlib
+                            
+                            rect = mpatches.Rectangle((min_timestamp_mpl, ch * offset_diff - 0.5 * offset_diff),
+                                                    width_days,
                                                     offset_diff,
                                                     linewidth=2, edgecolor=channel_event_colors[iteration], facecolor='none', alpha=0.7, zorder=10)
                             plt.gca().add_patch(rect)
                             
                             # Add event number annotation in the top-left corner of the rectangle
-                            text_x = min_sample + (max_sample - min_sample) * 0.05  # 5% from left edge
+                            text_timestamp_mpl = min_timestamp_mpl + width_days * 0.05  # 5% from left edge in matplotlib time units
                             text_y = ch * offset_diff + 0.3 * offset_diff  # Upper part of the channel
-                            plt.text(text_x, text_y, str(iteration), 
+                            plt.text(text_timestamp_mpl, text_y, str(iteration), 
                                     fontsize=12, fontweight='bold', 
                                     color=channel_event_colors[iteration], 
                                     bbox=dict(boxstyle='circle,pad=0.3', facecolor='white', edgecolor=channel_event_colors[iteration], alpha=0.8),
@@ -1325,7 +1343,9 @@ if len(wav_files) > 0:
                             # Draw a line at the mean midpoint
                             if 'midpoint_idx_event_snippet' in ce_eods.columns:
                                 mean_sample = int(np.nanmean(ce_eods['midpoint_idx_event_snippet']))
-                                plt.plot([mean_sample], [ch * offset_diff], marker='s', color=channel_event_colors[iteration], markersize=10, zorder=11)
+                                mean_timestamp = event_start_time + pd.to_timedelta(mean_sample / sample_rate, unit='s')
+                                mean_timestamp_mpl = mdates.date2num(mean_timestamp.to_pydatetime())
+                                plt.plot([mean_timestamp_mpl], [ch * offset_diff], marker='s', color=channel_event_colors[iteration], markersize=10, zorder=11)
 
                         # Draw lines connecting the mean midpoints of the merged channel events (showing merge path)
                         midpoints = []
@@ -1334,9 +1354,11 @@ if len(wav_files) > 0:
                             ch = ce_eods['eod_channel'].iloc[0]
                             if 'midpoint_idx_event_snippet' in ce_eods.columns:
                                 mean_sample = int(np.nanmean(ce_eods['midpoint_idx_event_snippet']))
+                                mean_timestamp = event_start_time + pd.to_timedelta(mean_sample / sample_rate, unit='s')
+                                mean_timestamp_mpl = mdates.date2num(mean_timestamp.to_pydatetime())
                             else:
-                                mean_sample = 0
-                            midpoints.append((mean_sample, ch * offset_diff))
+                                mean_timestamp_mpl = mdates.date2num(event_start_time.to_pydatetime())
+                            midpoints.append((mean_timestamp_mpl, ch * offset_diff))
                         midpoints = sorted(midpoints, key=lambda x: x[0])
                         if len(midpoints) > 1:
                             plt.plot([m[0] for m in midpoints], [m[1] for m in midpoints], color='black', linestyle='--', linewidth=2, alpha=0.5, zorder=12)
@@ -1347,8 +1369,13 @@ if len(wav_files) > 0:
                         else:
                             plt.title(f'Event {event_id} - Differential EOD Detections\nDuration: {event_duration:.1f}s - Colored boxes: merged channel events')
                         plt.legend(loc='upper right')
-                        plt.xlabel('Sample (relative to event snippet)')
+                        plt.xlabel('Time')
                         plt.ylabel('Voltage (stacked by channel)')
+                        
+                        # Format x-axis for better timestamp readability
+                        plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+                        plt.gca().xaxis.set_major_locator(mdates.SecondLocator(interval=max(1, int(event_duration/10))))
+                        plt.xticks(rotation=45)
 
                         # Save plot
                         plot_filename = f'event_{event_id:03d}_differential_detection.png'
@@ -1463,8 +1490,6 @@ print(f"  - event_XXX_YYYYMMDDTHHMMSS.wav: Raw audio data for each event")
 print(f"\nStep 11: Creating event timeline...")
 
 if len(event_summary) > 0:
-    import matplotlib.patches as mpatches
-    import matplotlib.cm as cm
     plt.figure(figsize=(15, 6))
 
     # Convert to datetime for plotting
