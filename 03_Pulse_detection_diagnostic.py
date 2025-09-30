@@ -20,10 +20,19 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import audioio as aio
 import json
+import pickle
 
 # Import from Script 03
 import thunderfish.pulses as pulses
-from eod_functions import extract_pulse_snippets, filter_waveforms, save_variable_length_waveforms
+from eod_functions import extract_pulse_snippets, filter_waveforms, filter_waveforms_with_classifier, save_variable_length_waveforms
+
+# ML-related imports for classifier functionality
+try:
+    from sklearn.preprocessing import StandardScaler
+    ML_AVAILABLE = True
+except ImportError:
+    print("Warning: scikit-learn not available. ML classification will be disabled.")
+    ML_AVAILABLE = False
 
 class PulseDiagnosticTool:
     def __init__(self, root):
@@ -56,6 +65,14 @@ class PulseDiagnosticTool:
         
         # Time window parameters (0,0 means use full file)
         self.time_window = {'start_sec': 0.0, 'end_sec': 0.0}
+        
+        # ML configuration variables
+        self.use_ml_filtering = tk.BooleanVar(value=False)
+        self.classifier_path = tk.StringVar(value="")
+        self.fish_probability_threshold = tk.DoubleVar(value=0.5)
+        self.loaded_classifier = None
+        self.loaded_scaler = None
+        self.classifier_name = None
         
         self.setup_gui()
         
@@ -161,6 +178,48 @@ class PulseDiagnosticTool:
                        value="differential").pack(side=tk.LEFT, padx=5)
         ttk.Radiobutton(plot_mode_frame, text="Single-Ended", variable=self.plot_mode, 
                        value="single_ended").pack(side=tk.LEFT, padx=5)
+        
+        # ML Classification controls
+        ml_frame = ttk.LabelFrame(button_frame, text="ML Fish vs Noise Classification", padding=5)
+        ml_frame.pack(fill=tk.X, pady=2)
+        
+        # Enable/disable ML filtering
+        ml_enable_frame = ttk.Frame(ml_frame)
+        ml_enable_frame.pack(fill=tk.X, pady=2)
+        
+        self.ml_checkbox = ttk.Checkbutton(
+            ml_enable_frame, 
+            text="Enable ML-based noise filtering", 
+            variable=self.use_ml_filtering,
+            command=self.on_ml_toggle
+        )
+        self.ml_checkbox.pack(side=tk.LEFT)
+        
+        # Classifier file selection
+        classifier_frame = ttk.Frame(ml_frame)
+        classifier_frame.pack(fill=tk.X, pady=2)
+        
+        ttk.Label(classifier_frame, text="Classifier:", width=12).pack(side=tk.LEFT)
+        self.classifier_label = ttk.Label(classifier_frame, text="No classifier loaded", 
+                                         foreground="gray", wraplength=200)
+        self.classifier_label.pack(side=tk.LEFT, padx=5)
+        
+        ttk.Button(classifier_frame, text="Browse...", 
+                  command=self.select_classifier_file, width=10).pack(side=tk.RIGHT)
+        
+        # Threshold setting
+        threshold_frame = ttk.Frame(ml_frame)
+        threshold_frame.pack(fill=tk.X, pady=2)
+        
+        ttk.Label(threshold_frame, text="Fish threshold:", width=12).pack(side=tk.LEFT)
+        threshold_entry = ttk.Entry(threshold_frame, textvariable=self.fish_probability_threshold, width=8)
+        threshold_entry.pack(side=tk.LEFT, padx=5)
+        ttk.Label(threshold_frame, text="(0.1-0.9)", foreground="gray").pack(side=tk.LEFT)
+        
+        # Initially disable ML controls if sklearn not available
+        if not ML_AVAILABLE:
+            self.ml_checkbox.configure(state="disabled")
+            self.classifier_label.configure(text="sklearn not available")
         
         ttk.Button(button_frame, text="Detect & Plot", command=self.detect_and_plot).pack(fill=tk.X, pady=2)
         ttk.Button(button_frame, text="Export Parameters", command=self.export_parameters).pack(fill=tk.X, pady=2)
@@ -278,6 +337,76 @@ class PulseDiagnosticTool:
             info += "Pre-calibrated data (no calibration file needed)"
         
         self.file_info.config(text=info)
+    
+    def on_ml_toggle(self):
+        """Handle ML checkbox toggle"""
+        if self.use_ml_filtering.get() and not self.loaded_classifier:
+            # If enabling ML but no classifier loaded, prompt to load one
+            self.select_classifier_file()
+        
+        # Update GUI state
+        self.update_ml_status()
+    
+    def select_classifier_file(self):
+        """Select and load ML classifier file"""
+        if not ML_AVAILABLE:
+            messagebox.showerror("Error", "scikit-learn is not available. Cannot load ML classifier.")
+            return
+        
+        file_path = filedialog.askopenfilename(
+            title="Select Trained Classifier File",
+            filetypes=[("Pickle files", "*.pkl"), ("All files", "*.*")]
+        )
+        
+        if file_path:
+            self.load_classifier(file_path)
+    
+    def load_classifier(self, file_path):
+        """Load the ML classifier from file"""
+        try:
+            print(f"Loading ML classifier from: {file_path}")
+            with open(file_path, 'rb') as f:
+                classifier_data = pickle.load(f)
+            
+            self.loaded_classifier = classifier_data['classifier']
+            self.loaded_scaler = classifier_data['scaler']
+            self.classifier_name = classifier_data['classifier_name']
+            training_accuracy = classifier_data['accuracy']
+            
+            self.classifier_path.set(file_path)
+            
+            print(f"Loaded classifier: {self.classifier_name}")
+            print(f"Training accuracy: {training_accuracy:.3f}")
+            
+            self.update_ml_status()
+            
+            # Show success message
+            messagebox.showinfo("Success", 
+                              f"Loaded classifier: {self.classifier_name}\n"
+                              f"Training accuracy: {training_accuracy:.3f}")
+            
+        except Exception as e:
+            print(f"Error loading classifier: {e}")
+            messagebox.showerror("Error", f"Failed to load classifier:\n{str(e)}")
+            self.loaded_classifier = None
+            self.loaded_scaler = None
+            self.classifier_name = None
+            self.use_ml_filtering.set(False)
+            self.update_ml_status()
+    
+    def update_ml_status(self):
+        """Update ML status display"""
+        if self.loaded_classifier and self.loaded_scaler:
+            # Show classifier name
+            display_name = self.classifier_name if self.classifier_name else "Loaded"
+            self.classifier_label.configure(text=display_name, foreground="darkgreen")
+        else:
+            # Show no classifier
+            if ML_AVAILABLE:
+                self.classifier_label.configure(text="No classifier loaded", foreground="gray")
+            else:
+                self.classifier_label.configure(text="sklearn not available", foreground="red")
+                self.use_ml_filtering.set(False)
     
     def calibrate_data(self):
         """Apply calibration exactly like Script 03"""
@@ -438,16 +567,36 @@ class PulseDiagnosticTool:
             
             print(f"    Filtering for differential pulses...{len(unique_pulses)} total, {np.sum(is_differential)} differential")
             
-            # Apply filtering (Script 03 logic)
-            keep_indices = filter_waveforms(
-                eod_waveforms, eod_widths, amplitude_ratios, fft_peak_freqs, rate,
-                dur_min=self.parameters['min_width_us'], 
-                dur_max=self.parameters['max_width_us'],
-                pp_r_min=self.parameters['amplitude_ratio_min'], 
-                pp_r_max=self.parameters['amplitude_ratio_max'],
-                fft_freq_min=self.parameters['peak_fft_freq_min'], 
-                fft_freq_max=self.parameters['peak_fft_freq_max']
-            )
+            # Apply filtering (with optional ML enhancement)
+            if (self.use_ml_filtering.get() and 
+                self.loaded_classifier is not None and 
+                self.loaded_scaler is not None):
+                # Use enhanced ML-based filtering
+                print(f"    Using ML-enhanced filtering with {self.classifier_name}")
+                keep_indices = filter_waveforms_with_classifier(
+                    eod_waveforms, eod_widths, amplitude_ratios, fft_peak_freqs, rate,
+                    classifier=self.loaded_classifier,
+                    scaler=self.loaded_scaler,
+                    dur_min=self.parameters['min_width_us'], 
+                    dur_max=self.parameters['max_width_us'],
+                    pp_r_min=self.parameters['amplitude_ratio_min'], 
+                    pp_r_max=self.parameters['amplitude_ratio_max'],
+                    fft_freq_min=self.parameters['peak_fft_freq_min'], 
+                    fft_freq_max=self.parameters['peak_fft_freq_max'],
+                    fish_probability_threshold=self.fish_probability_threshold.get(),
+                    use_basic_filtering=True
+                )
+            else:
+                # Use basic threshold filtering
+                keep_indices = filter_waveforms(
+                    eod_waveforms, eod_widths, amplitude_ratios, fft_peak_freqs, rate,
+                    dur_min=self.parameters['min_width_us'], 
+                    dur_max=self.parameters['max_width_us'],
+                    pp_r_min=self.parameters['amplitude_ratio_min'], 
+                    pp_r_max=self.parameters['amplitude_ratio_max'],
+                    fft_freq_min=self.parameters['peak_fft_freq_min'], 
+                    fft_freq_max=self.parameters['peak_fft_freq_max']
+                )
             
             keep_indices = np.array(keep_indices)
             all_indices = np.arange(len(unique_pulses))
