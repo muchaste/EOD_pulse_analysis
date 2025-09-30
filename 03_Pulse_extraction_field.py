@@ -19,16 +19,45 @@ import datetime as dt
 import os
 import json
 from pathlib import Path
+import pickle
 
 # Import consolidated EOD functions
 from eod_functions import (
     save_variable_length_waveforms,
     extract_pulse_snippets,
-    filter_waveforms
+    filter_waveforms,
+    filter_waveforms_with_classifier
 )
+
+# ML-related imports for classifier loading
+try:
+    from sklearn.preprocessing import StandardScaler
+    ML_AVAILABLE = True
+except ImportError:
+    print("Warning: scikit-learn not available. ML classification will be disabled.")
+    ML_AVAILABLE = False
 
 use_param_file = False
 create_plots = True
+
+# Option to import parameters from diagnostic tool
+import_diagnostic_params = messagebox.askyesno("Import Diagnostic Parameters", 
+                                           "Do you want to import parameters from a diagnostic tool JSON file?")
+
+diagnostic_parameters = None
+if import_diagnostic_params:
+    param_file = filedialog.askopenfilename(
+        title="Select Diagnostic Parameter File", 
+        filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+    )
+    try:
+        with open(param_file, 'r') as f:
+            diagnostic_parameters = json.load(f)
+        print(f"Imported diagnostic parameters from: {param_file}")
+    except Exception as e:
+        messagebox.showerror("Import Error", f"Failed to import parameters:\n{str(e)}")
+        print(f"Parameter import failed: {e}")
+        diagnostic_parameters = None
 
 # Set directories
 root = tk.Tk()
@@ -37,6 +66,40 @@ input_path = filedialog.askdirectory(title = "Select Folder with Logger Files")
 output_path = filedialog.askdirectory(title = "Select Folder to Store Analysis Results")
 # Create output folder if it doesn't exist
 os.makedirs(output_path, exist_ok=True)
+
+# Option to use enhanced ML-based filtering
+use_ml_filtering = messagebox.askyesno("Enhanced Filtering", 
+                                      "Do you want to use machine learning-based fish vs noise classification?\n\n"
+                                      "This requires a trained classifier from the annotation analysis.")
+
+classifier_path = None
+fish_probability_threshold = 0.5  # Default threshold
+if use_ml_filtering:
+    classifier_file = filedialog.askopenfilename(
+        title="Select Trained Classifier File", 
+        filetypes=[("Pickle files", "*.pkl"), ("All files", "*.*")],
+        initialdir=output_path  # Look in the output folder first
+    )
+    if classifier_file and os.path.exists(classifier_file):
+        classifier_path = classifier_file
+        print(f"Using ML classifier: {classifier_path}")
+        
+        # Ask for probability threshold
+        threshold_input = simpledialog.askfloat(
+            "Classifier Threshold",
+            "Enter the minimum probability threshold for classifying as fish:\n"
+            "(0.5 = balanced, higher = more conservative, lower = more inclusive)",
+            initialvalue=0.5,
+            minvalue=0.1,
+            maxvalue=0.9
+        )
+        if threshold_input:
+            fish_probability_threshold = threshold_input
+            print(f"Using fish probability threshold: {fish_probability_threshold}")
+        
+    else:
+        print("No valid classifier file selected - using basic filtering only")
+        use_ml_filtering = False
 
 # Pick file for amplitude calibration
 cal_file = filedialog.askopenfilename(title = "Select File with Calibration Data")
@@ -55,6 +118,33 @@ if not filelist:
     exit()
 
 print(f"Found {len(filelist)} WAV files")
+
+# Load ML classifier if selected
+loaded_classifier = None
+loaded_scaler = None
+classifier_name = None
+if use_ml_filtering and classifier_path and ML_AVAILABLE:
+    try:
+        print(f"\nLoading ML classifier from: {classifier_path}")
+        with open(classifier_path, 'rb') as f:
+            classifier_data = pickle.load(f)
+        
+        loaded_classifier = classifier_data['classifier']
+        loaded_scaler = classifier_data['scaler']
+        classifier_name = classifier_data['classifier_name']
+        training_accuracy = classifier_data['accuracy']
+        
+        print(f"Loaded classifier: {classifier_name}")
+        print(f"Training accuracy: {training_accuracy:.3f}")
+        print(f"Fish probability threshold: {fish_probability_threshold}")
+        print("ML-enhanced filtering will be used\n")
+        
+    except Exception as e:
+        print(f"Error loading classifier: {e}")
+        print("Falling back to basic filtering\n")
+        use_ml_filtering = False
+        loaded_classifier = None
+        loaded_scaler = None
 
 # Sort files by timestamp extracted from filename
 try:
@@ -93,6 +183,13 @@ thresh = 0.004
 
 if use_param_file:
     parameters = parameters_imported
+elif diagnostic_parameters is not None:
+    # Use diagnostic parameters but ensure all required parameters are present
+    parameters = diagnostic_parameters.copy()
+    # Update threshold if needed
+    if 'thresh' in parameters:
+        thresh = parameters['thresh']
+    print("Using diagnostic tool parameters")
 else:
     # Default field recording parameters
     parameters = {
@@ -139,8 +236,16 @@ while change_params:
     if done:
         change_params = 0
 
-parameters = pd.DataFrame({k: [v] for k, v in parameters.items()})
-parameters.to_csv('%s\\analysis_parameters.csv' % output_path, index=False)
+# Helper function to access parameters (works for both dict and DataFrame)
+def get_param(param_name):
+    if isinstance(parameters, dict):
+        return parameters[param_name]
+    else:  # DataFrame
+        return parameters[param_name][0]
+
+# Convert to DataFrame for further processing
+parameters_df = pd.DataFrame({k: [v] for k, v in parameters.items()})
+parameters_df.to_csv('%s\\analysis_parameters.csv' % output_path, index=False)
 plt.close()
 gc.collect()
 
@@ -171,11 +276,11 @@ for n, filepath in enumerate(file_set['filename']):
         for i in range(n_channels):
             ch_peaks, ch_troughs, _, ch_pulse_widths = \
                 pulses.detect_pulses(data[:, i], rate, 
-                                     thresh=parameters['thresh'][0], 
-                                     min_rel_slope_diff=parameters['min_rel_slope_diff'][0],
-                                     min_width=parameters['min_width_us'][0] / 1e6,
-                                     max_width=parameters['max_width_us'][0] / 1e6,
-                                     width_fac=parameters['width_fac_detection'][0],
+                                     thresh=get_param('thresh'), 
+                                     min_rel_slope_diff=get_param('min_rel_slope_diff'),
+                                     min_width=get_param('min_width_us') / 1e6,
+                                     max_width=get_param('max_width_us') / 1e6,
+                                     width_fac=get_param('width_fac_detection'),
                                      verbose=0,
                                      return_data=False)
             peaks.append(ch_peaks)
@@ -230,7 +335,7 @@ for n, filepath in enumerate(file_set['filename']):
                     final_peak_idc, final_trough_idc, final_midpoint_idc,
                     original_pulse_orientation, amplitude_ratios, waveform_lengths, fft_peak_freqs
                 ) = extract_pulse_snippets(
-                    data, parameters, rate, unique_midpoints, unique_peaks, unique_troughs, unique_widths,
+                    data, parameters_df, rate, unique_midpoints, unique_peaks, unique_troughs, unique_widths,
                     center_on_zero_crossing=False
                     )
                 
@@ -270,20 +375,40 @@ for n, filepath in enumerate(file_set['filename']):
             
             # Apply filtering pipeline
             try:
-                keep_indices, filtered_features, filteredout_features = filter_waveforms(
-                    eod_waveforms, eod_widths, amplitude_ratios, fft_peak_freqs, rate,
-                    dur_min=parameters['min_width_us'][0], 
-                    dur_max=parameters['max_width_us'][0],
-                    pp_r_min=parameters['amplitude_ratio_min'][0], 
-                    pp_r_max=parameters['amplitude_ratio_max'][0],
-                    fft_freq_min=parameters['peak_fft_freq_min'][0], 
-                    fft_freq_max=parameters['peak_fft_freq_max'][0],
-                    return_features=True, return_filteredout_features=True
-                )
+                if use_ml_filtering and loaded_classifier is not None and loaded_scaler is not None:
+                    # Use enhanced ML-based filtering
+                    keep_indices, filtered_features, filteredout_features = filter_waveforms_with_classifier(
+                        eod_waveforms, eod_widths, amplitude_ratios, fft_peak_freqs, rate,
+                        classifier=loaded_classifier,
+                        scaler=loaded_scaler,
+                        dur_min=get_param('min_width_us'), 
+                        dur_max=get_param('max_width_us'),
+                        pp_r_min=get_param('amplitude_ratio_min'), 
+                        pp_r_max=get_param('amplitude_ratio_max'),
+                        fft_freq_min=get_param('peak_fft_freq_min'), 
+                        fft_freq_max=get_param('peak_fft_freq_max'),
+                        fish_probability_threshold=fish_probability_threshold,
+                        use_basic_filtering=True,
+                        return_features=True, 
+                        return_filteredout_features=True
+                    )
+                else:
+                    # Use basic threshold filtering
+                    keep_indices, filtered_features, filteredout_features = filter_waveforms(
+                        eod_waveforms, eod_widths, amplitude_ratios, fft_peak_freqs, rate,
+                        dur_min=get_param('min_width_us'), 
+                        dur_max=get_param('max_width_us'),
+                        pp_r_min=get_param('amplitude_ratio_min'), 
+                        pp_r_max=get_param('amplitude_ratio_max'),
+                        fft_freq_min=get_param('peak_fft_freq_min'), 
+                        fft_freq_max=get_param('peak_fft_freq_max'),
+                        return_features=True, return_filteredout_features=True
+                    )
+                
                 print(f"    Filtered {len(eod_waveforms) - len(keep_indices)} out of {len(eod_waveforms)} pulses")
                 
             except Exception as e:
-                print(f"    Error in basic filtering: {e}")
+                print(f"    Error in filtering: {e}")
                 keep_indices = np.arange(len(eod_waveforms))
 
             # Get indices of filtered-out pulses for QC
@@ -470,7 +595,7 @@ for n, filepath in enumerate(file_set['filename']):
             stats_df.to_csv(stats_file, index=False)
         
         # Optional: Save filtered-out pulses for quality control
-        if len(filtered_out_indices) > 0 and parameters['save_filtered_out'][0]:
+        if len(filtered_out_indices) > 0 and get_param('save_filtered_out'):
             try:
                 # Create filtered-out data structures  
                 filteredout_eod_waveforms = [eod_waveforms[i] for i in filtered_out_indices]
