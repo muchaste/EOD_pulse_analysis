@@ -1,14 +1,24 @@
+"""
+# 02_Pulse_extraction_control.py
+# Control Recording EOD Pulse Extraction (Script 02)
+
+This script extracts EOD pulses from control/catalogue recordings
+
+"""
+
+
 import thunderfish.pulses as pulses
 import matplotlib.pyplot as plt
 import audioio as aio
 import numpy as np
 import pandas as pd
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 import gc
 import glob
 import datetime as dt
 import os
+import json
 
 # Import consolidated EOD functions
 from eod_functions import (
@@ -68,22 +78,59 @@ def main():
     data, rate = aio.load_audio(wav_files[0])
     data = data[:,0]  # Use only the first channel
 
-    # Pulse extraction parameters
-    parameters = {'thresh':0.004,  # Reduced threshold for pulse detection to catch low-amplitude fish
-                'min_rel_slope_diff':0.25,
-                'min_width_us':20,  # Minimum pulse width in microseconds
-                'max_width_us':1000,  # Maximum pulse width in microseconds
-                'width_fac_detection':7.0,
-                'width_fac_extraction':7.0,  # Factor for variable-width extraction
-                'interp_factor':3,  # Interpolation factor for waveform extraction
-                'amplitude_ratio_min':0.1,  # Minimum peak-to-peak amplitude ratio
-                'amplitude_ratio_max':10,     # Maximum peak-to-peak amplitude ratio
-                'save_filtered_out':True, # Option to save filtered-out pulses for quality control
-                'peak_fft_freq_min':100,
-                'peak_fft_freq_max':20000,
-                'clip_threshold':1.6,  # Threshold for clipping detection (1.6 is conservative, adjust as needed)
-                'top_amplitude_percent':40  # Only keep top x% highest amplitude EODs
-                }
+    # Option to import parameters from diagnostic tool
+    import_params = messagebox.askyesno("Import Parameters", 
+                                       "Do you want to import parameters from a diagnostic tool JSON file?")
+    
+    if import_params:
+        param_file = filedialog.askopenfilename(
+            title="Select Parameter File", 
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+        )
+        try:
+            with open(param_file, 'r') as f:
+                imported_params = json.load(f)
+            print(f"Imported parameters from: {param_file}")
+            
+            # Use imported parameters
+            parameters = imported_params
+            
+        except Exception as e:
+            messagebox.showerror("Import Error", f"Failed to import parameters:\n{str(e)}")
+            print(f"Parameter import failed: {e}")
+            # Fall back to default parameters
+            parameters = {'thresh':0.004,  # Reduced threshold for pulse detection to catch low-amplitude fish
+                        'min_rel_slope_diff':0.25,
+                        'min_width_us':20,  # Minimum pulse width in microseconds
+                        'max_width_us':1000,  # Maximum pulse width in microseconds
+                        'width_fac_detection':7.0,
+                        'width_fac_extraction':7.0,  # Factor for variable-width extraction
+                        'interp_factor':3,  # Interpolation factor for waveform extraction
+                        'amplitude_ratio_min':0.1,  # Minimum peak-to-peak amplitude ratio
+                        'amplitude_ratio_max':10,     # Maximum peak-to-peak amplitude ratio
+                        'save_filtered_out':True, # Option to save filtered-out pulses for quality control
+                        'peak_fft_freq_min':100,
+                        'peak_fft_freq_max':20000,
+                        'clip_threshold':1.6,  # Threshold for clipping detection (1.6 is conservative, adjust as needed)
+                        'top_amplitude_percent':40  # Only keep top x% highest amplitude EODs
+                        }
+    else:
+        # Default control recording parameters
+        parameters = {'thresh':0.004,  # Reduced threshold for pulse detection to catch low-amplitude fish
+                    'min_rel_slope_diff':0.25,
+                    'min_width_us':20,  # Minimum pulse width in microseconds
+                    'max_width_us':1000,  # Maximum pulse width in microseconds
+                    'width_fac_detection':7.0,
+                    'width_fac_extraction':7.0,  # Factor for variable-width extraction
+                    'interp_factor':3,  # Interpolation factor for waveform extraction
+                    'amplitude_ratio_min':0.1,  # Minimum peak-to-peak amplitude ratio
+                    'amplitude_ratio_max':10,     # Maximum peak-to-peak amplitude ratio
+                    'save_filtered_out':True, # Option to save filtered-out pulses for quality control
+                    'peak_fft_freq_min':100,
+                    'peak_fft_freq_max':20000,
+                    'clip_threshold':1.6,  # Threshold for clipping detection (1.6 is conservative, adjust as needed)
+                    'top_amplitude_percent':40  # Only keep top x% highest amplitude EODs
+                    }
 
     # Plot raw data
     plt.figure(figsize=(20, 6))
@@ -111,8 +158,16 @@ def main():
         if done:
             change_params = 0
 
-    parameters = pd.DataFrame({k: [v] for k, v in parameters.items()})
-    parameters.to_csv('%s\\analysis_parameters.csv' % output_path, index=False)
+    # Helper function to access parameters (works for both dict and DataFrame)
+    def get_param(param_name):
+        if isinstance(parameters, dict):
+            return parameters[param_name]
+        else:  # DataFrame
+            return parameters[param_name][0]
+    
+    # Convert to DataFrame for saving
+    parameters_df = pd.DataFrame({k: [v] for k, v in parameters.items()})
+    parameters_df.to_csv('%s\\analysis_parameters.csv' % output_path, index=False)
     plt.close()
 
 
@@ -177,11 +232,11 @@ def main():
         # Detect pulses
         peaks, troughs, _ , pulse_widths = \
             pulses.detect_pulses(data, rate, 
-                                    thresh = parameters['thresh'][0], 
-                                    min_rel_slope_diff=parameters['min_rel_slope_diff'][0],
-                                    min_width=parameters['min_width_us'][0]/1e6,  # in seconds
-                                    max_width=parameters['max_width_us'][0]/1e6,  # in seconds
-                                    width_fac=parameters['width_fac_detection'][0],
+                                    thresh = get_param('thresh'), 
+                                    min_rel_slope_diff=get_param('min_rel_slope_diff'),
+                                    min_width=get_param('min_width_us')/1e6,  # in seconds
+                                    max_width=get_param('max_width_us')/1e6,  # in seconds
+                                    width_fac=get_param('width_fac_detection'),
                                     verbose=0,
                                     return_data=False)
         
@@ -195,17 +250,17 @@ def main():
             # Analyze snippets with variable widths
             eod_waveforms, eod_amps, eod_widths, snippet_peak_idc, snippet_trough_idc, snippet_midpoint_idc, \
                 final_peak_idc, final_trough_idc, final_midpoint_idc, pulse_orientation, amplitude_ratios, waveform_lengths, fft_peak_freqs = \
-                extract_pulse_snippets_control(data, parameters, rate=rate, midpoints=midpoints, peaks=peaks, troughs=troughs, widths=pulse_widths,
+                extract_pulse_snippets_control(data, parameters_df, rate=rate, midpoints=midpoints, peaks=peaks, troughs=troughs, widths=pulse_widths,
                                         center_on_zero_crossing=False)  # Skip centering for storage efficiency
 
             keep_indices, filtered_features = filter_waveforms(
-                eod_waveforms, eod_widths, amplitude_ratios, fft_peak_freqs, rate*parameters['interp_factor'][0],
-                dur_min=parameters['min_width_us'][0], 
-                dur_max=parameters['max_width_us'][0],
-                pp_r_min=parameters['amplitude_ratio_min'][0], 
-                pp_r_max=parameters['amplitude_ratio_max'][0],
-                fft_freq_min=parameters['peak_fft_freq_min'][0], 
-                fft_freq_max=parameters['peak_fft_freq_max'][0],
+                eod_waveforms, eod_widths, amplitude_ratios, fft_peak_freqs, rate*get_param('interp_factor'),
+                dur_min=get_param('min_width_us'), 
+                dur_max=get_param('max_width_us'),
+                pp_r_min=get_param('amplitude_ratio_min'), 
+                pp_r_max=get_param('amplitude_ratio_max'),
+                fft_freq_min=get_param('peak_fft_freq_min'), 
+                fft_freq_max=get_param('peak_fft_freq_max'),
                 return_features=True
             )    
 
@@ -232,7 +287,7 @@ def main():
             initially_filtered_table = complete_eod_table.iloc[keep_indices].copy()
             
             # Detect clipped pulses (amplitude >= clip_threshold) among the initially filtered events
-            initially_filtered_clipped_mask = initially_filtered_table['eod_amplitude'] >= parameters['clip_threshold'][0]
+            initially_filtered_clipped_mask = initially_filtered_table['eod_amplitude'] >= get_param('clip_threshold')
             
             # Get non-clipped events from the initially filtered table
             non_clipped_filtered_table = initially_filtered_table[~initially_filtered_clipped_mask].copy()
@@ -241,13 +296,13 @@ def main():
                 # Check if we have enough non-clipped events to apply percentage filtering
                 if len(non_clipped_filtered_table) >= 50:
                     # Calculate amplitude threshold for top X% of non-clipped events
-                    amplitude_threshold_percentile = 100 - parameters['top_amplitude_percent'][0]
+                    amplitude_threshold_percentile = 100 - get_param('top_amplitude_percent')
                     amplitude_threshold = np.percentile(non_clipped_filtered_table['eod_amplitude'], amplitude_threshold_percentile)
                     
                     # Create mask for high-amplitude events among non-clipped
                     high_amplitude_mask = non_clipped_filtered_table['eod_amplitude'] >= amplitude_threshold
                     
-                    print(f"  Amplitude filtering: keeping top {parameters['top_amplitude_percent'][0]}% of {len(non_clipped_filtered_table)} non-clipped events")
+                    print(f"  Amplitude filtering: keeping top {get_param('top_amplitude_percent')}% of {len(non_clipped_filtered_table)} non-clipped events")
                     print(f"    Amplitude threshold: {amplitude_threshold:.4f}")
                 else:
                     # Take all non-clipped events if fewer than 50
@@ -269,7 +324,7 @@ def main():
                 print(f"  No non-clipped events available for amplitude filtering")
             
             # Detect all clipped pulses (amplitude >= clip_threshold) in original data
-            clipped_mask = eod_amps >= parameters['clip_threshold'][0]
+            clipped_mask = eod_amps >= get_param('clip_threshold')
             
             # Create filtering masks using high-amplitude indices
             keep_mask = np.isin(np.arange(len(eod_waveforms)), high_amplitude_indices)
@@ -301,7 +356,7 @@ def main():
             
             print(f"  Final EODs after all filtering: {len(high_amplitude_indices)} out of {len(eod_waveforms)} total")
             print(f"    Normal high-amplitude events: {len(eod_table)}")
-            print(f"    Clipped high-amplitude events (amp >= {parameters['clip_threshold'][0]}): {len(clipped_table)}")
+            print(f"    Clipped high-amplitude events (amp >= {get_param('clip_threshold')}): {len(clipped_table)}")
                     
             # Save individual results
             eod_table.to_csv(f'{output_path}\\{individual_id}_eod_table.csv', index=False)
@@ -384,7 +439,7 @@ def main():
                 
                 # Update title based on filtering approach
                 if 'non_clipped_filtered_table' in locals() and len(non_clipped_filtered_table) >= 50:
-                    title_suffix = f"Top {parameters['top_amplitude_percent'][0]}%: {len(eod_table)}"
+                    title_suffix = f"Top {get_param('top_amplitude_percent')}%: {len(eod_table)}"
                 else:
                     title_suffix = f"All non-clipped: {len(eod_table)}"
                 
@@ -480,7 +535,7 @@ def main():
                         if len(wf) > nperseg:
                             # Use scipy.signal.welch for PSD with fixed nperseg
                             from scipy import signal as scipy_signal
-                            f, psd = scipy_signal.welch(wf, fs=rate*parameters['interp_factor'][0], nperseg=nperseg)
+                            f, psd = scipy_signal.welch(wf, fs=rate*get_param('interp_factor'), nperseg=nperseg)
                             if freqs is None:
                                 freqs = f
                             psds.append(psd)
@@ -516,7 +571,7 @@ def main():
                 stats_text += f"Selected high-amplitude: {len(eod_table)}\n"
                 if len(eod_table) > 0:
                     if non_clipped_count >= 50:
-                        stats_text += f"Top {parameters['top_amplitude_percent'][0]}% threshold: {amplitude_threshold:.4f}\n"
+                        stats_text += f"Top {get_param('top_amplitude_percent')}% threshold: {amplitude_threshold:.4f}\n"
                     else:
                         stats_text += f"All non-clipped taken (< 50)\n"
                     stats_text += f"Mean amplitude: {eod_table['eod_amplitude'].mean():.4f}\n"
@@ -647,8 +702,8 @@ def main():
     print("PROCESSING COMPLETE")
     print(f"{'='*60}")
     print(f"Processing parameters:")
-    print(f"  Detection threshold: {parameters['thresh'][0]}")
-    print(f"  Top amplitude percentile: {parameters['top_amplitude_percent'][0]}%")
+    print(f"  Detection threshold: {get_param('thresh')}")
+    print(f"  Top amplitude percentile: {get_param('top_amplitude_percent')}%")
     print(f"Total individuals processed: {total_individuals}")
     print(f"Total high-amplitude EOD events: {total_normal_events}")
     print(f"Total clipped events: {total_clipped_events}")
