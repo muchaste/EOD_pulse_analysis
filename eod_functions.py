@@ -33,6 +33,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import json
+import os
 from pathlib import Path
 from scipy.signal import find_peaks, correlate, windows, find_peaks
 from scipy.interpolate import interp1d
@@ -520,6 +521,226 @@ def filter_waveforms(eod_waveforms, eod_widths, amplitude_ratios, fft_peak_freqs
     return return_vars
 
 
+def filter_waveforms_with_classifier(eod_waveforms, eod_widths, amplitude_ratios, fft_peak_freqs, rate,
+                                    classifier=None, scaler=None,
+                                    dur_min=20, dur_max=300,
+                                    pp_r_min=0.1, pp_r_max=5,
+                                    fft_freq_min=1000, fft_freq_max=10000,
+                                    fish_probability_threshold=0.5,
+                                    use_basic_filtering=True,
+                                    interp_factor=1, return_features=False,
+                                    return_filteredout_features=False,
+                                    return_params=False):
+    """
+    Enhanced waveform filtering using trained Random Forest classifier for fish vs noise discrimination.
+    
+    This function combines traditional threshold-based filtering with machine learning classification
+    to improve pulse quality assessment.
+
+    Parameters
+    ----------
+    eod_waveforms : list of 1-D arrays
+        List of variable-length EOD waveforms from extract_pulse_snippets.
+    eod_widths : 1-D array
+        Width in microseconds between peak and trough from extract_pulse_snippets.
+    amplitude_ratios : 1-D array
+        Peak-to-trough amplitude ratios from extract_pulse_snippets.
+    fft_peak_freqs : 1-D array
+        Pre-calculated FFT peak frequencies from extract_pulse_snippets.
+    rate : int
+        Sample rate of the original signal.
+    classifier : sklearn estimator, optional
+        Pre-loaded trained classifier object. If None, uses basic filtering only.
+    scaler : sklearn StandardScaler, optional
+        Pre-loaded feature scaler object. Required if classifier is provided.
+    dur_min : float, optional
+        Minimum duration threshold in microseconds (default is 20).
+    dur_max : float, optional
+        Maximum duration threshold in microseconds (default is 300).
+    pp_r_min : float, optional
+        Minimum peak-to-peak ratio (default is 0.1).
+    pp_r_max : float, optional
+        Maximum peak-to-peak ratio (default is 5).
+    fft_freq_min : float, optional
+        Minimum FFT frequency threshold (default is 1000).
+    fft_freq_max : float, optional
+        Maximum FFT frequency threshold (default is 10000).
+    fish_probability_threshold : float, optional
+        Minimum probability threshold for classifying as fish (default is 0.5).
+    use_basic_filtering : bool, optional
+        Whether to apply basic threshold filtering before ML classification (default is True).
+    interp_factor : int, optional
+        Factor by which the signal is interpolated (default is 1).
+    return_features : bool, optional
+        Returns dataframe with waveform features if True.
+    return_filteredout_features : bool, optional
+        Returns dataframe with filtered out features if True.
+    return_params : bool, optional
+        Returns dataframe with filter parameters if True.
+
+    Returns
+    -------
+    keep_indices : 1-D array
+        Indices of the kept waveforms.
+    [features] : pandas.DataFrame, optional
+        Features of kept waveforms if return_features=True.
+    [filteredout_features] : pandas.DataFrame, optional
+        Features of filtered out waveforms if return_filteredout_features=True.
+    [params] : pandas.DataFrame, optional
+        Filter parameters if return_params=True.
+    """
+    
+    print(f"    Enhanced filtering: {len(eod_waveforms)} pulses to evaluate")
+    
+    n_snippets = len(eod_waveforms)
+    wf_rate = rate * interp_factor
+
+    # Use the pre-calculated features
+    wf_durs = eod_widths.copy()
+    wf_ratios = amplitude_ratios.copy()
+    fft_freqs = fft_peak_freqs.copy()
+
+    # Initialize keep mask - start with all True
+    keep_mask = np.ones(n_snippets, dtype=bool)
+    
+    # Track filtering stages
+    filtering_stages = {
+        'initial': n_snippets,
+        'after_basic': n_snippets,
+        'after_ml': n_snippets
+    }
+
+    # Stage 1: Basic threshold filtering (if enabled)
+    if use_basic_filtering:
+        basic_mask = (
+            (wf_durs >= dur_min) & (wf_durs <= dur_max) &
+            (wf_ratios >= pp_r_min) & (wf_ratios <= pp_r_max) &
+            (fft_freqs >= fft_freq_min) & (fft_freqs <= fft_freq_max)
+        )
+        keep_mask = keep_mask & basic_mask
+        filtering_stages['after_basic'] = np.sum(keep_mask)
+        print(f"    Basic filtering: {filtering_stages['initial'] - filtering_stages['after_basic']} pulses removed")
+
+    # Stage 2: Machine Learning Classification (if classifier available)
+    ml_predictions = None
+    ml_probabilities = None
+    
+    if classifier is not None and scaler is not None:
+        try:
+            print(f"    Applying ML classification for fish vs noise discrimination")
+            
+            # Prepare features for classification
+            # Note: feature order should be ['eod_width_us', 'fft_freq_max', 'eod_amplitude_ratio']
+            classification_features = np.column_stack([
+                wf_durs,      # eod_width_us
+                fft_freqs,    # fft_freq_max  
+                wf_ratios     # eod_amplitude_ratio
+            ])
+            
+            # Remove any NaN values for classification
+            valid_feature_mask = ~np.any(np.isnan(classification_features), axis=1)
+            
+            if np.sum(valid_feature_mask) > 0:
+                # Scale features
+                features_scaled = scaler.transform(classification_features[valid_feature_mask])
+                
+                # Predict probabilities
+                probabilities = classifier.predict_proba(features_scaled)
+                fish_probabilities = probabilities[:, 1]  # Probability of being fish (class 1)
+                
+                # Create full probability array
+                ml_probabilities = np.full(n_snippets, np.nan)
+                ml_probabilities[valid_feature_mask] = fish_probabilities
+                
+                # Apply probability threshold
+                ml_mask = np.ones(n_snippets, dtype=bool)  # Default to keep
+                ml_mask[valid_feature_mask] = fish_probabilities >= fish_probability_threshold
+                
+                # Combine with existing keep mask
+                keep_mask = keep_mask & ml_mask
+                
+                filtering_stages['after_ml'] = np.sum(keep_mask)
+                ml_removed = filtering_stages['after_basic'] - filtering_stages['after_ml']
+                print(f"    ML classification: {ml_removed} additional pulses removed (noise)")
+                print(f"    Fish probability threshold: {fish_probability_threshold}")
+                
+                # Store predictions for return
+                ml_predictions = np.full(n_snippets, np.nan)
+                ml_predictions[valid_feature_mask] = (fish_probabilities >= fish_probability_threshold).astype(int)
+                
+            else:
+                print(f"    Warning: No valid features for ML classification")
+                
+        except Exception as e:
+            print(f"    Warning: ML classification failed: {e}")
+            print(f"    Continuing with basic filtering only")
+    
+    elif classifier is not None or scaler is not None:
+        print(f"    Warning: Both classifier and scaler must be provided for ML classification")
+        print(f"    Continuing with basic filtering only")
+    
+    # Get final keep indices
+    keep_indices = np.where(keep_mask)[0]
+    
+    print(f"    Final result: {len(keep_indices)} / {n_snippets} pulses kept ({len(keep_indices)/n_snippets*100:.1f}%)")
+
+    # Prepare return variables
+    return_vars = [keep_indices]
+
+    if return_features:
+        features_dict = {
+            'pp_dur_us': wf_durs[keep_indices],
+            'pp_ratio': wf_ratios[keep_indices],
+            'fft_freq': fft_freqs[keep_indices]
+        }
+        
+        # Add ML predictions if available
+        if ml_predictions is not None:
+            features_dict['ml_fish_prediction'] = ml_predictions[keep_indices]
+        if ml_probabilities is not None:
+            features_dict['ml_fish_probability'] = ml_probabilities[keep_indices]
+            
+        features = pd.DataFrame(features_dict)
+        return_vars.append(features)
+
+    if return_filteredout_features:
+        all_indices = np.arange(len(eod_waveforms))
+        filtered_out_indices = np.setdiff1d(all_indices, keep_indices)
+        
+        filteredout_dict = {
+            'pp_dur_us': wf_durs[filtered_out_indices],
+            'pp_ratio': wf_ratios[filtered_out_indices],
+            'fft_freq': fft_freqs[filtered_out_indices]
+        }
+        
+        # Add ML predictions for filtered out pulses if available
+        if ml_predictions is not None:
+            filteredout_dict['ml_fish_prediction'] = ml_predictions[filtered_out_indices]
+        if ml_probabilities is not None:
+            filteredout_dict['ml_fish_probability'] = ml_probabilities[filtered_out_indices]
+            
+        filteredout_features = pd.DataFrame(filteredout_dict)
+        return_vars.append(filteredout_features)
+
+    if return_params:
+        params_dict = {
+            'dur_min': [dur_min],
+            'dur_max': [dur_max],
+            'pp_r_min': [pp_r_min],
+            'pp_r_max': [pp_r_max],
+            'fft_freq_min': [fft_freq_min],
+            'fft_freq_max': [fft_freq_max],
+            'fish_probability_threshold': [fish_probability_threshold],
+            'use_basic_filtering': [use_basic_filtering],
+            'classifier_used': [classifier is not None and scaler is not None]
+        }
+        
+        params = pd.DataFrame(params_dict)
+        return_vars.append(params)
+
+    return return_vars
+
+
 # =============================================================================
 # WAVEFORM PROCESSING FUNCTIONS
 # =============================================================================
@@ -736,6 +957,7 @@ def _select_differential_channel(snippet, n_channels):
     """
     amps = np.zeros(n_channels)
     cor_coeffs = np.zeros(n_channels - 1)
+    cor_coeffs_diff = np.zeros(n_channels - 2)
     
     # Calculate amplitudes for each channel
     for j in range(n_channels):
@@ -761,8 +983,15 @@ def _select_differential_channel(snippet, n_channels):
                 t_idx = np.argmin(snippet_diff[:, j])
                 amps_diff[j] = abs(snippet_diff[p_idx, j] - snippet_diff[t_idx, j])
         
+        # Calculate correlation coefficients for differential channels
+        if snippet_diff.shape[0] > 1:  # Need at least 2 samples for correlation
+            for j in range(n_channels - 2):
+                if np.var(snippet_diff[:, j]) > 0 and np.var(snippet_diff[:, j+1]) > 0:
+                    cor_coeffs_diff[j] = np.corrcoef(snippet_diff[:, j], snippet_diff[:, j+1])[0, 1]
+
         # Find polarity flips (negative correlations)
         flips = np.where(cor_coeffs < 0)[0]
+        flips_diff = np.where(cor_coeffs_diff < 0)[0]
         
         if len(flips) > 1:
             # Multiple flips: choose the one with largest amplitude difference
@@ -770,6 +999,9 @@ def _select_differential_channel(snippet, n_channels):
             is_differential = 1
             eod_waveform = snippet_diff[:, eod_chan].copy()
         elif len(flips) == 1:
+            # If there is no flip in differential channels, this is a noise pulse
+            if len(flips_diff) == 0:
+                return np.array([]), -1, -1, amps, cor_coeffs
             # Single flip: use it
             eod_chan = flips[0]
             is_differential = 1
@@ -1000,7 +1232,7 @@ def extract_pulse_snippets(data, parameters, rate, midpoints, peaks, troughs, wi
             # Select best differential channel
             eod_waveform, eod_chan[i], is_differential[i], amps[i, :], cor_coeffs[i, :] = _select_differential_channel(
                 snippet, n_channels)
-            if parameters['return_diff'][0] and is_differential[i] == 0:
+            if (parameters['return_diff'][0] and is_differential[i] == 0) or (len(eod_waveform) == 0):
                 # Empty waveform case
                 eod_waveforms.append(np.array([]))
                 waveform_lengths[i] = 0
