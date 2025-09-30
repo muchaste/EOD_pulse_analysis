@@ -69,7 +69,13 @@ class EventAnnotationTool:
         self.event_files = []
         self.current_event_idx = 0
         self.annotations = {}
+        self.fish_counts = {}  # Store fish count information for clear_fish annotations
         self.event_features = {}
+        
+        # Fish count settings
+        self.fish_count_enabled = False
+        self.waiting_for_fish_count = False
+        self.pending_event_id = None
         
         # GUI components
         self.root = None
@@ -156,6 +162,21 @@ class EventAnnotationTool:
                                command=lambda cat=category: self.annotate_event(cat))
                 btn.pack(side=tk.LEFT, padx=(0, 10))
         
+        # Fish count control
+        fish_count_frame = ttk.Frame(annotation_frame)
+        fish_count_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        self.fish_count_var = tk.BooleanVar()
+        fish_count_checkbox = ttk.Checkbutton(fish_count_frame, 
+                                             text="Enable Fish Count Input (for Clear Fish)",
+                                             variable=self.fish_count_var,
+                                             command=self.toggle_fish_count)
+        fish_count_checkbox.pack(side=tk.LEFT)
+        
+        # Fish count status label
+        self.fish_count_status = ttk.Label(fish_count_frame, text="", foreground='blue')
+        self.fish_count_status.pack(side=tk.LEFT, padx=(20, 0))
+        
         # Audio controls (if available)
         if AUDIO_AVAILABLE:
             audio_frame = ttk.Frame(annotation_frame)
@@ -239,6 +260,7 @@ class EventAnnotationTool:
         self.root.bind('<Key-1>', self.handle_key_1)
         self.root.bind('<Key-2>', self.handle_key_2)
         self.root.bind('<Key-3>', self.handle_key_3)
+        self.root.bind('<Key-u>', self.handle_key_u)  # For 'unclear' fish count
         self.root.bind('<Left>', lambda e: self.previous_event())
         self.root.bind('<Right>', lambda e: self.next_event())
         self.root.bind('<space>', lambda e: self.play_audio())
@@ -274,8 +296,9 @@ class EventAnnotationTool:
         
         print(f"Found {len(self.event_files)} event files")
         
-        # Initialize annotations dictionary
+        # Initialize annotations and fish count dictionaries
         self.annotations = {f.stem: 'unannotated' for f in self.event_files}
+        self.fish_counts = {}  # Will be populated as needed
         
         # Update progress bar
         self.progress['maximum'] = len(self.event_files)
@@ -544,6 +567,11 @@ class EventAnnotationTool:
         info_text = f"Event ID: {event_id}\n"
         info_text += f"Annotation: {annotation_info['label']}\n"
         
+        # Add fish count information if available and applicable
+        if current_annotation == 'clear_fish' and event_id in self.fish_counts:
+            fish_count = self.fish_counts[event_id]
+            info_text += f"Fish Count: {fish_count}\n"
+        
         # Features
         if event_id in self.event_features:
             features = self.event_features[event_id]
@@ -716,24 +744,46 @@ class EventAnnotationTool:
         
         print(f"Annotated {event_id} as {ANNOTATION_CATEGORIES[category]['label']}")
         
-        # Update display
-        self.update_display()
-        
-        # Auto-advance to next event
-        if self.current_event_idx < len(self.event_files) - 1:
-            self.next_event()
+        # Check if fish count input is enabled and this is a clear_fish annotation
+        if category == 'clear_fish' and self.fish_count_enabled:
+            # Set up for fish count input
+            self.waiting_for_fish_count = True
+            self.pending_event_id = event_id
+            self.fish_count_status.config(text="Waiting for fish count: [1], [2], or [u]nclear")
+            
+            # Update only the info text and window title, not the plot
+            self.update_info_text()
+            annotation_info = ANNOTATION_CATEGORIES[category]
+            self.root.title(f"EOD Event Annotation Tool - {event_id} [{annotation_info['label']}] - Waiting for fish count")
+        else:
+            # Normal annotation - update display and auto-advance
+            self.update_display()
+            
+            # Auto-advance to next event
+            if self.current_event_idx < len(self.event_files) - 1:
+                self.next_event()
     
     def next_event(self):
         """Navigate to next event"""
+        self.clear_fish_count_waiting_state()
         if self.current_event_idx < len(self.event_files) - 1:
             self.current_event_idx += 1
             self.load_current_event()
     
     def previous_event(self):
         """Navigate to previous event"""
+        self.clear_fish_count_waiting_state()
         if self.current_event_idx > 0:
             self.current_event_idx -= 1
             self.load_current_event()
+    
+    def clear_fish_count_waiting_state(self):
+        """Clear fish count waiting state when navigating"""
+        if self.waiting_for_fish_count:
+            self.waiting_for_fish_count = False
+            self.pending_event_id = None
+            if self.fish_count_enabled:
+                self.fish_count_status.config(text="Fish count input enabled")
     
     def go_to_event(self):
         """Navigate to specific event by number"""
@@ -757,7 +807,8 @@ class EventAnnotationTool:
                                    f"Event number must be between 1 and {len(self.event_files)}")
                 return
             
-            # Navigate to the event
+            # Clear fish count waiting state and navigate to the event
+            self.clear_fish_count_waiting_state()
             self.current_event_idx = target_idx
             self.load_current_event()
             
@@ -770,19 +821,86 @@ class EventAnnotationTool:
             messagebox.showerror("Error", f"Failed to navigate to event: {str(e)}")
     
     def handle_key_1(self, event):
-        """Handle key '1' - annotate as clear fish only if not typing in entry field"""
+        """Handle key '1' - annotate as clear fish or set fish count to 1"""
         if self.root.focus_get() != self.goto_entry:
-            self.annotate_event('clear_fish')
+            if self.waiting_for_fish_count:
+                self.set_fish_count('1')
+            else:
+                self.annotate_event('clear_fish')
     
     def handle_key_2(self, event):
-        """Handle key '2' - annotate as clear noise only if not typing in entry field"""
+        """Handle key '2' - annotate as clear noise or set fish count to 2"""
         if self.root.focus_get() != self.goto_entry:
-            self.annotate_event('clear_noise')
+            if self.waiting_for_fish_count:
+                self.set_fish_count('2')
+            else:
+                self.annotate_event('clear_noise')
     
     def handle_key_3(self, event):
-        """Handle key '3' - annotate as ambiguous only if not typing in entry field"""
+        """Handle key '3' - annotate as ambiguous"""
         if self.root.focus_get() != self.goto_entry:
-            self.annotate_event('ambiguous')
+            if not self.waiting_for_fish_count:  # Don't handle '3' during fish count input
+                self.annotate_event('ambiguous')
+    
+    def handle_key_u(self, event):
+        """Handle key 'u' - set fish count to unclear"""
+        if self.root.focus_get() != self.goto_entry:
+            if self.waiting_for_fish_count:
+                self.set_fish_count('unclear')
+    
+    def set_fish_count(self, count):
+        """Set fish count for the pending clear_fish annotation"""
+        if not self.waiting_for_fish_count or not self.pending_event_id:
+            return
+        
+        # Store the fish count
+        self.fish_counts[self.pending_event_id] = count
+        
+        # Show a brief popup notification (without sound)
+        self.show_fish_count_popup(count)
+        
+        # Clear the waiting state
+        self.waiting_for_fish_count = False
+        self.pending_event_id = None
+        self.fish_count_status.config(text="Fish count input enabled")
+        
+        # Update display with fish count information
+        self.update_display()
+        
+        # Auto-advance to next event
+        if self.current_event_idx < len(self.event_files) - 1:
+            self.next_event()
+    
+    def show_fish_count_popup(self, count):
+        """Show a brief popup notification for fish count"""
+        popup = tk.Toplevel(self.root)
+        popup.title("Fish Count Set")
+        popup.geometry("200x80")
+        popup.transient(self.root)
+        popup.grab_set()
+        
+        # Center the popup
+        popup.geometry("+%d+%d" % (self.root.winfo_rootx() + 50, self.root.winfo_rooty() + 50))
+        
+        # Create message
+        msg = f"Fish count: {count}"
+        label = ttk.Label(popup, text=msg, font=('Arial', 12))
+        label.pack(expand=True)
+        
+        # Auto-close after 1.5 seconds
+        popup.after(1500, popup.destroy)
+    
+    def toggle_fish_count(self):
+        """Toggle fish count input functionality"""
+        self.fish_count_enabled = self.fish_count_var.get()
+        
+        if self.fish_count_enabled:
+            self.fish_count_status.config(text="Fish count input enabled")
+        else:
+            self.fish_count_status.config(text="")
+            # Clear any pending fish count state
+            self.waiting_for_fish_count = False
+            self.pending_event_id = None
     
     def update_audio_mode(self):
         """Update audio playback mode"""
@@ -899,12 +1017,15 @@ class EventAnnotationTool:
             # Prepare data to save
             save_data = {
                 'annotations': self.annotations,
+                'fish_counts': self.fish_counts,
                 'features': self.event_features,
                 'metadata': {
                     'events_folder': str(self.events_folder),
                     'n_events': len(self.event_files),
                     'annotation_counts': {cat: sum(1 for a in self.annotations.values() if a == cat) 
                                         for cat in ANNOTATION_CATEGORIES.keys()},
+                    'fish_count_counts': {count: sum(1 for c in self.fish_counts.values() if c == count) 
+                                        for count in ['1', '2', 'unclear']},
                     'created_date': datetime.now().isoformat()
                 }
             }
@@ -927,6 +1048,7 @@ class EventAnnotationTool:
                     load_data = json.load(f)
                 
                 self.annotations.update(load_data.get('annotations', {}))
+                self.fish_counts.update(load_data.get('fish_counts', {}))
                 self.event_features.update(load_data.get('features', {}))
                 
                 # Update display
@@ -959,11 +1081,13 @@ class EventAnnotationTool:
                     event_id = event_file.stem
                     annotation = self.annotations.get(event_id, 'unannotated')
                     features = self.event_features.get(event_id, {})
+                    fish_count = self.fish_counts.get(event_id, None)
                     
                     if annotation != 'unannotated':  # Only include annotated events
                         row = {
                             'event_id': event_id,
                             'annotation': annotation,
+                            'fish_count': fish_count if annotation == 'clear_fish' else None,
                             'file_path': str(event_file)
                         }
                         row.update(features)
@@ -987,7 +1111,20 @@ class EventAnnotationTool:
                         if category != 'unannotated':
                             count = len(dataset_df[dataset_df['annotation'] == category])
                             f.write(f"  {ANNOTATION_CATEGORIES[category]['label']}: {count}\n")
-                    f.write(f"\nFeatures included: {len([c for c in dataset_df.columns if c not in ['event_id', 'annotation', 'file_path']])}\n")
+                    
+                    # Fish count breakdown
+                    clear_fish_events = dataset_df[dataset_df['annotation'] == 'clear_fish']
+                    if len(clear_fish_events) > 0:
+                        f.write(f"\nFish count breakdown (Clear Fish events only):\n")
+                        fish_count_stats = clear_fish_events['fish_count'].value_counts()
+                        for count in ['1', '2', 'unclear']:
+                            count_val = fish_count_stats.get(count, 0)
+                            f.write(f"  {count} fish: {count_val}\n")
+                        no_count = len(clear_fish_events[clear_fish_events['fish_count'].isna()])
+                        if no_count > 0:
+                            f.write(f"  No fish count: {no_count}\n")
+                    
+                    f.write(f"\nFeatures included: {len([c for c in dataset_df.columns if c not in ['event_id', 'annotation', 'fish_count', 'file_path']])}\n")
                     f.write(f"Export date: {datetime.now().isoformat()}\n")
                 
                 messagebox.showinfo("Success", 
