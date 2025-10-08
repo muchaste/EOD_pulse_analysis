@@ -98,6 +98,7 @@ margin = 1.0                # Safety margin around events in seconds
 min_channel_event_size = 10  # Minimum size of channel events before merging (high-pass filter)
 min_amplitude = 0.01          # Minimum amplitude threshold for events (at least one eod should have this size)
 create_plots = True
+pre_merge_filtering = False  # Enable pre-merge filtering based on size and amplitude criteria
 
 # Clustering parameters
 clustering_enabled = False   # Enable waveform clustering
@@ -183,7 +184,7 @@ except Exception as e:
     print(f"Error loading session data: {e}")
     exit(1)
 
-
+#%%
 # =============================================================================
 # STEP 4: EXTRACT EVENTS - STAGE 1 (CHANNEL-WISE TEMPORAL CLUSTERING)
 # =============================================================================
@@ -251,534 +252,56 @@ for channel in channels:
 if channel_events_list:
     channel_events = pd.concat(channel_events_list, ignore_index=True)
     print(f"  Stage 1 complete: {len(channel_events)} total EODs in {channel_event_counter} channel events")
-
-    # Pre-merge filter: remove channel events based on size AND amplitude criteria
-    print(f"  Pre-merge filtering: removing channel events with <{min_channel_event_size} pulses OR no pulse ≥{min_amplitude} amplitude...")
     
-    # Criterion 1: Size filter (at least min_channel_event_size pulses)
-    event_sizes = channel_events.groupby('channel_event_id').size()
-    valid_size_ids = event_sizes[event_sizes >= min_channel_event_size].index
-    
-    # Criterion 2: Amplitude filter (at least one pulse with amplitude ≥ min_amplitude)
-    event_max_amplitudes = channel_events.groupby('channel_event_id')['eod_amplitude'].max()
-    valid_amplitude_ids = event_max_amplitudes[event_max_amplitudes >= min_amplitude].index
-    
-    # Combined filter: channel events must pass BOTH criteria
-    valid_channel_event_ids = valid_size_ids.intersection(valid_amplitude_ids)
-    
-    # Calculate removal statistics
-    n_total = channel_events['channel_event_id'].nunique()
-    n_removed_size = n_total - len(valid_size_ids)
-    n_removed_amplitude = n_total - len(valid_amplitude_ids)
-    n_removed_total = n_total - len(valid_channel_event_ids)
-    
-    # Apply combined filter
-    filtered_channel_events = channel_events[channel_events['channel_event_id'].isin(valid_channel_event_ids)].copy()
-    
-    print(f"    Original channel events: {n_total}")
-    print(f"    Failed size criterion (<{min_channel_event_size} pulses): {n_removed_size}")
-    print(f"    Failed amplitude criterion (max amplitude <{min_amplitude}): {n_removed_amplitude}")
-    print(f"    Remaining after combined filter: {len(valid_channel_event_ids)}")
-    print(f"    Total removed: {n_removed_total}")
-    
-    if len(filtered_channel_events) == 0:
-        print(f"  All channel events removed by pre-merge filtering! Consider lowering min_channel_event_size or min_amplitude.")
-        exit(1)
-    
-    # NOW EFFICIENTLY LOAD ONLY WAVEFORMS FOR FILTERED EODS
-    print(f"\nStep 4.2: Loading waveforms...")
-    combined_waveforms = None
-    
-    if len(files_with_waveforms) > 0:
-        print(f"  Loading waveforms for {len(filtered_channel_events)} filtered EODs...")
-
-        # Create mapping of which EODs we need from each file
-        filtered_eods_by_file = {}
-        for _, eod_row in filtered_channel_events.iterrows():
-            file_idx = eod_row['file_index']
-            original_row = eod_row['original_row_in_file']
-            
-            if file_idx not in filtered_eods_by_file:
-                filtered_eods_by_file[file_idx] = []
-            filtered_eods_by_file[file_idx].append(original_row)
+    if pre_merge_filtering:
+        # Pre-merge filter: remove channel events based on size AND amplitude criteria
+        print(f"  Pre-merge filtering: removing channel events with <{min_channel_event_size} pulses OR no pulse ≥{min_amplitude} amplitude...")
         
-        print(f"  Need to load waveforms from {len(filtered_eods_by_file)} files")
+        # Criterion 1: Size filter (at least min_channel_event_size pulses)
+        event_sizes = channel_events.groupby('channel_event_id').size()
+        valid_size_ids = event_sizes[event_sizes >= min_channel_event_size].index
         
-        all_filtered_waveforms = []
-        all_filtered_metadata = []
+        # Criterion 2: Amplitude filter (at least one pulse with amplitude ≥ min_amplitude)
+        event_max_amplitudes = channel_events.groupby('channel_event_id')['eod_amplitude'].max()
+        valid_amplitude_ids = event_max_amplitudes[event_max_amplitudes >= min_amplitude].index
         
-        for file_idx, needed_rows in filtered_eods_by_file.items():
-            file_info = file_metadata[file_idx]
-            
-            if not file_info['has_waveforms']:
-                print(f"    Skipping {file_info['base_name']} - no waveform files")
-                continue
-                
-            print(f"    Loading {len(needed_rows)} waveforms from {file_info['base_name']}")
-            
-            # Load ALL waveforms from this file (we need the full array structure)
-            waveforms = load_variable_length_waveforms(file_info['waveform_base_path'])
-            
-            # Load metadata
-            file_metadata_list = None
-            try:
-                with open(file_info['waveform_base_path'] + '_metadata.json', 'r') as f:
-                    metadata = json.load(f)
-                    
-                if isinstance(metadata, dict) and 'individual_metadata' in metadata:
-                    file_metadata_list = metadata['individual_metadata']
-                elif isinstance(metadata, list):
-                    file_metadata_list = metadata
-                else:
-                    # Create dummy metadata
-                    file_metadata_list = [{'index': i} for i in range(len(waveforms))]
-                    
-                # Clean up the metadata dict immediately after extraction
-                del metadata
-                    
-            except Exception as e:
-                print(f"      Warning: Could not load metadata: {e}")
-                file_metadata_list = [{'index': i} for i in range(len(waveforms))]
-            
-            # Extract only the waveforms we need
-            for row_idx in needed_rows:
-                if row_idx < len(waveforms):
-                    all_filtered_waveforms.append(waveforms[row_idx])
-                    if row_idx < len(file_metadata_list):
-                        all_filtered_metadata.append(file_metadata_list[row_idx])
-                    else:
-                        all_filtered_metadata.append({'index': row_idx, 'file': file_info['base_name']})
-                else:
-                    print(f"      Warning: Row {row_idx} not found in waveforms (file has {len(waveforms)} waveforms)")
-            
-            # Clean up large temporary variables immediately after use
-            del waveforms
-            del file_metadata_list
-            
-            # Force garbage collection after processing each file to free memory
-            gc.collect()
-            print(f"      Memory freed after processing {file_info['base_name']}")
+        # Combined filter: channel events must pass BOTH criteria
+        valid_channel_event_ids = valid_size_ids.intersection(valid_amplitude_ids)
         
-        if all_filtered_waveforms:
-            combined_waveforms = {'waveforms': all_filtered_waveforms, 'metadata': all_filtered_metadata}
-            print(f"  Loaded {len(all_filtered_waveforms)} waveforms for filtered EODs")
-        else:
-            print("  No waveforms loaded")
-            
-        # Clean up temporary waveform loading variables
-        del all_filtered_waveforms
-        del all_filtered_metadata
-        del filtered_eods_by_file
+        # Calculate removal statistics
+        n_total = channel_events['channel_event_id'].nunique()
+        n_removed_size = n_total - len(valid_size_ids)
+        n_removed_amplitude = n_total - len(valid_amplitude_ids)
+        n_removed_total = n_total - len(valid_channel_event_ids)
         
-        # Force garbage collection after all waveform loading is complete
-        gc.collect()
-        print("  Memory cleanup completed after waveform loading")
-        print_memory_usage("After waveform loading")
+        # Apply combined filter
+        filtered_channel_events = channel_events[channel_events['channel_event_id'].isin(valid_channel_event_ids)].copy()
+        
+        print(f"    Original channel events: {n_total}")
+        print(f"    Failed size criterion (<{min_channel_event_size} pulses): {n_removed_size}")
+        print(f"    Failed amplitude criterion (max amplitude <{min_amplitude}): {n_removed_amplitude}")
+        print(f"    Remaining after combined filter: {len(valid_channel_event_ids)}")
+        print(f"    Total removed: {n_removed_total}")
+        
+        if len(filtered_channel_events) == 0:
+            print(f"  All channel events removed by pre-merge filtering! Consider lowering min_channel_event_size or min_amplitude.")
+            exit(1)
         
     else:
-        print("  No files with waveforms found")
+        filtered_channel_events = channel_events.copy()
+
+    # Note: Waveform loading is now deferred until after merging and filtering (Step 8.5)
+    # This saves memory by only loading waveforms for final events that pass all filters
     
     # Update channel_events to the filtered version
     channel_events = filtered_channel_events
     
     # Clean up intermediate filtering variables
-    del filtered_channel_events, valid_size_ids, valid_amplitude_ids
-    del valid_channel_event_ids, event_sizes, event_max_amplitudes
+    del filtered_channel_events
     gc.collect()
     print("  Memory cleanup completed after filtering")
 
-# =============================================================================
-# STEP 5: EOD FEATURE CLUSTERING AND NOISE FILTERING
-# =============================================================================
-print(f"\nStep 5: EOD feature clustering and noise filtering...")
-
-if clustering_enabled and len(channel_events) > 0:
-    print(f"  Starting EOD clustering on individual pulses...")
-    print(f"  Processing {len(channel_events)} individual EOD pulses...")
-    
-    # Use pre-computed features from individual EOD pulses
-    clustering_features = ['eod_amplitude_ratio', 'waveform_length', 'eod_width_us', 'fft_freq_max']
-    
-    # Check which features are available
-    available_features = [f for f in clustering_features if f in channel_events.columns]
-    missing_features = [f for f in clustering_features if f not in channel_events.columns]
-    
-    print(f"  Available features: {available_features}")
-    if missing_features:
-        print(f"  Missing features: {missing_features}")
-    
-    if len(available_features) == 0:
-        print("  No clustering features available - skipping clustering")
-        noise_filtered_events = channel_events.copy()
-    else:
-        # Extract feature matrix from individual EOD pulses
-        feature_data = channel_events[available_features].copy()
-        
-        # Handle missing values
-        print(f"  Feature matrix shape: {feature_data.shape}")
-        print(f"  Checking for missing values...")
-        
-        # Check for NaN or infinite values
-        nan_counts = feature_data.isnull().sum()
-        inf_counts = np.isinf(feature_data.select_dtypes(include=[np.number])).sum()
-        
-        if nan_counts.sum() > 0:
-            print(f"  Found NaN values: {nan_counts[nan_counts > 0].to_dict()}")
-        if inf_counts.sum() > 0:
-            print(f"  Found infinite values: {inf_counts[inf_counts > 0].to_dict()}")
-        
-        # Fill missing values with feature medians
-        for col in available_features:
-            if feature_data[col].isnull().sum() > 0:
-                median_val = feature_data[col].median()
-                feature_data[col].fillna(median_val, inplace=True)
-                print(f"    Filled {feature_data[col].isnull().sum()} NaN values in {col} with median: {median_val:.3f}")
-        
-        # Handle infinite values
-        feature_data = feature_data.replace([np.inf, -np.inf], np.nan)
-        for col in available_features:
-            if feature_data[col].isnull().sum() > 0:
-                median_val = feature_data[col].median()
-                feature_data[col].fillna(median_val, inplace=True)
-                print(f"    Replaced infinite values in {col} with median: {median_val:.3f}")
-        
-        print(f"  Feature statistics for individual pulses:")
-        for col in available_features:
-            vals = feature_data[col]
-            print(f"    {col}: min={vals.min():.3f}, max={vals.max():.3f}, mean={vals.mean():.3f}, std={vals.std():.3f}")
-        
-        # More memory-efficient approach: Use length clustering with reduced dataset
-        print("  Using memory-efficient length + feature clustering approach...")
-        
-        # Stage 1: Pre-filter by obvious outliers using waveform length
-        print("    Stage 1: Pre-filtering by waveform length...")
-        lengths = channel_events['waveform_length'].values
-        
-        # Use simple statistical outlier detection for length first
-        length_q1 = np.percentile(lengths, 25)
-        length_q3 = np.percentile(lengths, 75)
-        length_iqr = length_q3 - length_q1
-        length_lower = length_q1 - 1.5 * length_iqr
-        length_upper = length_q3 + 1.5 * length_iqr
-        
-        # Keep pulses within reasonable length bounds
-        length_mask = (lengths >= length_lower) & (lengths <= length_upper)
-        length_filtered_events = channel_events[length_mask].copy()
-        
-        print(f"      Length filtering: kept {len(length_filtered_events)}/{len(channel_events)} pulses")
-        print(f"      Length bounds: {length_lower:.0f} - {length_upper:.0f} samples")
-        
-        # Stage 2: Use enhanced feature clustering on length-filtered data
-        print("    Stage 2: Feature-based clustering on length-filtered data...")
-        
-        # Enhanced feature set including length groups
-        enhanced_features = ['eod_amplitude_ratio', 'waveform_length', 'eod_width_us', 'fft_freq_max']
-        feature_data = length_filtered_events[enhanced_features].copy()
-        
-        # Add length category as additional feature
-        length_bins = np.linspace(length_lower, length_upper, 10)
-        length_categories = np.digitize(length_filtered_events['waveform_length'], length_bins)
-        feature_data['length_category'] = length_categories
-        
-        # Normalize features for clustering        
-        X = feature_data.values
-        X = np.nan_to_num(X, nan=0, posinf=1e6, neginf=-1e6)
-        
-        scaler = StandardScaler()
-        X_scaled = scaler.fit_transform(X)
-        
-        print(f"      Enhanced feature matrix shape: {X_scaled.shape}")
-        
-        # Perform DBSCAN clustering with enhanced features
-        clusterer = DBSCAN(eps=dbscan_eps, min_samples=dbscan_min_samples, metric='euclidean')
-        cluster_labels_filtered = clusterer.fit_predict(X_scaled)
-        
-        # Map back to full dataset
-        final_cluster_labels = np.full(len(channel_events), -1, dtype=int)
-        final_cluster_labels[length_mask] = cluster_labels_filtered
-        
-        # Add cluster labels to individual EOD pulses
-        channel_events['pulse_cluster_id'] = final_cluster_labels
-        
-        # Analyze clustering results for individual pulses
-        cluster_labels = final_cluster_labels
-        unique_clusters = np.unique(cluster_labels)
-        n_clusters = len(unique_clusters) - (1 if -1 in unique_clusters else 0)
-        n_noise_pulses = np.sum(cluster_labels == -1)
-        
-        print(f"  Two-stage clustering results:")
-        print(f"    Number of final clusters: {n_clusters}")
-        print(f"    Number of noise pulses: {n_noise_pulses}")
-        print(f"    Percentage noise pulses: {n_noise_pulses/len(cluster_labels)*100:.1f}%")
-        
-        # Create waveform visualization for each cluster
-        print("  Creating waveform cluster visualization...")
-        
-        # Analyze cluster characteristics for individual pulses
-        print("  Individual pulse cluster characteristics:")
-        for cluster_id in sorted(unique_clusters):
-            if cluster_id == -1:
-                cluster_name = "DBSCAN Outliers"
-            else:
-                cluster_name = f"Cluster {cluster_id}"
-                
-            mask = cluster_labels == cluster_id
-            cluster_pulses = channel_events[mask]
-            
-            print(f"    {cluster_name} ({np.sum(mask)} pulses):")
-            for col in available_features:
-                if col in cluster_pulses.columns:
-                    vals = cluster_pulses[col]
-                    print(f"      {col}: {vals.min():.3f}-{vals.max():.3f} (mean: {vals.mean():.3f})")
-            
-                    # Show which channels the pulses come from
-                    if len(cluster_pulses) > 0:
-                        channels_in_cluster = cluster_pulses['eod_channel'].unique()
-                        print(f"      Channels: {sorted(channels_in_cluster)}")
-                
-                # Clean up per-cluster variables
-                del cluster_pulses, mask
-        
-        # Clean up clustering analysis variables
-        del available_features, unique_clusters        # Create multi-panel waveform plot
-        if combined_waveforms is not None:
-            print("  Creating waveform overlay plots for each cluster...")
-            
-            # Calculate subplot layout
-            n_clusters_including_outliers = len(unique_clusters)
-            n_cols = min(3, n_clusters_including_outliers)
-            n_rows = int(np.ceil(n_clusters_including_outliers / n_cols))
-            
-            fig, axes = plt.subplots(n_rows, n_cols, figsize=(5*n_cols, 4*n_rows))
-            if n_clusters_including_outliers == 1:
-                axes = [axes]
-            elif n_rows == 1:
-                axes = axes.reshape(1, -1)
-            axes = axes.flatten()
-            
-            colors = cm.get_cmap('tab10', n_clusters_including_outliers)
-            
-            for i, cluster_id in enumerate(sorted(unique_clusters)):
-                ax = axes[i]
-                
-                # Get pulses in this cluster
-                mask = cluster_labels == cluster_id
-                cluster_pulses = channel_events[mask]
-                
-                if cluster_id == -1:
-                    cluster_name = f"DBSCAN Outliers"
-                    color = 'red'
-                else:
-                    cluster_name = f"Cluster {cluster_id}"
-                    color = colors(i)
-                
-                # Sample up to 100 waveforms for visualization
-                max_waveforms = 100
-                if len(cluster_pulses) > max_waveforms:
-                    cluster_sample = cluster_pulses.sample(n=max_waveforms, random_state=42)
-                    sample_info = f" (showing {max_waveforms}/{len(cluster_pulses)})"
-                else:
-                    cluster_sample = cluster_pulses
-                    sample_info = f" (all {len(cluster_pulses)})"
-                
-                waveform_count = 0
-                for pulse_idx, pulse in cluster_sample.iterrows():
-                    channel = pulse['eod_channel']
-                    
-                    # Get waveform data for this pulse using the original table index
-                    if 'waveforms' in combined_waveforms and 'metadata' in combined_waveforms:
-                        all_waveforms = combined_waveforms['waveforms']
-                        all_metadata = combined_waveforms['metadata']
-                        
-                        # Find the corresponding waveform using the index in filtered_eods
-                        # The pulse_idx corresponds to the row in filtered_eods
-                        if pulse_idx < len(all_waveforms):
-                            waveform_data = all_waveforms[pulse_idx]
-                            if waveform_data is not None and len(waveform_data) > 0:
-                                # Normalize waveform for overlay visualization
-                                waveform_norm = (waveform_data - waveform_data.mean()) / (waveform_data.std() + 1e-8)
-                                time_axis = np.arange(len(waveform_norm)) / 96000 * 1000  # Convert to ms
-                                ax.plot(time_axis, waveform_norm, color=color, alpha=0.3, linewidth=0.5)
-                                waveform_count += 1
-                
-                ax.set_title(f'{cluster_name}{sample_info}\n{waveform_count} waveforms plotted')
-                ax.set_xlabel('Time (ms)')
-                ax.set_ylabel('Normalized Amplitude')
-                ax.grid(True, alpha=0.3)
-                
-                # Add cluster statistics as text
-                if len(cluster_pulses) > 0:
-                    stats_text = []
-                    for col in available_features[:2]:  # Show first 2 features
-                        if col in cluster_pulses.columns:
-                            vals = cluster_pulses[col]
-                            stats_text.append(f'{col}: {vals.mean():.2f}±{vals.std():.2f}')
-                    ax.text(0.02, 0.98, '\n'.join(stats_text), 
-                           transform=ax.transAxes, verticalalignment='top',
-                           bbox=dict(boxstyle='round', facecolor='white', alpha=0.8),
-                           fontsize=8)
-            
-            # Hide unused subplots
-            for j in range(i+1, len(axes)):
-                axes[j].set_visible(False)
-            
-            plt.tight_layout()
-            
-            # Save the plot
-            waveform_plot_path = Path(output_folder) / 'pulse_cluster_waveforms.png'
-            plt.savefig(waveform_plot_path, dpi=150, bbox_inches='tight')
-            print(f"  Saved waveform cluster visualization: {waveform_plot_path}")
-            
-            # Clean up plotting variables before interactive display
-            del colors, axes, fig
-            
-            # Show interactive popup plot for inspection
-            waveform_fig = plt.gcf()  # Get current figure for later cleanup
-            print("  Displaying interactive cluster visualization...")
-            plt.show(block=False)  # Non-blocking show
-            
-            # Give the plot a moment to appear
-            plt.pause(1)
-        else:
-            print("  Skipping waveform visualization - no waveform data available")
-        
-        # Interactive user input for noise cluster selection
-        print(f"\n{'='*50}")
-        print("INTERACTIVE CLUSTER FILTERING")
-        print(f"{'='*50}")
-        print(f"Available clusters: {sorted(unique_clusters)}")
-        print("Please inspect the waveform cluster plot and decide which clusters represent noise.")
-        print("Note: DBSCAN automatically labels outliers as cluster -1")
-        print("")
-        
-        # Get user input for noise clusters
-        while True:
-            try:
-                user_input = input("Enter cluster IDs to REMOVE as noise (comma-separated integers, or 'none' to keep all): ").strip()
-                
-                if user_input.lower() == 'none':
-                    noise_cluster_ids = []
-                    break
-                elif user_input == '':
-                    print("Please enter cluster IDs or 'none'")
-                    continue
-                else:
-                    # Parse comma-separated integers
-                    noise_cluster_ids = [int(x.strip()) for x in user_input.split(',')]
-                    
-                    # Validate cluster IDs
-                    invalid_ids = [cid for cid in noise_cluster_ids if cid not in unique_clusters]
-                    if invalid_ids:
-                        print(f"Invalid cluster IDs: {invalid_ids}. Available: {sorted(unique_clusters)}")
-                        continue
-                    break
-                    
-            except ValueError:
-                print("Please enter valid integers separated by commas, or 'none'")
-                continue
-        
-        # Close the interactive plot after user input
-        plt.close('all')
-        print("  Interactive plot closed")
-        
-        # Clean up waveform plotting variables
-        if 'waveform_fig' in locals():
-            del waveform_fig
-        if 'combined_waveforms' in locals() and 'waveforms' in combined_waveforms:
-            # Don't delete combined_waveforms completely as it's needed for saving later
-            pass  
-        gc.collect()
-        
-        # Filter based on user selection
-        if len(noise_cluster_ids) > 0:
-            print(f"  Removing pulses from clusters: {noise_cluster_ids}")
-            
-            # Create mask to filter out selected noise clusters
-            noise_mask = np.isin(cluster_labels, noise_cluster_ids)
-            non_noise_mask = ~noise_mask
-            noise_filtered_events = channel_events[non_noise_mask].copy()
-            
-            n_removed_pulses = np.sum(noise_mask)
-            
-            print(f"  After user-defined cluster filtering:")
-            print(f"    Original pulses: {len(channel_events)}")
-            print(f"    Remaining pulses: {len(noise_filtered_events)}")
-            print(f"    Removed pulses: {n_removed_pulses}")
-            print(f"    Filtering efficiency: {n_removed_pulses/len(channel_events)*100:.1f}% pulses removed")
-            
-            # Check how filtering affects channel events
-            original_channel_events = channel_events['channel_event_id'].nunique()
-            remaining_channel_events = noise_filtered_events['channel_event_id'].nunique()
-            print(f"    Original channel events: {original_channel_events}")
-            print(f"    Remaining channel events: {remaining_channel_events}")
-            print(f"    Channel events lost: {original_channel_events - remaining_channel_events}")
-            
-        else:
-            print("  No clusters selected for removal - keeping all pulses")
-            noise_filtered_events = channel_events.copy()
-        
-        # Clean up cluster filtering variables
-        if 'noise_cluster_ids' in locals():
-            del noise_cluster_ids
-        if 'noise_mask' in locals():
-            del noise_mask, non_noise_mask
-        if 'cluster_labels' in locals():
-            del cluster_labels
-        gc.collect()
-        
-        # Clean up clustering variables to free memory
-        del X_scaled, X, feature_data
-        del scaler, clusterer
-        del lengths, length_mask, final_cluster_labels
-        if 'length_filtered_events' in locals():
-            del length_filtered_events
-        if 'cluster_labels_filtered' in locals():
-            del cluster_labels_filtered
-        if 'enhanced_features' in locals():
-            del enhanced_features
-        gc.collect()
-        print("  Memory cleanup completed after pulse clustering")
-        print_memory_usage("After pulse clustering")
-
-else:
-    print("  EOD pulse clustering disabled - skipping clustering step")
-    noise_filtered_events = channel_events.copy()
-
-# Continue with the noise-filtered individual pulses
-channel_events = noise_filtered_events
-
-if len(channel_events) == 0:
-    print("  No channel events found after filtering!")
-    exit(1)
-
-# Post-cluster size filtering: Some channel events may now be too small after noise filtering
-print(f"  Post-cluster size filtering: removing channel events with <{min_channel_event_size} pulses...")
-pre_filter_channel_events = channel_events['channel_event_id'].nunique()
-pre_filter_total_eods = len(channel_events)
-
-# Calculate EODs per channel event after cluster filtering
-channel_event_sizes_post_cluster = channel_events.groupby('channel_event_id').size()
-valid_channel_events_post_cluster = channel_event_sizes_post_cluster[channel_event_sizes_post_cluster >= min_channel_event_size].index
-
-# Filter channel events by post-cluster size
-channel_events = channel_events[channel_events['channel_event_id'].isin(valid_channel_events_post_cluster)].copy()
-
-post_filter_channel_events = len(valid_channel_events_post_cluster)
-post_filter_total_eods = len(channel_events)
-removed_channel_events = pre_filter_channel_events - post_filter_channel_events
-removed_eods = pre_filter_total_eods - post_filter_total_eods
-
-print(f"    Original channel events (post-cluster): {pre_filter_channel_events}")
-print(f"    Remaining channel events: {post_filter_channel_events}")
-print(f"    Removed channel events: {removed_channel_events}")
-print(f"    Original EODs (post-cluster): {pre_filter_total_eods}")
-print(f"    Remaining EODs: {post_filter_total_eods}")
-print(f"    Removed EODs: {removed_eods}")
-
-if len(channel_events) == 0:
-    print("  No channel events found after post-cluster size filtering!")
-    exit(1)
-
+#%%
 # =============================================================================
 # STEP 6: EXTRACT EVENTS - STAGE 2 (MERGE NEIGHBORING CHANNELS)
 # =============================================================================
@@ -964,19 +487,40 @@ if merged_events_list:
 else:
     print("  No merged events found!")
     exit(1)
-
+#%%
 # =============================================================================
-# STEP 7: EXTRACT EVENTS - STAGE 3 (SIZE FILTERING)
+# STEP 7: EXTRACT EVENTS - STAGE 3 (2. SIZE AND AMP FILTERING)
 # =============================================================================
-print(f"\nStep 7: Stage 3 - Size filtering merged events...")
-print(f"  Using min_eods_per_event = {min_eods_per_event}")
+print(f"\nStep 7: Stage 3 - Filtering merged events...")
+print(f"  Removing events with <{min_eods_per_event} pulses OR no pulse ≥{min_amplitude} amplitude...")
 
+# Post-merge filter: remove events based on size AND amplitude criteria
+
+# Criterion 1: Size filter (at least min_eods_per_event EODs)
 # Count EODs per merged event
 event_sizes = merged_events.groupby('merged_event_id').size()
 print(f"  Event sizes: min={event_sizes.min()}, max={event_sizes.max()}, mean={event_sizes.mean():.1f}")
+valid_size_ids = event_sizes[event_sizes >= min_eods_per_event].index
 
-valid_event_ids = event_sizes[event_sizes >= min_eods_per_event].index
+# Criterion 2: Amplitude filter (at least one pulse with amplitude ≥ min_amplitude)
+event_max_amplitudes = merged_events.groupby('merged_event_id')['eod_amplitude'].max()
+valid_amplitude_ids = event_max_amplitudes[event_max_amplitudes >= min_amplitude].index
+
+# Combined filter: channel events must pass BOTH criteria
+valid_event_ids = valid_size_ids.intersection(valid_amplitude_ids)
+
+# Calculate removal statistics
+n_total = merged_events['merged_event_id'].nunique()
+n_removed_size = n_total - len(valid_size_ids)
+n_removed_amplitude = n_total - len(valid_amplitude_ids)
+n_removed_total = n_total - len(valid_event_ids)
+
 print(f"  Events passing size filter: {len(valid_event_ids)} / {len(event_sizes)}")
+print(f"    Original channel events: {n_total}")
+print(f"    Failed size criterion (<{min_eods_per_event} pulses): {n_removed_size}")
+print(f"    Failed amplitude criterion (max amplitude <{min_amplitude}): {n_removed_amplitude}")
+print(f"    Remaining after combined filter: {len(valid_event_ids)}")
+print(f"    Total removed: {n_removed_total}")
 
 if len(valid_event_ids) == 0:
     print("  No events passed size filtering!")
@@ -1001,11 +545,124 @@ del unique_ids
 del id_mapping
 gc.collect()
 print("  Memory cleanup completed after size filtering")
+#%%
+# =============================================================================
+# STEP 8: LOAD WAVEFORMS FOR FINAL EVENTS (MEMORY-OPTIMIZED)
+# =============================================================================
+print(f"\nStep 8: Loading waveforms for final events...")
+print(f"  Loading waveforms only for {len(event_table)} EODs in final {event_table['event_id'].nunique()} events")
 
+if len(files_with_waveforms) > 0:
+    # Create mapping of which EODs we need from each file AND their target positions
+    filtered_eods_by_file = {}
+    eod_position_mapping = {}  # Maps (file_idx, original_row) to position in event_table
+    
+    for order_idx, (_, eod_row) in enumerate(event_table.iterrows()):
+        file_idx = eod_row['file_index']
+        original_row = eod_row['original_row_in_file']
+        
+        if file_idx not in filtered_eods_by_file:
+            filtered_eods_by_file[file_idx] = []
+        filtered_eods_by_file[file_idx].append(original_row)
+        eod_position_mapping[(file_idx, original_row)] = order_idx
+    
+    print(f"  Need to load waveforms from {len(filtered_eods_by_file)} files")
+    
+    # Pre-allocate waveform list with None placeholders
+    all_filtered_waveforms = [None] * len(event_table)
+    
+    for file_idx, needed_rows in filtered_eods_by_file.items():
+        file_info = file_metadata[file_idx]
+        
+        if not file_info['has_waveforms']:
+            print(f"    Skipping {file_info['base_name']} - no waveform files")
+            continue
+            
+        print(f"    Loading {len(needed_rows)} waveforms from {file_info['base_name']}")
+        
+        # Load ALL waveforms from this file
+        waveforms = load_variable_length_waveforms(file_info['waveform_base_path'])
+        
+        # Extract waveforms and place them at correct positions in pre-allocated list
+        for row_idx in needed_rows:
+            if row_idx < len(waveforms):
+                # Get the correct position in the event_table order
+                target_position = eod_position_mapping[(file_idx, row_idx)]
+                all_filtered_waveforms[target_position] = waveforms[row_idx]
+            else:
+                print(f"      Warning: Row {row_idx} not found in waveforms (file has {len(waveforms)} waveforms)")
+            
+        # Clean up large temporary variables immediately after use
+        del waveforms
+        
+        # Force garbage collection after processing each file to free memory
+        gc.collect()
+        print(f"      Memory freed after processing {file_info['base_name']}")
+    
+    # Check for any None values (missing waveforms) and filter them out
+    valid_waveforms = [w for w in all_filtered_waveforms if w is not None]
+    missing_count = len(all_filtered_waveforms) - len(valid_waveforms)
+    
+    if missing_count > 0:
+        print(f"      Warning: {missing_count} waveforms could not be loaded")
+        # Filter out corresponding EODs from event_table
+        valid_indices = [i for i, w in enumerate(all_filtered_waveforms) if w is not None]
+        event_table = event_table.iloc[valid_indices].reset_index(drop=True)
+        all_filtered_waveforms = valid_waveforms
+    
+    if all_filtered_waveforms:
+        print(f"  Loaded {len(all_filtered_waveforms)} waveforms for final events")
+        print(f"  Waveform-EOD order matches: each waveform corresponds to same row in event_table")
+        
+        # Create combined_waveforms structure for compatibility with individual event saving
+        combined_waveforms = {'waveforms': all_filtered_waveforms}
+    else:
+        print("  No waveforms loaded")
+        combined_waveforms = None
+        
+    # Clean up temporary waveform loading variables
+    del filtered_eods_by_file, eod_position_mapping
+    
+    # Force garbage collection after all waveform loading is complete
+    gc.collect()
+    print("  Memory cleanup completed after optimized waveform loading")
+    print_memory_usage("After optimized waveform loading")
+    
+    # # Verification: Check that waveform_length matches actual waveform lengths
+    # print(f"  Verifying waveform-EOD correspondence...")
+    # if len(all_filtered_waveforms) > 0 and len(event_table) > 0:
+    #     l_r = []
+    #     mismatches = 0
+    #     for i, l in enumerate(event_table['waveform_length']):
+    #         if i < len(all_filtered_waveforms):
+    #             actual_length = len(all_filtered_waveforms[i])
+    #             ratio = l / actual_length
+    #             l_r.append(ratio)
+    #             if abs(ratio - 1.0) > 0.001:  # Allow small floating point differences
+    #                 mismatches += 1
+    #         else:
+    #             l_r.append(float('nan'))
+    #             mismatches += 1
+        
+    #     print(f"    Checked {len(l_r)} waveform-EOD pairs for final events")
+    #     if len(l_r) > 0:
+    #         print(f"    Length ratio statistics: min={min(l_r):.4f}, max={max(l_r):.4f}, mean={sum(l_r)/len(l_r):.4f}")
+    #         print(f"    Mismatches (ratio != 1.0): {mismatches}")
+            
+    #         if mismatches == 0:
+    #             print("    ✓ SUCCESS: All final event waveforms correspond to correct EOD entries!")
+    #         else:
+    #             print(f"    ⚠ WARNING: {mismatches} waveforms don't match their EOD entries")
+        
+else:
+    print("  No files with waveforms found")
+    all_filtered_waveforms = []
+    combined_waveforms = None
+#%%
 # =============================================================================
-# STEP 8: CREATE EVENT SUMMARY (BEFORE INDIVIDUAL PROCESSING)
+# STEP 9: CREATE EVENT SUMMARY (BEFORE INDIVIDUAL PROCESSING)
 # =============================================================================
-print(f"\nStep 8: Creating event summary...")
+print(f"\nStep 9: Creating event summary...")
 
 # Create event summary directly from event_table BEFORE the processing loop
 event_summaries = []
@@ -1056,9 +713,9 @@ print_memory_usage("After event summary creation")
 
 #%%
 # =============================================================================
-# STEP 9: PROCESS INDIVIDUAL EVENTS (AUDIO EXTRACTION + INDIVIDUAL SAVES)
+# STEP 10: PROCESS INDIVIDUAL EVENTS (AUDIO EXTRACTION + INDIVIDUAL SAVES)
 # =============================================================================
-print(f"\nStep 9: Processing individual events (audio extraction and individual saves)...")
+print(f"\nStep 10: Processing individual events (audio extraction and individual saves)...")
 
 # Find all wav files in raw data folder
 wav_files = glob.glob(str(Path(raw_data_folder) / "*.wav"))
@@ -1447,9 +1104,9 @@ print_memory_usage("After individual event processing")
 
 #%%
 # =============================================================================
-# STEP 10: SAVE FINAL COMBINED RESULTS
+# STEP 11: SAVE FINAL COMBINED RESULTS
 # =============================================================================
-print(f"\nStep 10: Saving final combined results...")
+print(f"\nStep 11: Saving final combined results...")
 
 output_path = Path(output_folder)
 
@@ -1472,9 +1129,22 @@ print(f"  Saved updated event summary: {event_summary_path}")
 
 # Save parameters
 params_df = pd.DataFrame({
-    'parameter': ['max_ipi_seconds', 'min_eods_per_event', 'max_merge_gap_seconds', 'sample_rate', 'file_duration', 'margin', 'min_channel_event_size', 'min_amplitude', 'clustering_enabled', 'dbscan_eps', 'dbscan_min_samples'],
-    'value': [max_ipi_seconds, min_eods_per_event, max_merge_gap_seconds, sample_rate, file_duration, margin, min_channel_event_size, min_amplitude, clustering_enabled, dbscan_eps, dbscan_min_samples]
+    'parameter': ['max_ipi_seconds', 'min_eods_per_event', 'max_merge_gap_seconds', 'sample_rate', 'file_duration', 'margin', 'min_channel_event_size', 'min_amplitude', 'pre_merge_filtering', 'clustering_enabled', 'dbscan_eps', 'dbscan_min_samples'],
+    'value': [max_ipi_seconds, min_eods_per_event, max_merge_gap_seconds, sample_rate, file_duration, margin, min_channel_event_size, min_amplitude, pre_merge_filtering, clustering_enabled, dbscan_eps, dbscan_min_samples]
 })
+
+# # Parameters (can be adjusted based on your data)
+# max_ipi_seconds = 5.0       # Maximum inter-pulse interval for temporal clustering
+# min_eods_per_event = 30     # Minimum EODs required per merged event
+# max_merge_gap_seconds = 0.5  # Maximum gap for merging neighboring channel events
+# sample_rate = 96000         # Audio sample rate
+# file_duration = 600.0       # Audio file duration in seconds
+# margin = 1.0                # Safety margin around events in seconds
+# min_channel_event_size = 10  # Minimum size of channel events before merging (high-pass filter)
+# min_amplitude = 0.01          # Minimum amplitude threshold for events (at least one eod should have this size)
+# create_plots = True
+# pre_merge_filtering = True  # Enable pre-merge filtering based on size and amplitude criteria
+
 params_path = output_path / "session_events_extraction_params.csv"
 params_df.to_csv(params_path, index=False)
 print(f"  Saved parameters: {params_path}")
@@ -1485,9 +1155,9 @@ print(f"  - event_XXX_waveforms_concatenated.npz: Waveforms for each event (if a
 print(f"  - event_XXX_YYYYMMDDTHHMMSS.wav: Raw audio data for each event")
 
 # =============================================================================
-# STEP 11: CREATE TIMELINE PLOT
+# STEP 12: CREATE TIMELINE PLOT
 # =============================================================================
-print(f"\nStep 11: Creating event timeline...")
+print(f"\nStep 12: Creating event timeline...")
 
 if len(event_summary) > 0:
     plt.figure(figsize=(15, 6))
