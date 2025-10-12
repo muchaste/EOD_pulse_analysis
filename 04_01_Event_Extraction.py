@@ -354,78 +354,91 @@ for idx, current_event in event_summaries.iterrows():
     while found_new_merge:
         found_new_merge = False
         iteration += 1
-        print(f"      Iteration {iteration}: bounds=({current_start.strftime('%H:%M:%S')}-{current_end.strftime('%H:%M:%S')}), channels={sorted(current_channels)}")
+        # Convert datetime objects to pandas Timestamps for safe formatting
+        current_start_pd = pd.Timestamp(current_start)
+        current_end_pd = pd.Timestamp(current_end)
+        print(f"      Iteration {iteration}: bounds=({current_start_pd.strftime('%H:%M:%S')}-{current_end_pd.strftime('%H:%M:%S')}), channels={sorted(current_channels)}")
 
-        # --- Temporal-edge-based merging ---
-        # For each channel in the current merged event, track its temporal edges (start, end)
-        # For each edge (channel, edge_time), check neighbor channels for unmerged events that are temporally adjacent/overlapping
-        edge_points = []  # List of (channel, edge_time, 'start'/'end')
-        for ch in current_channels:
-            # Find all events in merged_group for this channel
-            ch_event_ids = [eid for eid in merged_group if event_summaries.loc[event_summaries['channel_event_id'] == eid, 'channel'].values[0] == ch]
-            # For each, get start and end
-            for eid in ch_event_ids:
-                ev = event_summaries.loc[event_summaries['channel_event_id'] == eid].iloc[0]
-                edge_points.append((ch, ev['channel_start_time'], 'start'))
-                edge_points.append((ch, ev['channel_end_time'], 'end'))
-
-        # For each edge, check neighbor channels for unmerged events that are temporally adjacent/overlapping
+        # --- CORRECTED: Spatially AND temporally connected merging ---
+        # For each channel currently in the merged event, check its specific temporal bounds
+        # Only merge neighbor events that are connected in BOTH space AND time
         events_to_merge_this_iteration = []
         new_channels_this_iteration = set()
-        for ch, edge_time, edge_type in edge_points:
+        
+        # For each channel in current merged event, get its specific temporal bounds
+        channel_time_bounds = {}
+        for ch in current_channels:
+            # Find all events in merged_group for this channel and get their combined time bounds
+            ch_event_ids = [eid for eid in merged_group if event_summaries.loc[event_summaries['channel_event_id'] == eid, 'channel'].values[0] == ch]
+            if ch_event_ids:
+                ch_starts = [event_summaries.loc[event_summaries['channel_event_id'] == eid, 'channel_start_time'].values[0] for eid in ch_event_ids]
+                ch_ends = [event_summaries.loc[event_summaries['channel_event_id'] == eid, 'channel_end_time'].values[0] for eid in ch_event_ids]
+                channel_time_bounds[ch] = (min(ch_starts), max(ch_ends))
+        
+        # For each channel with events in the merged group, check its spatial neighbors
+        for ch, (ch_start, ch_end) in channel_time_bounds.items():
             for neighbor_ch in [ch-1, ch+1]:
                 if neighbor_ch < 0 or neighbor_ch > 6:
                     continue
+                    
                 # Find unprocessed events on neighbor channel
                 neighbor_events = event_summaries[
                     (event_summaries['channel'] == neighbor_ch) &
                     (~event_summaries['channel_event_id'].isin(processed_channel_events))
                 ]
+                
                 for _, neighbor_event in neighbor_events.iterrows():
                     neighbor_id = neighbor_event['channel_event_id']
                     if neighbor_id in processed_channel_events:
                         continue
+                        
                     neighbor_start = neighbor_event['channel_start_time']
                     neighbor_end = neighbor_event['channel_end_time']
-                    # True interval overlap with current merged event
-                    interval_overlap = (neighbor_end >= current_start) and (neighbor_start <= current_end)
-                    # Edge-based gap checks (for temporal adjacency)
-                    edge_overlap = (neighbor_start <= edge_time) and (neighbor_end >= edge_time)
-                    if interval_overlap:
+                    
+                    # KEY FIX: Check temporal connection with THIS SPECIFIC CHANNEL's bounds
+                    # not the entire merged event bounds
+                    
+                    # Direct temporal overlap between this channel and neighbor
+                    direct_overlap = (neighbor_end >= ch_start) and (neighbor_start <= ch_end)
+                    
+                    # Sequential connection within gap tolerance
+                    gap_after = (neighbor_start - ch_end).total_seconds() if neighbor_start > ch_end else float('inf')
+                    gap_before = (ch_start - neighbor_end).total_seconds() if ch_start > neighbor_end else float('inf')
+                    sequential_connection = min(gap_after, gap_before) <= max_merge_gap_seconds
+                    
+                    if direct_overlap:
                         gap = 0
-                        gap_type = 'interval_overlap'
+                        gap_type = 'direct_overlap'
                         should_merge = True
-                    elif edge_overlap:
-                        gap = 0
-                        gap_type = 'edge_overlap'
+                    elif sequential_connection:
+                        gap = min(gap_after, gap_before)
+                        gap_type = 'sequential_connection'
                         should_merge = True
                     else:
-                        # Check if neighbor is just after or before this edge
-                        if edge_type == 'end' and 0 <= (neighbor_start - edge_time).total_seconds() <= max_merge_gap_seconds:
-                            gap = (neighbor_start - edge_time).total_seconds()
-                            gap_type = 'sequential_after'
-                            should_merge = True
-                        elif edge_type == 'start' and 0 <= (edge_time - neighbor_end).total_seconds() <= max_merge_gap_seconds:
-                            gap = (edge_time - neighbor_end).total_seconds()
-                            gap_type = 'sequential_before'
-                            should_merge = True
-                        else:
-                            gap = float('inf')
-                            gap_type = 'too_distant'
-                            should_merge = False
+                        gap = min(gap_after, gap_before)
+                        gap_type = 'too_distant'
+                        should_merge = False
+                    
                     if should_merge:
-                        print(f"          CANDIDATE for merging: event {neighbor_id} ch{neighbor_ch} ({gap_type}, gap: {gap:.2f}s) at edge ({ch}, {edge_type}, {edge_time.strftime('%H:%M:%S')})")
-                        events_to_merge_this_iteration.append({
-                            'event_id': neighbor_id,
-                            'channel': neighbor_ch,
-                            'start_time': neighbor_start,
-                            'end_time': neighbor_end,
-                            'gap': gap,
-                            'gap_type': gap_type
-                        })
-                        processed_channel_events.add(neighbor_id)
+                        # Avoid duplicates - check if this neighbor event is already in the merge list
+                        already_added = any(event_info['event_id'] == neighbor_id for event_info in events_to_merge_this_iteration)
+                        if not already_added:
+                            # Convert to pandas Timestamp for safe formatting
+                            ch_start_pd = pd.Timestamp(ch_start)
+                            ch_end_pd = pd.Timestamp(ch_end)
+                            print(f"          CANDIDATE for merging: event {neighbor_id} ch{neighbor_ch} ({gap_type}, gap: {gap:.2f}s) connected to ch{ch} ({ch_start_pd.strftime('%H:%M:%S')}-{ch_end_pd.strftime('%H:%M:%S')})")
+                            events_to_merge_this_iteration.append({
+                                'event_id': neighbor_id,
+                                'channel': neighbor_ch,
+                                'start_time': neighbor_start,
+                                'end_time': neighbor_end,
+                                'gap': gap,
+                                'gap_type': gap_type,
+                                'connected_to_channel': ch
+                            })
+                            processed_channel_events.add(neighbor_id)
                     # else:
-                        # print(f"          REJECTED: event {neighbor_id} ch{neighbor_ch} too distant ({gap_type}, gap: {gap:.2f}s) at edge ({ch}, {edge_type}, {edge_time.strftime('%H:%M:%S')})")
+                        # print(f"          REJECTED: event {neighbor_id} ch{neighbor_ch} not connected to ch{ch} ({gap_type}, gap: {gap:.2f}s)")
 
         # Merge all qualifying events simultaneously
         if events_to_merge_this_iteration:
@@ -449,7 +462,10 @@ for idx, current_event in event_summaries.iterrows():
                 current_start = min(current_start, neighbor_start)
                 current_end = max(current_end, neighbor_end)
             found_new_merge = True
-            print(f"          UPDATED bounds after parallel merge: ({current_start.strftime('%H:%M:%S')}-{current_end.strftime('%H:%M:%S')})")
+            # Convert datetime objects to pandas Timestamps for safe formatting
+            current_start_pd = pd.Timestamp(current_start)
+            current_end_pd = pd.Timestamp(current_end)
+            print(f"          UPDATED bounds after parallel merge: ({current_start_pd.strftime('%H:%M:%S')}-{current_end_pd.strftime('%H:%M:%S')})")
         else:
             print(f"        No qualifying events found for any temporal edge of channels {sorted(current_channels)}")
         if not found_new_merge:
@@ -460,7 +476,10 @@ for idx, current_event in event_summaries.iterrows():
     
     # Assign merged event ID to all EODs in the final merged group
     print(f"      Final merged group after {iteration} iterations: {merged_group} -> merged_event_id {merged_event_counter}")
-    print(f"      Final channels: {sorted(current_channels)}, final bounds: ({current_start.strftime('%H:%M:%S')}-{current_end.strftime('%H:%M:%S')})")
+    # Convert datetime objects to pandas Timestamps for safe formatting
+    current_start_pd = pd.Timestamp(current_start)
+    current_end_pd = pd.Timestamp(current_end)
+    print(f"      Final channels: {sorted(current_channels)}, final bounds: ({current_start_pd.strftime('%H:%M:%S')}-{current_end_pd.strftime('%H:%M:%S')})")
     
     for merge_order, channel_event_id in enumerate(merged_group):
         event_eods = channel_events[channel_events['channel_event_id'] == channel_event_id].copy()
@@ -1132,18 +1151,6 @@ params_df = pd.DataFrame({
     'parameter': ['max_ipi_seconds', 'min_eods_per_event', 'max_merge_gap_seconds', 'sample_rate', 'file_duration', 'margin', 'min_channel_event_size', 'min_amplitude', 'pre_merge_filtering', 'clustering_enabled', 'dbscan_eps', 'dbscan_min_samples'],
     'value': [max_ipi_seconds, min_eods_per_event, max_merge_gap_seconds, sample_rate, file_duration, margin, min_channel_event_size, min_amplitude, pre_merge_filtering, clustering_enabled, dbscan_eps, dbscan_min_samples]
 })
-
-# # Parameters (can be adjusted based on your data)
-# max_ipi_seconds = 5.0       # Maximum inter-pulse interval for temporal clustering
-# min_eods_per_event = 30     # Minimum EODs required per merged event
-# max_merge_gap_seconds = 0.5  # Maximum gap for merging neighboring channel events
-# sample_rate = 96000         # Audio sample rate
-# file_duration = 600.0       # Audio file duration in seconds
-# margin = 1.0                # Safety margin around events in seconds
-# min_channel_event_size = 10  # Minimum size of channel events before merging (high-pass filter)
-# min_amplitude = 0.01          # Minimum amplitude threshold for events (at least one eod should have this size)
-# create_plots = True
-# pre_merge_filtering = True  # Enable pre-merge filtering based on size and amplitude criteria
 
 params_path = output_path / "session_events_extraction_params.csv"
 params_df.to_csv(params_path, index=False)
