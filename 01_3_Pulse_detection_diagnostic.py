@@ -38,13 +38,14 @@ class PulseDiagnosticTool:
     def __init__(self, root):
         self.root = root
         self.root.title("EOD Pulse Detection Diagnostic Tool")
-        self.root.geometry("1600x900")
+        self.root.geometry("1600x1200")
         
         # Data storage
         self.raw_data = None
         self.sample_rate = None
         self.calibration_factors = None
         self.calibrated_data = None
+        self.data_source = 'multich_linear'  # 'multich_linear' or '1ch_diff'
         
         # Default parameters (exactly from Script 03)
         self.parameters = {
@@ -104,6 +105,7 @@ class PulseDiagnosticTool:
         ttk.Separator(file_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=5)
         
         ttk.Button(file_frame, text="Load Pre-Calibrated Data", command=self.load_precalibrated_data).pack(fill=tk.X, pady=2)
+        ttk.Button(file_frame, text="Load 1 Ch. Diff Data", command=self.load_single_ch_diff_data).pack(fill=tk.X, pady=2)
         
         self.file_info = ttk.Label(file_frame, text="No files loaded", wraplength=350)
         self.file_info.pack(fill=tk.X, pady=5)
@@ -318,6 +320,9 @@ class PulseDiagnosticTool:
                 # Clear calibration factors since we don't need them
                 self.calibration_factors = None
                 
+                # Set data source to multi-channel linear (default for pre-calibrated data)
+                self.data_source = 'multich_linear'
+                
                 self.update_file_info()
                 print(f"Loaded pre-calibrated audio: {file_path}")
                 print(f"Shape: {self.calibrated_data.shape}, Sample rate: {self.sample_rate}")
@@ -326,15 +331,52 @@ class PulseDiagnosticTool:
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to load pre-calibrated audio file:\n{str(e)}")
     
+    def load_single_ch_diff_data(self):
+        """Load single-channel differential data (like control recordings)"""
+        file_path = filedialog.askopenfilename(
+            title="Select Single-Channel Differential Recording",
+            filetypes=[("WAV files", "*.wav"), ("All files", "*.*")]
+        )
+        
+        if file_path:
+            try:
+                # Load audio data
+                audio_data, sample_rate = aio.load_audio(file_path)
+                
+                # Set both raw and calibrated data to the same values
+                # Single-channel differential data doesn't need calibration
+                self.raw_data = audio_data
+                self.sample_rate = sample_rate
+                self.calibrated_data = audio_data.copy()
+                
+                # Clear calibration factors since we don't need them
+                self.calibration_factors = None
+                
+                # Set data source to single-channel differential
+                self.data_source = '1ch_diff'
+                
+                self.update_file_info()
+                print(f"Loaded single-channel differential data: {file_path}")
+                print(f"Shape: {self.calibrated_data.shape}, Sample rate: {self.sample_rate}")
+                print("Data source set to single-channel differential")
+                
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load single-channel differential data:\n{str(e)}")
+    
     def update_file_info(self):
         info = ""
         if self.raw_data is not None:
             info += f"Audio: {self.raw_data.shape} @ {self.sample_rate} Hz\n"
         
         if self.calibration_factors is not None:
-            info += f"Calibration: {self.calibration_factors.shape}"
+            info += f"Calibration: {self.calibration_factors.shape}\n"
         elif self.calibrated_data is not None and self.raw_data is not None:
-            info += "Pre-calibrated data (no calibration file needed)"
+            info += "Pre-calibrated data (no calibration file needed)\n"
+        
+        # Show data source type
+        if self.calibrated_data is not None:
+            source_desc = "Multi-channel linear" if self.data_source == 'multich_linear' else "Single-channel differential"
+            info += f"Source: {source_desc}"
         
         self.file_info.config(text=info)
     
@@ -419,6 +461,9 @@ class PulseDiagnosticTool:
         # Apply calibration factors (Script 03 logic)
         for i in range(n_channels):
             self.calibrated_data[:, i] *= self.calibration_factors[i, 1]
+        
+        # Set data source to multi-channel linear (calibrated data)
+        self.data_source = 'multich_linear'
             
         print("Data calibrated successfully")
         
@@ -464,7 +509,14 @@ class PulseDiagnosticTool:
             # Script 03 exact logic starts here
             data = self.calibrated_data
             rate = self.sample_rate
-            n_channels = data.shape[1]
+            
+            # Handle single-channel differential data
+            if self.data_source == '1ch_diff':
+                # For single-channel differential, use only the first column
+                data = data[:, 0:1]  # Keep as 2D array with shape (samples, 1)
+                n_channels = 1
+            else:   
+                n_channels = data.shape[1]
             
             # Apply time windowing if specified
             if start_sec > 0 or end_sec > 0:
@@ -553,17 +605,27 @@ class PulseDiagnosticTool:
             
             # Convert parameters to DataFrame format
             params_df = pd.DataFrame({key: [value] for key, value in self.parameters.items()})
-            
+
             # Extract waveforms
-            extraction_results = extract_pulse_snippets(
-                data, params_df, rate, midpoints, peaks, troughs, widths
+            (
+                eod_waveforms, eod_amps, eod_widths, ch_amps, ch_cor_coeffs, eod_chan, is_differential,
+                snippet_peak_idc, snippet_trough_idc, snippet_midpoint_idc,
+                final_peak_idc, final_trough_idc, final_midpoint_idc,
+                pulse_orientation, amplitude_ratios, waveform_lengths, fft_peak_freqs
+            ) = extract_pulse_snippets(
+                data, midpoints, peaks, troughs, thresh=self.parameters['thresh'], 
+                width_factor=self.parameters['width_fac_detection'], interp_factor=self.parameters['interp_factor'], rate=rate,
+                source=self.data_source, return_differential=self.parameters['return_diff']
             )
+            # extraction_results = extract_pulse_snippets(
+            #     data, params_df, rate, midpoints, peaks, troughs, widths
+            # )
             
-            # Unpack results
-            (eod_waveforms, eod_amps, eod_widths, ch_amps, ch_cor_coeffs, eod_chan, 
-             is_differential, snippet_peak_idc, snippet_trough_idc, snippet_midpoint_idc,
-             final_peak_idc, final_trough_idc, final_midpoint_idc, pulse_orientation,
-             amplitude_ratios, waveform_lengths, fft_peak_freqs) = extraction_results
+            # # Unpack results
+            # (eod_waveforms, eod_amps, eod_widths, ch_amps, ch_cor_coeffs, eod_chan, 
+            #  is_differential, snippet_peak_idc, snippet_trough_idc, snippet_midpoint_idc,
+            #  final_peak_idc, final_trough_idc, final_midpoint_idc, pulse_orientation,
+            #  amplitude_ratios, waveform_lengths, fft_peak_freqs) = extraction_results
             
             print(f"    Filtering for differential pulses...{len(unique_pulses)} total, {np.sum(is_differential)} differential")
             
@@ -613,7 +675,7 @@ class PulseDiagnosticTool:
                                      eod_chan, final_peak_idc, final_trough_idc)
             
             # Update results summary
-            self.update_results_summary(len(unique_pulses), len(keep_indices), len(filtered_out_indices), start_sec, end_sec)
+            self.update_results_summary(len(unique_pulses), len(keep_indices.flatten()), len(filtered_out_indices), start_sec, end_sec)
             
         except Exception as e:
             messagebox.showerror("Detection Error", f"Error during pulse detection:\n{str(e)}")
@@ -634,9 +696,10 @@ class PulseDiagnosticTool:
         # Script 03 plotting logic
         offset_diff = np.max(abs(plot_data))
         
-        for i in range(n_channels - 1):  # Differential channels
-            # Create differential signal for this channel pair
-            data_diff = np.diff(plot_data[:, i:i+2], axis=1).flatten()
+        # Handle different data source types
+        if self.data_source == '1ch_diff':
+            # For single-channel differential, data is already differential
+            data_diff = plot_data[:, 0]
             
             # Downsample for plotting
             step = max(1, len(data_diff) // 15000000)
@@ -644,58 +707,124 @@ class PulseDiagnosticTool:
             
             # Plot differential signal
             self.ax.plot((x_coords / rate) + start_sec, 
-                       data_diff[::step] + i * offset_diff, 
-                       linewidth=0.5, label=f'Ch{i}-{i+1}')
+                        data_diff[::step], 
+                        linewidth=0.5, label='Diff Ch')
             
-            # Plot kept pulses (red=peaks, blue=troughs) - Script 03 style
+            # Plot pulses
+
+            # if all(final_peak_idc < len(data_diff)):
+            #     self.ax.plot((final_peak_idc / rate) + start_sec,
+            #                 data_diff[final_peak_idc],
+            #                 'o', markersize=2, color='red')
+            # if all(final_trough_idc < len(data_diff)):
+            #     self.ax.plot((final_trough_idc / rate) + start_sec, 
+            #                 data_diff[final_trough_idc], 
+            #                 'o', markersize=2, color='blue')
+                
+            # Plot kept pulses (red=peaks, blue=troughs)
             if len(keep_indices) > 0:
-                # Filter out indices that are out of bounds
                 valid_keep_indices = keep_indices[keep_indices < len(eod_chan)]
-                if len(valid_keep_indices) > 0:
-                    kept_ch_mask = (eod_chan[valid_keep_indices] == i)
-                    if np.any(kept_ch_mask):
-                        kept_ch_indices = valid_keep_indices[kept_ch_mask]
-                        
-                        # Plot peaks and troughs
-                        for idx in kept_ch_indices:
-                            peak_idx = int(final_peak_idc[idx])
-                            trough_idx = int(final_trough_idc[idx])
-                            
-                            if peak_idx < len(data_diff):
-                                self.ax.plot((peak_idx / rate) + start_sec, 
-                                           data_diff[peak_idx] + i * offset_diff, 
-                                           'o', markersize=2, color='red')
-                            if trough_idx < len(data_diff):
-                                self.ax.plot((trough_idx / rate) + start_sec, 
-                                           data_diff[trough_idx] + i * offset_diff, 
-                                           'o', markersize=2, color='blue')
+                for idx in valid_keep_indices:
+                    peak_idx = int(final_peak_idc[idx])
+                    trough_idx = int(final_trough_idc[idx])
+                    if peak_idx < len(data_diff):
+                        self.ax.plot((peak_idx / rate) + start_sec, 
+                                    data_diff[peak_idx], 
+                                    'o', markersize=2, color='red')
+                    if trough_idx < len(data_diff):
+                        self.ax.plot((trough_idx / rate) + start_sec, 
+                                    data_diff[trough_idx], 
+                                    'o', markersize=2, color='blue')
             
-            # Plot filtered out pulses (grey) - Script 03 style
+            # Plot filtered out pulses (grey)
             if len(filtered_out_indices) > 0:
-                # Filter out indices that are out of bounds
                 valid_filtered_indices = filtered_out_indices[filtered_out_indices < len(eod_chan)]
-                if len(valid_filtered_indices) > 0:
-                    filtered_ch_mask = (eod_chan[valid_filtered_indices] == i)
-                    if np.any(filtered_ch_mask):
-                        filtered_ch_indices = valid_filtered_indices[filtered_ch_mask]
-                        
-                        for idx in filtered_ch_indices:
-                            peak_idx = int(final_peak_idc[idx])
-                            trough_idx = int(final_trough_idc[idx])
+                for idx in valid_filtered_indices:
+                    peak_idx = int(final_peak_idc[idx])
+                    trough_idx = int(final_trough_idc[idx])
+                    if peak_idx < len(data_diff):
+                        self.ax.plot((peak_idx / rate) + start_sec, 
+                                    data_diff[peak_idx], 
+                                    'o', markersize=2, color='grey', alpha=0.6)
+                    if trough_idx < len(data_diff):
+                        self.ax.plot((trough_idx / rate) + start_sec, 
+                                    data_diff[trough_idx], 
+                                    'o', markersize=2, color='grey', alpha=0.6)
+                                            
+        else:
+            # Multi-channel linear data - create differential pairs
+            for i in range(n_channels - 1):  # Differential channels
+                # Create differential signal for this channel pair
+                data_diff = np.diff(plot_data[:, i:i+2], axis=1).flatten()
+                
+                # Downsample for plotting
+                step = max(1, len(data_diff) // 15000000)
+                x_coords = np.arange(0, len(data_diff), step)
+                
+                # Plot differential signal
+                self.ax.plot((x_coords / rate) + start_sec, 
+                           data_diff[::step] + i * offset_diff, 
+                           linewidth=0.5, label=f'Ch{i}-{i+1}')
+                
+                # Plot kept pulses (red=peaks, blue=troughs) - Script 03 style
+                if len(keep_indices) > 0:
+                    # Filter out indices that are out of bounds
+                    valid_keep_indices = keep_indices[keep_indices < len(eod_chan)]
+                    if len(valid_keep_indices) > 0:
+                        kept_ch_mask = (eod_chan[valid_keep_indices] == i)
+                        if np.any(kept_ch_mask):
+                            kept_ch_indices = valid_keep_indices[kept_ch_mask]
                             
-                            if peak_idx < len(data_diff):
-                                self.ax.plot((peak_idx / rate) + start_sec, 
-                                           data_diff[peak_idx] + i * offset_diff, 
-                                           'o', markersize=2, color='grey', alpha=0.6)
-                            if trough_idx < len(data_diff):
-                                self.ax.plot((trough_idx / rate) + start_sec, 
-                                           data_diff[trough_idx] + i * offset_diff, 
-                                           'o', markersize=2, color='grey', alpha=0.6)
+                            # Plot peaks and troughs
+                            for idx in kept_ch_indices:
+                                peak_idx = int(final_peak_idc[idx])
+                                trough_idx = int(final_trough_idc[idx])
+                                
+                                if peak_idx < len(data_diff):
+                                    self.ax.plot((peak_idx / rate) + start_sec, 
+                                               data_diff[peak_idx] + i * offset_diff, 
+                                               'o', markersize=2, color='red')
+                                if trough_idx < len(data_diff):
+                                    self.ax.plot((trough_idx / rate) + start_sec, 
+                                               data_diff[trough_idx] + i * offset_diff, 
+                                               'o', markersize=2, color='blue')
+                
+                # Plot filtered out pulses (grey) - Script 03 style
+                if len(filtered_out_indices) > 0:
+                    # Filter out indices that are out of bounds
+                    valid_filtered_indices = filtered_out_indices[filtered_out_indices < len(eod_chan)]
+                    if len(valid_filtered_indices) > 0:
+                        filtered_ch_mask = (eod_chan[valid_filtered_indices] == i)
+                        if np.any(filtered_ch_mask):
+                            filtered_ch_indices = valid_filtered_indices[filtered_ch_mask]
+                            
+                            for idx in filtered_ch_indices:
+                                peak_idx = int(final_peak_idc[idx])
+                                trough_idx = int(final_trough_idc[idx])
+                                
+                                if peak_idx < len(data_diff):
+                                    self.ax.plot((peak_idx / rate) + start_sec, 
+                                               data_diff[peak_idx] + i * offset_diff, 
+                                               'o', markersize=2, color='grey', alpha=0.6)
+                                if trough_idx < len(data_diff):
+                                    self.ax.plot((trough_idx / rate) + start_sec, 
+                                               data_diff[trough_idx] + i * offset_diff, 
+                                               'o', markersize=2, color='grey', alpha=0.6)
         
         # Format plot (Script 03 style)
-        self.ax.set_ylim(bottom=None, top=(n_channels-1.5)*offset_diff)
-        self.ax.set_title(f'EOD Pulse Detection (Differential) - Red=Peaks, Blue=Troughs, Grey=Filtered Out\n'
-                        f'{len(keep_indices)} kept, {len(filtered_out_indices)} filtered out')
+        if self.data_source == '1ch_diff':
+            # Single-channel differential - simpler y-axis
+            # self.ax.set_ylim(bottom=None, top=0.5*offset_diff)
+            self.ax.set_ylim(bottom=np.min(data_diff)*1.2, top=np.max(data_diff)*1.2)
+            source_desc = "Single-Ch Diff"
+        else:
+            # Multi-channel linear - multiple differential pairs
+            # self.ax.set_ylim(bottom=None, top=(n_channels-1.5)*offset_diff)
+            self.ax.set_ylim(bottom=np.min(plot_data)*1.2, top=(n_channels-1.5)*offset_diff)
+            source_desc = "Multi-Ch Diff"
+        
+        self.ax.set_title(f'EOD Pulse Detection ({source_desc}) - Red=Peaks, Blue=Troughs, Grey=Filtered Out\n'
+                        f'{len(keep_indices.flatten())} kept, {len(filtered_out_indices)} filtered out')
         self.ax.legend(loc='upper right')
         self.ax.set_xlabel('Time (s)')
         self.ax.set_ylabel('Voltage')
@@ -704,7 +833,17 @@ class PulseDiagnosticTool:
     def plot_single_ended(self, data, rate, start_sec, n_channels, keep_indices, filtered_out_indices,
                          eod_chan, final_peak_idc, final_trough_idc):
         """Plot single-ended signals with peaks and troughs marked on the appropriate channels"""
-        # Plot single-ended channels
+        
+        # Handle single-channel differential data
+        if self.data_source == '1ch_diff':
+            # For single-channel differential data, show a message that single-ended view is not applicable
+            self.ax.text(0.5, 0.5, 'Single-Ended view not applicable for\nSingle-Channel Differential data.\n\nPlease use Differential view mode.', 
+                        transform=self.ax.transAxes, ha='center', va='center',
+                        fontsize=16, alpha=0.7, bbox=dict(boxstyle="round,pad=0.3", facecolor="lightyellow", alpha=0.8))
+            self.ax.set_title('Single-Ended View Not Applicable')
+            return
+        
+        # Plot single-ended channels (multi-channel linear data)
         plot_duration = min(60.0, len(data) / rate)  # Max 60 seconds
         plot_samples = int(plot_duration * rate)
         plot_data = data[:plot_samples]
@@ -795,7 +934,7 @@ class PulseDiagnosticTool:
         # Format plot
         self.ax.set_ylim(bottom=-0.5*offset_se, top=(n_channels-0.5)*offset_se)
         self.ax.set_title(f'EOD Pulse Detection (Single-Ended) - Red=Peaks, Blue=Troughs, Grey=Filtered Out\n'
-                        f'{len(keep_indices)} kept, {len(filtered_out_indices)} filtered out\n'
+                        f'{len(keep_indices.flatten())} kept, {len(filtered_out_indices)} filtered out\n'
                         f'Diff Ch0=SE Ch0-Ch1, Diff Ch1=SE Ch1-Ch2, etc.')
         self.ax.legend(loc='upper right')
         self.ax.set_xlabel('Time (s)')

@@ -176,7 +176,7 @@ for i in range(n_channels):
     # thresh = max(thresh, sd)
 # thresh *= 10
 
-thresh = 0.004
+thresh = 0.01
 
 
 # Setup parameters
@@ -329,16 +329,34 @@ for n, filepath in enumerate(file_set['filename']):
         if len(unique_midpoints) > 0:
             # Extract variable-width snippets and analyze them
             try:
+                # (
+                #     eod_waveforms, eod_amps, eod_widths, ch_amps, ch_cor_coeffs, eod_chan, is_differential,
+                #     snippet_peak_idc, snippet_trough_idc, snippet_midpoint_idc,
+                #     final_peak_idc, final_trough_idc, final_midpoint_idc,
+                #     original_pulse_orientation, amplitude_ratios, waveform_lengths, fft_peak_freqs
+                # ) = extract_pulse_snippets_legacy(
+                #     data, parameters_df, rate, unique_midpoints, unique_peaks, unique_troughs, unique_widths,
+                #     center_on_zero_crossing=False
+                #     )
+                
+                # # Development version with faster extraction
+                # # (
+                # #     eod_waveforms_d, eod_amps_d, eod_widths_d, ch_amps_d, ch_cor_coeffs_d, eod_chan_d, is_differential_d,
+                # #     snippet_peak_idc_d, snippet_trough_idc_d, snippet_midpoint_idc_d,
+                # #     final_peak_idc_d, final_trough_idc_d, final_midpoint_idc_d,
+                # #     original_pulse_orientation_d, amplitude_ratios_d, waveform_lengths_d, fft_peak_freqs_d
+                # # )
                 (
                     eod_waveforms, eod_amps, eod_widths, ch_amps, ch_cor_coeffs, eod_chan, is_differential,
                     snippet_peak_idc, snippet_trough_idc, snippet_midpoint_idc,
                     final_peak_idc, final_trough_idc, final_midpoint_idc,
                     original_pulse_orientation, amplitude_ratios, waveform_lengths, fft_peak_freqs
                 ) = extract_pulse_snippets(
-                    data, parameters_df, rate, unique_midpoints, unique_peaks, unique_troughs, unique_widths,
-                    center_on_zero_crossing=False
-                    )
-                
+                    data, unique_midpoints, unique_peaks, unique_troughs, thresh = get_param('thresh'),
+                    width_factor = get_param('width_fac_detection'), interp_factor = get_param('interp_factor'), rate = rate,
+                    source = 'multich_linear', return_differential = get_param('return_diff')
+                )
+
                 # Remove duplicates: same channel and midpoint within 3 samples
                 unique_mask = np.ones(len(final_midpoint_idc), dtype=bool)
                 for i in range(len(final_midpoint_idc)):
@@ -348,7 +366,9 @@ for n, filepath in enumerate(file_set['filename']):
                                 abs(final_midpoint_idc[i] - final_midpoint_idc[j]) <= 3):
                                 unique_mask[j] = False
                 
-                # Filter all arrays by unique_mask
+                print(f"    Removed {np.sum(~unique_mask)} proximity-based duplicate pulses")
+                
+                # Filter all arrays by proximity-based unique_mask first
                 eod_waveforms = [eod_waveforms[i] for i in range(len(eod_waveforms)) if unique_mask[i]]
                 eod_amps = eod_amps[unique_mask]
                 eod_widths = eod_widths[unique_mask]
@@ -367,7 +387,96 @@ for n, filepath in enumerate(file_set['filename']):
                 waveform_lengths = waveform_lengths[unique_mask]
                 fft_peak_freqs = fft_peak_freqs[unique_mask]
                 
-                print(f"    Removed {np.sum(~unique_mask)} duplicate pulses")
+                # ENHANCED DUPLICATE DETECTION: Remove events with identical peak/trough indices
+                # This handles multi-phasic EODs where low threshold detects both p1-t1 and p2-t2,
+                # but _process_waveform_common re-detects the same dominant p2-t2 in both snippets
+                print(f"    Before exact duplicate removal: {len(eod_waveforms)} events")
+                
+                # Create unique identifier for each event based on peak and trough indices
+                # Use tuple of (peak_idx, trough_idx) as the key
+                unique_events = {}
+                duplicate_indices = []
+                
+                for i in range(len(final_peak_idc)):
+                    event_key = (final_peak_idc[i], final_trough_idc[i])
+                    
+                    if event_key in unique_events:
+                        # Found duplicate - keep the one with better characteristics
+                        existing_idx = unique_events[event_key]
+                        
+                        # Comparison criteria (in order of importance):
+                        # 1. Smaller waveform length (more precise extraction)
+                        # 2. Higher amplitude (better signal quality)
+                        # 3. Better amplitude ratio (closer to expected range)
+                        
+                        current_length = waveform_lengths[i]
+                        existing_length = waveform_lengths[existing_idx]
+                        current_amp = eod_amps[i]
+                        existing_amp = eod_amps[existing_idx]
+                        current_ratio = amplitude_ratios[i]
+                        existing_ratio = amplitude_ratios[existing_idx]
+                        
+                        # Decide which one to keep
+                        keep_current = False
+                        
+                        if current_length != existing_length:
+                            # Prefer smaller length (more precise extraction)
+                            keep_current = current_length < existing_length
+                        elif current_amp != existing_amp:
+                            # If lengths are equal, prefer higher amplitude
+                            keep_current = current_amp > existing_amp
+                        else:
+                            # If both length and amplitude are equal, prefer better amplitude ratio
+                            # (closer to the middle of acceptable range)
+                            ratio_min = get_param('amplitude_ratio_min')
+                            ratio_max = get_param('amplitude_ratio_max')
+                            ratio_mid = (ratio_min + ratio_max) / 2
+                            
+                            current_ratio_distance = abs(current_ratio - ratio_mid)
+                            existing_ratio_distance = abs(existing_ratio - ratio_mid)
+                            keep_current = current_ratio_distance < existing_ratio_distance
+                        
+                        if keep_current:
+                            # Mark the existing one for removal and update the dictionary
+                            duplicate_indices.append(existing_idx)
+                            unique_events[event_key] = i
+                        else:
+                            # Mark the current one for removal
+                            duplicate_indices.append(i)
+                    else:
+                        # First occurrence of this peak/trough pair
+                        unique_events[event_key] = i
+                
+                # Remove exact duplicates from all arrays and lists
+                if duplicate_indices:
+                    print(f"      Removing {len(duplicate_indices)} exact duplicate events")
+                    
+                    # Create mask for non-duplicate indices
+                    non_duplicate_mask = np.ones(len(eod_waveforms), dtype=bool)
+                    non_duplicate_mask[duplicate_indices] = False
+                    
+                    # Filter all arrays and lists
+                    eod_waveforms = [eod_waveforms[i] for i in range(len(eod_waveforms)) if non_duplicate_mask[i]]
+                    eod_amps = eod_amps[non_duplicate_mask]
+                    eod_widths = eod_widths[non_duplicate_mask]
+                    ch_amps = ch_amps[non_duplicate_mask]
+                    ch_cor_coeffs = ch_cor_coeffs[non_duplicate_mask]
+                    eod_chan = eod_chan[non_duplicate_mask]
+                    is_differential = is_differential[non_duplicate_mask]
+                    snippet_peak_idc = snippet_peak_idc[non_duplicate_mask]
+                    snippet_trough_idc = snippet_trough_idc[non_duplicate_mask]
+                    snippet_midpoint_idc = snippet_midpoint_idc[non_duplicate_mask]
+                    final_peak_idc = final_peak_idc[non_duplicate_mask]
+                    final_trough_idc = final_trough_idc[non_duplicate_mask]
+                    final_midpoint_idc = final_midpoint_idc[non_duplicate_mask]
+                    original_pulse_orientation = original_pulse_orientation[non_duplicate_mask]
+                    amplitude_ratios = amplitude_ratios[non_duplicate_mask]
+                    waveform_lengths = waveform_lengths[non_duplicate_mask]
+                    fft_peak_freqs = fft_peak_freqs[non_duplicate_mask]
+                    
+                    print(f"      After exact duplicate removal: {len(eod_waveforms)} events")
+                else:
+                    print(f"      No exact duplicates found")
                 
             except Exception as e:
                 print(f"    Error in waveform extraction: {e}")

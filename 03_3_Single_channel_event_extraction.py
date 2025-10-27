@@ -13,9 +13,6 @@ Stage 3: Apply size filtering to merged events (preserves complete multi-channel
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
-import matplotlib.patches as mpatches
-import matplotlib.cm as cm
 # from scipy import signal
 import matplotlib.cm as cm
 import matplotlib.patches as mpatches
@@ -28,11 +25,7 @@ import os
 import gc
 import json
 import audioio as aio
-# from scipy.signal import find_peaks
 from eod_functions import load_variable_length_waveforms, save_variable_length_waveforms
-from sklearn.preprocessing import StandardScaler
-from sklearn.cluster import DBSCAN
-# from sklearn.decomposition import PCA
 warnings.filterwarnings('ignore')
 
 # Memory monitoring function for debugging
@@ -51,6 +44,7 @@ def print_memory_usage(stage_name=""):
 print("EOD Session-Level Event Extraction (FLATTENED VERSION)")
 print("=" * 60)
 
+plt.ioff()
 # =============================================================================
 # STEP 1: GET INPUT FOLDERS
 # =============================================================================
@@ -91,30 +85,18 @@ print("\nStep 2: Setting extraction parameters...")
 # Parameters (can be adjusted based on your data)
 max_ipi_seconds = 5.0       # Maximum inter-pulse interval for temporal clustering
 min_eods_per_event = 30     # Minimum EODs required per merged event
-max_merge_gap_seconds = 0.5  # Maximum gap for merging neighboring channel events
 sample_rate = 96000         # Audio sample rate
 file_duration = 600.0       # Audio file duration in seconds
 margin = 1.0                # Safety margin around events in seconds
 min_channel_event_size = 10  # Minimum size of channel events before merging (high-pass filter)
-min_amplitude = 0.01          # Minimum amplitude threshold for events (at least one eod should have this size)
+min_amplitude = 0.004          # Minimum amplitude threshold for events (at least one eod should have this size)
 create_plots = True
-pre_merge_filtering = False  # Enable pre-merge filtering based on size and amplitude criteria
-
-# Clustering parameters
-clustering_enabled = False   # Enable waveform clustering
-dbscan_eps = 0.5           # DBSCAN distance threshold
-dbscan_min_samples = 5     # DBSCAN minimum samples per cluster
-
 
 print(f"  max_ipi_seconds: {max_ipi_seconds}")
 print(f"  min_eods_per_event: {min_eods_per_event}")
-print(f"  max_merge_gap_seconds: {max_merge_gap_seconds}")
 print(f"  min_channel_event_size: {min_channel_event_size}")
 print(f"  min_amplitude: {min_amplitude}")
-print(f"  clustering_enabled: {clustering_enabled}")
-if clustering_enabled:
-    print(f"  dbscan_eps: {dbscan_eps}")
-    print(f"  dbscan_min_samples: {dbscan_min_samples}")
+
 
 # =============================================================================
 # STEP 3: LOAD SESSION DATA
@@ -184,7 +166,7 @@ except Exception as e:
     print(f"Error loading session data: {e}")
     exit(1)
 
-#%%
+
 # =============================================================================
 # STEP 4: EXTRACT EVENTS - STAGE 1 (CHANNEL-WISE TEMPORAL CLUSTERING)
 # =============================================================================
@@ -252,61 +234,57 @@ for channel in channels:
 if channel_events_list:
     channel_events = pd.concat(channel_events_list, ignore_index=True)
     print(f"  Stage 1 complete: {len(channel_events)} total EODs in {channel_event_counter} channel events")
-    
-    if pre_merge_filtering:
-        # Pre-merge filter: remove channel events based on size AND amplitude criteria
-        print(f"  Pre-merge filtering: removing channel events with <{min_channel_event_size} pulses OR no pulse ≥{min_amplitude} amplitude...")
-        
-        # Criterion 1: Size filter (at least min_channel_event_size pulses)
-        event_sizes = channel_events.groupby('channel_event_id').size()
-        valid_size_ids = event_sizes[event_sizes >= min_channel_event_size].index
-        
-        # Criterion 2: Amplitude filter (at least one pulse with amplitude ≥ min_amplitude)
-        event_max_amplitudes = channel_events.groupby('channel_event_id')['eod_amplitude'].max()
-        valid_amplitude_ids = event_max_amplitudes[event_max_amplitudes >= min_amplitude].index
-        
-        # Combined filter: channel events must pass BOTH criteria
-        valid_channel_event_ids = valid_size_ids.intersection(valid_amplitude_ids)
-        
-        # Calculate removal statistics
-        n_total = channel_events['channel_event_id'].nunique()
-        n_removed_size = n_total - len(valid_size_ids)
-        n_removed_amplitude = n_total - len(valid_amplitude_ids)
-        n_removed_total = n_total - len(valid_channel_event_ids)
-        
-        # Apply combined filter
-        filtered_channel_events = channel_events[channel_events['channel_event_id'].isin(valid_channel_event_ids)].copy()
-        
-        print(f"    Original channel events: {n_total}")
-        print(f"    Failed size criterion (<{min_channel_event_size} pulses): {n_removed_size}")
-        print(f"    Failed amplitude criterion (max amplitude <{min_amplitude}): {n_removed_amplitude}")
-        print(f"    Remaining after combined filter: {len(valid_channel_event_ids)}")
-        print(f"    Total removed: {n_removed_total}")
-        
-        if len(filtered_channel_events) == 0:
-            print(f"  All channel events removed by pre-merge filtering! Consider lowering min_channel_event_size or min_amplitude.")
-            exit(1)
-        
-    else:
-        filtered_channel_events = channel_events.copy()
 
-    # Note: Waveform loading is now deferred until after merging and filtering (Step 8.5)
+    # Pre-merge filter: remove channel events based on size AND amplitude criteria
+    print(f"  Pre-merge filtering: removing channel events with <{min_channel_event_size} pulses OR no pulse ≥{min_amplitude} amplitude...")
+    
+    # Criterion 1: Size filter (at least min_channel_event_size pulses)
+    event_sizes = channel_events.groupby('channel_event_id').size()
+    valid_size_ids = event_sizes[event_sizes >= min_channel_event_size].index
+    
+    # Criterion 2: Amplitude filter (at least one pulse with amplitude ≥ min_amplitude)
+    event_max_amplitudes = channel_events.groupby('channel_event_id')['eod_amplitude'].max()
+    valid_amplitude_ids = event_max_amplitudes[event_max_amplitudes >= min_amplitude].index
+    
+    # Combined filter: channel events must pass BOTH criteria
+    valid_channel_event_ids = valid_size_ids.intersection(valid_amplitude_ids)
+    
+    # Calculate removal statistics
+    n_total = channel_events['channel_event_id'].nunique()
+    n_removed_size = n_total - len(valid_size_ids)
+    n_removed_amplitude = n_total - len(valid_amplitude_ids)
+    n_removed_total = n_total - len(valid_channel_event_ids)
+    
+    # Apply combined filter
+    filtered_channel_events = channel_events[channel_events['channel_event_id'].isin(valid_channel_event_ids)].copy()
+    
+    print(f"    Original channel events: {n_total}")
+    print(f"    Failed size criterion (<{min_channel_event_size} pulses): {n_removed_size}")
+    print(f"    Failed amplitude criterion (max amplitude <{min_amplitude}): {n_removed_amplitude}")
+    print(f"    Remaining after combined filter: {len(valid_channel_event_ids)}")
+    print(f"    Total removed: {n_removed_total}")
+    
+    if len(filtered_channel_events) == 0:
+        print(f"  All channel events removed by pre-merge filtering! Consider lowering min_channel_event_size or min_amplitude.")
+        exit(1)
+    
+    # Reset channel_event_id to be consecutive
+    filtered_channel_events['channel_event_id'] = (filtered_channel_events['channel_event_id']
+                                                  .astype('category')
+                                                  .cat.codes)
+
+    # Note: Waveform loading is now deferred until after event summary creation (Step 8.5)
     # This saves memory by only loading waveforms for final events that pass all filters
     
     # Update channel_events to the filtered version
     channel_events = filtered_channel_events
     
     # Clean up intermediate filtering variables
-    del filtered_channel_events
+    del filtered_channel_events, valid_size_ids, valid_amplitude_ids
+    del valid_channel_event_ids, event_sizes, event_max_amplitudes
     gc.collect()
     print("  Memory cleanup completed after filtering")
 
-#%%
-# =============================================================================
-# STEP 6: EXTRACT EVENTS - STAGE 2 (MERGE NEIGHBORING CHANNELS)
-# =============================================================================
-print(f"\nStep 6: Stage 2 - Merging neighboring channel events...")
-print(f"  Using max_merge_gap_seconds = {max_merge_gap_seconds}")
 
 # Get unique channel event summaries
 event_summaries = (channel_events
@@ -319,374 +297,16 @@ event_summaries = (channel_events
                   })
                   .reset_index())
 
-print(f"  Processing {len(event_summaries)} channel events for merging...")
-
-# Initialize merging data structures
-merged_events_list = []
-merged_event_counter = 0
-processed_channel_events = set()
-
-# Sort by start time for processing
-event_summaries = event_summaries.sort_values('channel_start_time')
-
-for idx, current_event in event_summaries.iterrows():
-    current_id = current_event['channel_event_id']
-    
-    if current_id in processed_channel_events:
-        continue
-        
-    print(f"    Processing channel event {current_id} (channel {current_event['channel']})...")
-    
-    # Start a new merged event with iterative growing
-    merged_group = [current_id]
-    processed_channel_events.add(current_id)
-    
-    # Initialize merged event bounds
-    current_start = current_event['channel_start_time']
-    current_end = current_event['channel_end_time']
-    current_channels = {current_event['channel']}
-    
-    # ITERATIVE MERGING: Keep expanding until no more events can be merged
-    found_new_merge = True
-    iteration = 0
-    merge_iteration = {}
-    
-    while found_new_merge:
-        found_new_merge = False
-        iteration += 1
-        # Convert datetime objects to pandas Timestamps for safe formatting
-        current_start_pd = pd.Timestamp(current_start)
-        current_end_pd = pd.Timestamp(current_end)
-        print(f"      Iteration {iteration}: bounds=({current_start_pd.strftime('%H:%M:%S')}-{current_end_pd.strftime('%H:%M:%S')}), channels={sorted(current_channels)}")
-
-        # --- CORRECTED: Spatially AND temporally connected merging ---
-        # For each channel currently in the merged event, check its specific temporal bounds
-        # Only merge neighbor events that are connected in BOTH space AND time
-        events_to_merge_this_iteration = []
-        new_channels_this_iteration = set()
-        
-        # For each channel in current merged event, get its specific temporal bounds
-        channel_time_bounds = {}
-        for ch in current_channels:
-            # Find all events in merged_group for this channel and get their combined time bounds
-            ch_event_ids = [eid for eid in merged_group if event_summaries.loc[event_summaries['channel_event_id'] == eid, 'channel'].values[0] == ch]
-            if ch_event_ids:
-                ch_starts = [event_summaries.loc[event_summaries['channel_event_id'] == eid, 'channel_start_time'].values[0] for eid in ch_event_ids]
-                ch_ends = [event_summaries.loc[event_summaries['channel_event_id'] == eid, 'channel_end_time'].values[0] for eid in ch_event_ids]
-                channel_time_bounds[ch] = (min(ch_starts), max(ch_ends))
-        
-        # For each channel with events in the merged group, check its spatial neighbors
-        for ch, (ch_start, ch_end) in channel_time_bounds.items():
-            for neighbor_ch in [ch-1, ch+1]:
-                if neighbor_ch < 0 or neighbor_ch > 6:
-                    continue
-                    
-                # Find unprocessed events on neighbor channel
-                neighbor_events = event_summaries[
-                    (event_summaries['channel'] == neighbor_ch) &
-                    (~event_summaries['channel_event_id'].isin(processed_channel_events))
-                ]
-                
-                for _, neighbor_event in neighbor_events.iterrows():
-                    neighbor_id = neighbor_event['channel_event_id']
-                    if neighbor_id in processed_channel_events:
-                        continue
-                        
-                    neighbor_start = neighbor_event['channel_start_time']
-                    neighbor_end = neighbor_event['channel_end_time']
-                    
-                    # KEY FIX: Check temporal connection with THIS SPECIFIC CHANNEL's bounds
-                    # not the entire merged event bounds
-                    
-                    # Direct temporal overlap between this channel and neighbor
-                    direct_overlap = (neighbor_end >= ch_start) and (neighbor_start <= ch_end)
-                    
-                    # Sequential connection within gap tolerance
-                    gap_after = (neighbor_start - ch_end).total_seconds() if neighbor_start > ch_end else float('inf')
-                    gap_before = (ch_start - neighbor_end).total_seconds() if ch_start > neighbor_end else float('inf')
-                    sequential_connection = min(gap_after, gap_before) <= max_merge_gap_seconds
-                    
-                    if direct_overlap:
-                        gap = 0
-                        gap_type = 'direct_overlap'
-                        should_merge = True
-                    elif sequential_connection:
-                        gap = min(gap_after, gap_before)
-                        gap_type = 'sequential_connection'
-                        should_merge = True
-                    else:
-                        gap = min(gap_after, gap_before)
-                        gap_type = 'too_distant'
-                        should_merge = False
-                    
-                    if should_merge:
-                        # Avoid duplicates - check if this neighbor event is already in the merge list
-                        already_added = any(event_info['event_id'] == neighbor_id for event_info in events_to_merge_this_iteration)
-                        if not already_added:
-                            # Convert to pandas Timestamp for safe formatting
-                            ch_start_pd = pd.Timestamp(ch_start)
-                            ch_end_pd = pd.Timestamp(ch_end)
-                            print(f"          CANDIDATE for merging: event {neighbor_id} ch{neighbor_ch} ({gap_type}, gap: {gap:.2f}s) connected to ch{ch} ({ch_start_pd.strftime('%H:%M:%S')}-{ch_end_pd.strftime('%H:%M:%S')})")
-                            events_to_merge_this_iteration.append({
-                                'event_id': neighbor_id,
-                                'channel': neighbor_ch,
-                                'start_time': neighbor_start,
-                                'end_time': neighbor_end,
-                                'gap': gap,
-                                'gap_type': gap_type,
-                                'connected_to_channel': ch
-                            })
-                            processed_channel_events.add(neighbor_id)
-                    # else:
-                        # print(f"          REJECTED: event {neighbor_id} ch{neighbor_ch} not connected to ch{ch} ({gap_type}, gap: {gap:.2f}s)")
-
-        # Merge all qualifying events simultaneously
-        if events_to_merge_this_iteration:
-            print(f"        MERGING {len(events_to_merge_this_iteration)} events simultaneously:")
-            events_to_merge_this_iteration.sort(key=lambda x: x['gap'])
-            for event_info in events_to_merge_this_iteration:
-                neighbor_id = event_info['event_id']
-                neighbor_channel = event_info['channel']
-                neighbor_start = event_info['start_time']
-                neighbor_end = event_info['end_time']
-                print(f"          - Event {neighbor_id} ch{neighbor_channel} ({event_info['gap_type']}, gap: {event_info['gap']:.2f}s)")
-                if neighbor_id not in merged_group:
-                    merged_group.append(neighbor_id)
-                    merge_iteration[neighbor_id] = iteration
-                if neighbor_id not in processed_channel_events:
-                    processed_channel_events.add(neighbor_id)
-                if neighbor_channel not in new_channels_this_iteration:
-                    new_channels_this_iteration.add(neighbor_channel)
-                if neighbor_channel not in current_channels:
-                    current_channels.add(neighbor_channel)
-                current_start = min(current_start, neighbor_start)
-                current_end = max(current_end, neighbor_end)
-            found_new_merge = True
-            # Convert datetime objects to pandas Timestamps for safe formatting
-            current_start_pd = pd.Timestamp(current_start)
-            current_end_pd = pd.Timestamp(current_end)
-            print(f"          UPDATED bounds after parallel merge: ({current_start_pd.strftime('%H:%M:%S')}-{current_end_pd.strftime('%H:%M:%S')})")
-        else:
-            print(f"        No qualifying events found for any temporal edge of channels {sorted(current_channels)}")
-        if not found_new_merge:
-            print(f"        No more mergeable neighbors found for any temporal edge of channels {sorted(current_channels)}")
-        elif len(new_channels_this_iteration) == 0:
-            print(f"        Temporal bounds changed but no new channels added - stopping to prevent infinite loop")
-            found_new_merge = False
-    
-    # Assign merged event ID to all EODs in the final merged group
-    print(f"      Final merged group after {iteration} iterations: {merged_group} -> merged_event_id {merged_event_counter}")
-    # Convert datetime objects to pandas Timestamps for safe formatting
-    current_start_pd = pd.Timestamp(current_start)
-    current_end_pd = pd.Timestamp(current_end)
-    print(f"      Final channels: {sorted(current_channels)}, final bounds: ({current_start_pd.strftime('%H:%M:%S')}-{current_end_pd.strftime('%H:%M:%S')})")
-    
-    for merge_order, channel_event_id in enumerate(merged_group):
-        event_eods = channel_events[channel_events['channel_event_id'] == channel_event_id].copy()
-        event_eods['merged_event_id'] = merged_event_counter
-        event_eods['merge_order'] = merge_order  # Store the order in which this channel event was merged
-        event_eods['merge_iteration'] = merge_iteration.get(channel_event_id, 1)
-        merged_events_list.append(event_eods)
-    
-    merged_event_counter += 1
-
-# Clean up merging loop variables
-del processed_channel_events, merged_group, merge_iteration
-
-if merged_events_list:
-    merged_events = pd.concat(merged_events_list, ignore_index=True)
-    print(f"  Stage 2 complete: {len(merged_events)} total EODs in {merged_event_counter} merged events")
-    
-    # Clean up merging variables to free memory
-    del merged_events_list
-    del event_summaries
-    gc.collect()
-    print("  Memory cleanup completed after merging")
-    
-else:
-    print("  No merged events found!")
-    exit(1)
 #%%
 # =============================================================================
-# STEP 7: EXTRACT EVENTS - STAGE 3 (2. SIZE AND AMP FILTERING)
+# STEP 8: CREATE EVENT SUMMARY (BEFORE INDIVIDUAL PROCESSING)
 # =============================================================================
-print(f"\nStep 7: Stage 3 - Filtering merged events...")
-print(f"  Removing events with <{min_eods_per_event} pulses OR no pulse ≥{min_amplitude} amplitude...")
+print(f"\nStep 8: Creating event summary...")
 
-# Post-merge filter: remove events based on size AND amplitude criteria
-
-# Criterion 1: Size filter (at least min_eods_per_event EODs)
-# Count EODs per merged event
-event_sizes = merged_events.groupby('merged_event_id').size()
-print(f"  Event sizes: min={event_sizes.min()}, max={event_sizes.max()}, mean={event_sizes.mean():.1f}")
-valid_size_ids = event_sizes[event_sizes >= min_eods_per_event].index
-
-# Criterion 2: Amplitude filter (at least one pulse with amplitude ≥ min_amplitude)
-event_max_amplitudes = merged_events.groupby('merged_event_id')['eod_amplitude'].max()
-valid_amplitude_ids = event_max_amplitudes[event_max_amplitudes >= min_amplitude].index
-
-# Combined filter: channel events must pass BOTH criteria
-valid_event_ids = valid_size_ids.intersection(valid_amplitude_ids)
-
-# Calculate removal statistics
-n_total = merged_events['merged_event_id'].nunique()
-n_removed_size = n_total - len(valid_size_ids)
-n_removed_amplitude = n_total - len(valid_amplitude_ids)
-n_removed_total = n_total - len(valid_event_ids)
-
-print(f"  Events passing size filter: {len(valid_event_ids)} / {len(event_sizes)}")
-print(f"    Original channel events: {n_total}")
-print(f"    Failed size criterion (<{min_eods_per_event} pulses): {n_removed_size}")
-print(f"    Failed amplitude criterion (max amplitude <{min_amplitude}): {n_removed_amplitude}")
-print(f"    Remaining after combined filter: {len(valid_event_ids)}")
-print(f"    Total removed: {n_removed_total}")
-
-if len(valid_event_ids) == 0:
-    print("  No events passed size filtering!")
-    print("  Consider reducing min_eods_per_event parameter")
-    exit(1)
-
-# Filter to keep only valid events
-event_table = merged_events[merged_events['merged_event_id'].isin(valid_event_ids)].copy()
-
-# Reassign sequential event IDs
-unique_ids = sorted(event_table['merged_event_id'].unique())
-id_mapping = {old_id: new_id for new_id, old_id in enumerate(unique_ids)}
-event_table['event_id'] = event_table['merged_event_id'].map(id_mapping)
-
-print(f"  Stage 3 complete: {len(event_table)} EODs in {len(unique_ids)} final events")
-
-# Clean up size filtering variables to free memory
-del merged_events
-del event_sizes
-del valid_event_ids
-del unique_ids
-del id_mapping
-gc.collect()
-print("  Memory cleanup completed after size filtering")
-#%%
-# =============================================================================
-# STEP 8: LOAD WAVEFORMS FOR FINAL EVENTS (MEMORY-OPTIMIZED)
-# =============================================================================
-print(f"\nStep 8: Loading waveforms for final events...")
-print(f"  Loading waveforms only for {len(event_table)} EODs in final {event_table['event_id'].nunique()} events")
-
-if len(files_with_waveforms) > 0:
-    # Create mapping of which EODs we need from each file AND their target positions
-    filtered_eods_by_file = {}
-    eod_position_mapping = {}  # Maps (file_idx, original_row) to position in event_table
-    
-    for order_idx, (_, eod_row) in enumerate(event_table.iterrows()):
-        file_idx = eod_row['file_index']
-        original_row = eod_row['original_row_in_file']
-        
-        if file_idx not in filtered_eods_by_file:
-            filtered_eods_by_file[file_idx] = []
-        filtered_eods_by_file[file_idx].append(original_row)
-        eod_position_mapping[(file_idx, original_row)] = order_idx
-    
-    print(f"  Need to load waveforms from {len(filtered_eods_by_file)} files")
-    
-    # Pre-allocate waveform list with None placeholders
-    all_filtered_waveforms = [None] * len(event_table)
-    
-    for file_idx, needed_rows in filtered_eods_by_file.items():
-        file_info = file_metadata[file_idx]
-        
-        if not file_info['has_waveforms']:
-            print(f"    Skipping {file_info['base_name']} - no waveform files")
-            continue
-            
-        print(f"    Loading {len(needed_rows)} waveforms from {file_info['base_name']}")
-        
-        # Load ALL waveforms from this file
-        waveforms = load_variable_length_waveforms(file_info['waveform_base_path'])
-        
-        # Extract waveforms and place them at correct positions in pre-allocated list
-        for row_idx in needed_rows:
-            if row_idx < len(waveforms):
-                # Get the correct position in the event_table order
-                target_position = eod_position_mapping[(file_idx, row_idx)]
-                all_filtered_waveforms[target_position] = waveforms[row_idx]
-            else:
-                print(f"      Warning: Row {row_idx} not found in waveforms (file has {len(waveforms)} waveforms)")
-            
-        # Clean up large temporary variables immediately after use
-        del waveforms
-        
-        # Force garbage collection after processing each file to free memory
-        gc.collect()
-        print(f"      Memory freed after processing {file_info['base_name']}")
-    
-    # Check for any None values (missing waveforms) and filter them out
-    valid_waveforms = [w for w in all_filtered_waveforms if w is not None]
-    missing_count = len(all_filtered_waveforms) - len(valid_waveforms)
-    
-    if missing_count > 0:
-        print(f"      Warning: {missing_count} waveforms could not be loaded")
-        # Filter out corresponding EODs from event_table
-        valid_indices = [i for i, w in enumerate(all_filtered_waveforms) if w is not None]
-        event_table = event_table.iloc[valid_indices].reset_index(drop=True)
-        all_filtered_waveforms = valid_waveforms
-    
-    if all_filtered_waveforms:
-        print(f"  Loaded {len(all_filtered_waveforms)} waveforms for final events")
-        print(f"  Waveform-EOD order matches: each waveform corresponds to same row in event_table")
-        
-        # Create combined_waveforms structure for compatibility with individual event saving
-        combined_waveforms = {'waveforms': all_filtered_waveforms}
-    else:
-        print("  No waveforms loaded")
-        combined_waveforms = None
-        
-    # Clean up temporary waveform loading variables
-    del filtered_eods_by_file, eod_position_mapping
-    
-    # Force garbage collection after all waveform loading is complete
-    gc.collect()
-    print("  Memory cleanup completed after optimized waveform loading")
-    print_memory_usage("After optimized waveform loading")
-    
-    # # Verification: Check that waveform_length matches actual waveform lengths
-    # print(f"  Verifying waveform-EOD correspondence...")
-    # if len(all_filtered_waveforms) > 0 and len(event_table) > 0:
-    #     l_r = []
-    #     mismatches = 0
-    #     for i, l in enumerate(event_table['waveform_length']):
-    #         if i < len(all_filtered_waveforms):
-    #             actual_length = len(all_filtered_waveforms[i])
-    #             ratio = l / actual_length
-    #             l_r.append(ratio)
-    #             if abs(ratio - 1.0) > 0.001:  # Allow small floating point differences
-    #                 mismatches += 1
-    #         else:
-    #             l_r.append(float('nan'))
-    #             mismatches += 1
-        
-    #     print(f"    Checked {len(l_r)} waveform-EOD pairs for final events")
-    #     if len(l_r) > 0:
-    #         print(f"    Length ratio statistics: min={min(l_r):.4f}, max={max(l_r):.4f}, mean={sum(l_r)/len(l_r):.4f}")
-    #         print(f"    Mismatches (ratio != 1.0): {mismatches}")
-            
-    #         if mismatches == 0:
-    #             print("    ✓ SUCCESS: All final event waveforms correspond to correct EOD entries!")
-    #         else:
-    #             print(f"    ⚠ WARNING: {mismatches} waveforms don't match their EOD entries")
-        
-else:
-    print("  No files with waveforms found")
-    all_filtered_waveforms = []
-    combined_waveforms = None
-#%%
-# =============================================================================
-# STEP 9: CREATE EVENT SUMMARY (BEFORE INDIVIDUAL PROCESSING)
-# =============================================================================
-print(f"\nStep 9: Creating event summary...")
-
-# Create event summary directly from event_table BEFORE the processing loop
+# Create event summary directly from channel_events BEFORE the processing loop
 event_summaries = []
-for event_id in sorted(event_table['event_id'].unique()):
-    event_eods = event_table[event_table['event_id'] == event_id]
+for event_id in sorted(channel_events['channel_event_id'].unique()):
+    event_eods = channel_events[channel_events['channel_event_id'] == event_id]
     
     # Calculate summary statistics
     duration = (event_eods['timestamp_dt'].max() - 
@@ -730,6 +350,146 @@ gc.collect()
 print("  Memory cleanup completed after event summary creation")
 print_memory_usage("After event summary creation")
 
+# =============================================================================
+# STEP 8.5: LOAD WAVEFORMS FOR FINAL EVENTS (MEMORY-OPTIMIZED)
+# =============================================================================
+print(f"\nStep 8.5: Loading waveforms for final events...")
+print(f"  Loading waveforms only for {len(channel_events)} EODs in final {channel_events['channel_event_id'].nunique()} events")
+
+combined_waveforms = None
+
+if len(files_with_waveforms) > 0:
+    # Create mapping of which EODs we need from each file AND their target positions
+    filtered_eods_by_file = {}
+    eod_position_mapping = {}  # Maps (file_idx, original_row) to position in channel_events
+    
+    for order_idx, (_, eod_row) in enumerate(channel_events.iterrows()):
+        file_idx = eod_row['file_index']
+        original_row = eod_row['original_row_in_file']
+        
+        if file_idx not in filtered_eods_by_file:
+            filtered_eods_by_file[file_idx] = []
+        filtered_eods_by_file[file_idx].append(original_row)
+        eod_position_mapping[(file_idx, original_row)] = order_idx
+    
+    print(f"  Need to load waveforms from {len(filtered_eods_by_file)} files")
+    
+    # Pre-allocate waveform list with None placeholders
+    all_filtered_waveforms = [None] * len(channel_events)
+    all_filtered_metadata = [None] * len(channel_events)
+    
+    for file_idx, needed_rows in filtered_eods_by_file.items():
+        file_info = file_metadata[file_idx]
+        
+        if not file_info['has_waveforms']:
+            print(f"    Skipping {file_info['base_name']} - no waveform files")
+            continue
+            
+        print(f"    Loading {len(needed_rows)} waveforms from {file_info['base_name']}")
+        
+        # Load ALL waveforms from this file
+        waveforms = load_variable_length_waveforms(file_info['waveform_base_path'])
+        
+        # Load metadata
+        file_metadata_list = None
+        try:
+            with open(file_info['waveform_base_path'] + '_metadata.json', 'r') as f:
+                metadata = json.load(f)
+                
+            if isinstance(metadata, dict) and 'individual_metadata' in metadata:
+                file_metadata_list = metadata['individual_metadata']
+            elif isinstance(metadata, list):
+                file_metadata_list = metadata
+            else:
+                # Create dummy metadata
+                file_metadata_list = [{'index': i} for i in range(len(waveforms))]
+                
+            # Clean up the metadata dict immediately after extraction
+            del metadata
+                
+        except Exception as e:
+            print(f"      Warning: Could not load metadata: {e}")
+            file_metadata_list = [{'index': i} for i in range(len(waveforms))]
+        
+        # Extract waveforms and place them at correct positions in pre-allocated list
+        for row_idx in needed_rows:
+            if row_idx < len(waveforms):
+                # Get the correct position in the channel_events order
+                target_position = eod_position_mapping[(file_idx, row_idx)]
+                all_filtered_waveforms[target_position] = waveforms[row_idx]
+                if row_idx < len(file_metadata_list):
+                    all_filtered_metadata[target_position] = file_metadata_list[row_idx]
+                else:
+                    all_filtered_metadata[target_position] = {'index': row_idx, 'file': file_info['base_name']}
+            else:
+                print(f"      Warning: Row {row_idx} not found in waveforms (file has {len(waveforms)} waveforms)")
+            
+        # Clean up large temporary variables immediately after use
+        del waveforms
+        del file_metadata_list
+        
+        # Force garbage collection after processing each file to free memory
+        gc.collect()
+        print(f"      Memory freed after processing {file_info['base_name']}")
+    
+    # Check for any None values (missing waveforms) and filter them out
+    valid_waveforms = [w for w in all_filtered_waveforms if w is not None]
+    valid_metadata = [m for m in all_filtered_metadata if m is not None]
+    missing_count = len(all_filtered_waveforms) - len(valid_waveforms)
+    
+    if missing_count > 0:
+        print(f"      Warning: {missing_count} waveforms could not be loaded")
+        # Filter out corresponding EODs from channel_events
+        valid_indices = [i for i, w in enumerate(all_filtered_waveforms) if w is not None]
+        channel_events = channel_events.iloc[valid_indices].reset_index(drop=True)
+        all_filtered_waveforms = valid_waveforms
+        all_filtered_metadata = valid_metadata
+    
+    if all_filtered_waveforms:
+        combined_waveforms = {'waveforms': all_filtered_waveforms, 'metadata': all_filtered_metadata}
+        print(f"  Loaded {len(all_filtered_waveforms)} waveforms for final events")
+        print(f"  Waveform-EOD order matches: each waveform corresponds to same row in channel_events")
+    else:
+        print("  No waveforms loaded")
+        
+    # Clean up temporary waveform loading variables
+    del filtered_eods_by_file, eod_position_mapping
+    
+    # Force garbage collection after all waveform loading is complete
+    gc.collect()
+    print("  Memory cleanup completed after optimized waveform loading")
+    print_memory_usage("After optimized waveform loading")
+    
+    # Verification: Check that waveform_length matches actual waveform lengths
+    print(f"  Verifying waveform-EOD correspondence...")
+    if len(all_filtered_waveforms) > 0 and len(channel_events) > 0:
+        l_r = []
+        mismatches = 0
+        for i, l in enumerate(channel_events['waveform_length']):
+            if i < len(all_filtered_waveforms):
+                actual_length = len(all_filtered_waveforms[i])
+                ratio = l / actual_length
+                l_r.append(ratio)
+                if abs(ratio - 1.0) > 0.001:  # Allow small floating point differences
+                    mismatches += 1
+            else:
+                l_r.append(float('nan'))
+                mismatches += 1
+        
+        print(f"    Checked {len(l_r)} waveform-EOD pairs for final events")
+        if len(l_r) > 0:
+            print(f"    Length ratio statistics: min={min(l_r):.4f}, max={max(l_r):.4f}, mean={sum(l_r)/len(l_r):.4f}")
+            print(f"    Mismatches (ratio != 1.0): {mismatches}")
+            
+            if mismatches == 0:
+                print("    ✓ SUCCESS: All final event waveforms correspond to correct EOD entries!")
+            else:
+                print(f"    ⚠ WARNING: {mismatches} waveforms don't match their EOD entries")
+        
+else:
+    print("  No files with waveforms found")
+    all_filtered_waveforms = []
+
 #%%
 # =============================================================================
 # STEP 10: PROCESS INDIVIDUAL EVENTS (AUDIO EXTRACTION + INDIVIDUAL SAVES)
@@ -740,10 +500,10 @@ print(f"\nStep 10: Processing individual events (audio extraction and individual
 wav_files = glob.glob(str(Path(raw_data_folder) / "*.wav"))
 print(f"  Found {len(wav_files)} wav files")
 
-# Add event snippet-relative index columns to event_table
-event_table['peak_idx_event_snippet'] = -1
-event_table['trough_idx_event_snippet'] = -1
-event_table['midpoint_idx_event_snippet'] = -1
+# Add event snippet-relative index columns to channel_events
+channel_events['peak_idx_event_snippet'] = -1
+channel_events['trough_idx_event_snippet'] = -1
+channel_events['midpoint_idx_event_snippet'] = -1
 
 if len(wav_files) > 0:
     # Extract timestamps from filenames and create file timing DataFrame
@@ -773,7 +533,7 @@ if len(wav_files) > 0:
         
         try:
             # Get EOD data for this event (fetch once and reuse)
-            event_eods = event_table[event_table['event_id'] == event_id].copy()
+            event_eods = channel_events[channel_events['channel_event_id'] == event_id].copy()
             if len(event_eods) == 0:
                 print(f"        Warning: No EOD data found for event {event_id}")
                 continue
@@ -837,8 +597,8 @@ if len(wav_files) > 0:
             event_data = np.concatenate(all_data, axis=0)
             aio.write_audio(str(audio_output_path), event_data, sample_rate)
             
-            # Update event_table with the event snippet indices
-            event_table.loc[event_table['event_id'] == event_id, ['peak_idx_event_snippet', 'trough_idx_event_snippet', 'midpoint_idx_event_snippet']] = event_eods[['peak_idx_event_snippet', 'trough_idx_event_snippet', 'midpoint_idx_event_snippet']].values
+            # Update channel_events with the event snippet indices
+            channel_events.loc[channel_events['channel_event_id'] == event_id, ['peak_idx_event_snippet', 'trough_idx_event_snippet', 'midpoint_idx_event_snippet']] = event_eods[['peak_idx_event_snippet', 'trough_idx_event_snippet', 'midpoint_idx_event_snippet']].values
                     
             # Update event_summary with audio info
             event_summary.loc[idx, 'raw_event_data_filename'] = output_filename
@@ -950,7 +710,8 @@ if len(wav_files) > 0:
                             ch_eods = event_eods[event_eods['eod_channel'] == i]
                             if len(ch_eods) > 0:
                                 # Plot peaks (red)
-                                if 'peak_idx_event_snippet' in ch_eods.columns:
+                                if 'timestamp' in ch_eods.columns:
+                                    # Calculate peak timestamps - convert peak indices to timestamps
                                     peak_sample_indices = ch_eods['peak_idx_event_snippet'].values.astype(np.int64)
                                     valid_peaks = (peak_sample_indices >= 0) & (peak_sample_indices < len(event_data)) & (~np.isnan(peak_sample_indices))
                                     if np.any(valid_peaks):
@@ -975,70 +736,6 @@ if len(wav_files) > 0:
                             del data_diff, x_coords
                             gc.collect()
 
-                        # Overlay colored boxes for each original channel event
-                        for _, merge_event_row in merge_event_data.iterrows():
-                            cid = merge_event_row['channel_event_id']
-                            iteration = merge_event_row['merge_iteration']
-                            ce_eods = event_eods[event_eods['channel_event_id'] == cid]
-                            if len(ce_eods) == 0:
-                                continue
-                            ch = ce_eods['eod_channel'].iloc[0]
-                            # Get min/max sample for this channel event and convert to timestamps
-                            if 'midpoint_idx_event_snippet' in ce_eods.columns:
-                                min_sample = int(np.nanmin(ce_eods['midpoint_idx_event_snippet']))
-                                max_sample = int(np.nanmax(ce_eods['midpoint_idx_event_snippet']))
-                                # Convert sample indices to timestamps
-                                min_timestamp = event_start_time + pd.to_timedelta(min_sample / sample_rate, unit='s')
-                                max_timestamp = event_start_time + pd.to_timedelta(max_sample / sample_rate, unit='s')
-                                width_seconds = (max_timestamp - min_timestamp).total_seconds()
-                            else:
-                                min_timestamp = event_start_time
-                                max_timestamp = event_start_time + pd.to_timedelta(len(event_data) / sample_rate, unit='s')
-                                width_seconds = (max_timestamp - min_timestamp).total_seconds()
-                            
-                            # Draw a colored rectangle for this channel event
-                            # Convert timestamps to matplotlib-compatible format for Rectangle
-                            min_timestamp_mpl = mdates.date2num(min_timestamp.to_pydatetime())
-                            width_days = width_seconds / 86400.0  # Convert seconds to days for matplotlib
-                            
-                            rect = mpatches.Rectangle((min_timestamp_mpl, ch * offset_diff - 0.5 * offset_diff),
-                                                    width_days,
-                                                    offset_diff,
-                                                    linewidth=2, edgecolor=channel_event_colors[iteration], facecolor='none', alpha=0.7, zorder=10)
-                            plt.gca().add_patch(rect)
-                            
-                            # Add event number annotation in the top-left corner of the rectangle
-                            text_timestamp_mpl = min_timestamp_mpl + width_days * 0.05  # 5% from left edge in matplotlib time units
-                            text_y = ch * offset_diff + 0.3 * offset_diff  # Upper part of the channel
-                            plt.text(text_timestamp_mpl, text_y, str(iteration), 
-                                    fontsize=12, fontweight='bold', 
-                                    color=channel_event_colors[iteration], 
-                                    bbox=dict(boxstyle='circle,pad=0.3', facecolor='white', edgecolor=channel_event_colors[iteration], alpha=0.8),
-                                    ha='center', va='center', zorder=15)
-                            
-                            # Draw a line at the mean midpoint
-                            if 'midpoint_idx_event_snippet' in ce_eods.columns:
-                                mean_sample = int(np.nanmean(ce_eods['midpoint_idx_event_snippet']))
-                                mean_timestamp = event_start_time + pd.to_timedelta(mean_sample / sample_rate, unit='s')
-                                mean_timestamp_mpl = mdates.date2num(mean_timestamp.to_pydatetime())
-                                plt.plot([mean_timestamp_mpl], [ch * offset_diff], marker='s', color=channel_event_colors[iteration], markersize=10, zorder=11)
-
-                        # Draw lines connecting the mean midpoints of the merged channel events (showing merge path)
-                        midpoints = []
-                        for cid in merged_channel_event_ids:
-                            ce_eods = event_eods[event_eods['channel_event_id'] == cid]
-                            ch = ce_eods['eod_channel'].iloc[0]
-                            if 'midpoint_idx_event_snippet' in ce_eods.columns:
-                                mean_sample = int(np.nanmean(ce_eods['midpoint_idx_event_snippet']))
-                                mean_timestamp = event_start_time + pd.to_timedelta(mean_sample / sample_rate, unit='s')
-                                mean_timestamp_mpl = mdates.date2num(mean_timestamp.to_pydatetime())
-                            else:
-                                mean_timestamp_mpl = mdates.date2num(event_start_time.to_pydatetime())
-                            midpoints.append((mean_timestamp_mpl, ch * offset_diff))
-                        midpoints = sorted(midpoints, key=lambda x: x[0])
-                        if len(midpoints) > 1:
-                            plt.plot([m[0] for m in midpoints], [m[1] for m in midpoints], color='black', linestyle='--', linewidth=2, alpha=0.5, zorder=12)
-
                         plt.ylim(bottom=None, top=(event_data.shape[1]-1.5)*offset_diff)
                         if plot_step > 1:
                             plt.title(f'Event {event_id} - Differential EOD Detections (downsampled {plot_step}x)\nDuration: {event_duration:.1f}s - Colored boxes: merged channel events')
@@ -1049,6 +746,7 @@ if len(wav_files) > 0:
                         plt.ylabel('Voltage (stacked by channel)')
                         
                         # Format x-axis for better timestamp readability
+                        import matplotlib.dates as mdates
                         plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
                         plt.gca().xaxis.set_major_locator(mdates.SecondLocator(interval=max(1, int(event_duration/10))))
                         plt.xticks(rotation=45)
@@ -1121,7 +819,7 @@ gc.collect()
 print("  Memory cleanup completed after individual event processing")
 print_memory_usage("After individual event processing")
 
-#%%
+
 # =============================================================================
 # STEP 11: SAVE FINAL COMBINED RESULTS
 # =============================================================================
@@ -1130,10 +828,10 @@ print(f"\nStep 11: Saving final combined results...")
 output_path = Path(output_folder)
 
 # # Save combined event table (with snippet-relative indices)
-# event_table_clean = event_table.drop(columns=['peak_idx', 'trough_idx', 'midpoint_idx'], errors='ignore')
-# event_table_path = output_path / "session_events_eod_table.csv"
-# event_table_clean.to_csv(event_table_path, index=False)
-# print(f"  Saved combined event table: {event_table_path}")
+# channel_events_clean = channel_events.drop(columns=['peak_idx', 'trough_idx', 'midpoint_idx'], errors='ignore')
+# channel_events_path = output_path / "session_events_eod_table.csv"
+# channel_events_clean.to_csv(channel_events_path, index=False)
+# print(f"  Saved combined event table: {channel_events_path}")
 
 # Save updated event summary (with audio filenames)
 event_summary_path = output_path / "session_events_summary.csv"
@@ -1148,15 +846,14 @@ print(f"  Saved updated event summary: {event_summary_path}")
 
 # Save parameters
 params_df = pd.DataFrame({
-    'parameter': ['max_ipi_seconds', 'min_eods_per_event', 'max_merge_gap_seconds', 'sample_rate', 'file_duration', 'margin', 'min_channel_event_size', 'min_amplitude', 'pre_merge_filtering', 'clustering_enabled', 'dbscan_eps', 'dbscan_min_samples'],
-    'value': [max_ipi_seconds, min_eods_per_event, max_merge_gap_seconds, sample_rate, file_duration, margin, min_channel_event_size, min_amplitude, pre_merge_filtering, clustering_enabled, dbscan_eps, dbscan_min_samples]
+    'parameter': ['max_ipi_seconds', 'min_eods_per_event', 'sample_rate', 'file_duration', 'margin', 'min_channel_event_size', 'min_amplitude'],
+    'value': [max_ipi_seconds, min_eods_per_event, sample_rate, file_duration, margin, min_channel_event_size, min_amplitude]
 })
-
 params_path = output_path / "session_events_extraction_params.csv"
 params_df.to_csv(params_path, index=False)
 print(f"  Saved parameters: {params_path}")
 
-print(f"\nNote: Individual event data was saved during processing in Step 9:")
+print(f"\nNote: Individual event data was saved during processing in Step 10:")
 print(f"  - event_XXX_eod_table.csv: EOD data for each individual event")
 print(f"  - event_XXX_waveforms_concatenated.npz: Waveforms for each event (if available)")
 print(f"  - event_XXX_YYYYMMDDTHHMMSS.wav: Raw audio data for each event")
@@ -1167,6 +864,8 @@ print(f"  - event_XXX_YYYYMMDDTHHMMSS.wav: Raw audio data for each event")
 print(f"\nStep 12: Creating event timeline...")
 
 if len(event_summary) > 0:
+    import matplotlib.patches as mpatches
+    import matplotlib.cm as cm
     plt.figure(figsize=(15, 6))
 
     # Convert to datetime for plotting
@@ -1182,7 +881,7 @@ if len(event_summary) > 0:
         plt.barh(i, duration/60, left=(start - start_times.min()).total_seconds()/60,
                 height=0.8, alpha=0.7, color=color_map(i), label=f'Merged event {event_id}' if i < 5 else "")
         # Overlay boxes for constituent channel events
-        event_eods = event_table[event_table['event_id'] == event_id]
+        event_eods = channel_events[channel_events['channel_event_id'] == event_id]
         channel_event_ids = event_eods['channel_event_id'].unique()
         channel_event_colors = {cid: color_map(j % 20) for j, cid in enumerate(channel_event_ids)}
         for j, cid in enumerate(channel_event_ids):
@@ -1225,10 +924,9 @@ print("="*60)
 print(f"\nExtraction Summary:")
 print(f"  Total input EODs: {len(combined_table)}")
 print(f"  Channel events (Stage 1): {channel_event_counter}")
-print(f"  Merged events (Stage 2): {merged_event_counter}")
 print(f"  Final events (Stage 3): {len(event_summary)}")
-print(f"  Total EODs in events: {len(event_table)}")
-print(f"  Extraction efficiency: {len(event_table)/len(combined_table)*100:.1f}%")
+print(f"  Total EODs in events: {len(channel_events)}")
+print(f"  Extraction efficiency: {len(channel_events)/len(combined_table)*100:.1f}%")
 
 if len(event_summary) > 0:
     print(f"  Event duration range: {event_summary['duration_seconds'].min():.1f} - {event_summary['duration_seconds'].max():.1f} seconds")
@@ -1254,7 +952,7 @@ print("    - event_XXX_info.txt: Info files when plotting fails due to memory co
 print("="*60)
 
 # Final memory cleanup
-del combined_table, sorted_table, event_table, event_summary
+del combined_table, sorted_table, channel_events, event_summary
 if 'combined_waveforms' in locals():
     del combined_waveforms
 if 'file_metadata' in locals():
@@ -1262,3 +960,5 @@ if 'file_metadata' in locals():
 gc.collect()
 print_memory_usage("Final memory state")
 print("Memory cleanup completed.")
+
+# %%
