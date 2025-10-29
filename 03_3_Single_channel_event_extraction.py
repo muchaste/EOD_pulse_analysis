@@ -25,7 +25,7 @@ import os
 import gc
 import json
 import audioio as aio
-from eod_functions import load_variable_length_waveforms, save_variable_length_waveforms
+from eod_functions_backup import load_variable_length_waveforms, save_variable_length_waveforms
 warnings.filterwarnings('ignore')
 
 # Memory monitoring function for debugging

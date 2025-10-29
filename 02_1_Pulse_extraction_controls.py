@@ -21,7 +21,7 @@ import os
 import json
 
 # Import consolidated EOD functions
-from eod_functions import (
+from eod_functions_backup import (
     save_variable_length_waveforms,
     extract_pulse_snippets,
     # extract_pulse_snippets_control,
@@ -104,7 +104,7 @@ if import_params:
                     'min_width_us':30,  # Minimum pulse width in microseconds
                     'max_width_us':1000,  # Maximum pulse width in microseconds
                     'width_fac_detection':7.0,
-                    'interp_factor':3,  # Interpolation factor for waveform extraction
+                    'interp_factor':1,  # Interpolation factor for waveform extraction
                     'amplitude_ratio_min':0.2,  # Minimum peak-to-peak amplitude ratio
                     'amplitude_ratio_max':4,     # Maximum peak-to-peak amplitude ratio
                     'save_filtered_out':True, # Option to save filtered-out pulses for quality control
@@ -120,7 +120,7 @@ else:
                 'min_width_us':30,  # Minimum pulse width in microseconds
                 'max_width_us':1000,  # Maximum pulse width in microseconds
                 'width_fac_detection':7.0,
-                'interp_factor':3,  # Interpolation factor for waveform extraction
+                'interp_factor':1,  # Interpolation factor for waveform extraction
                 'amplitude_ratio_min':0.2,  # Minimum peak-to-peak amplitude ratio
                 'amplitude_ratio_max':4,     # Maximum peak-to-peak amplitude ratio
                 'save_filtered_out':True, # Option to save filtered-out pulses for quality control

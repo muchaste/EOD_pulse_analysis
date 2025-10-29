@@ -24,7 +24,7 @@ import pickle
 
 # Import from Script 03
 import thunderfish.pulses as pulses
-from eod_functions import extract_pulse_snippets, filter_waveforms, filter_waveforms_with_classifier, save_variable_length_waveforms
+from eod_functions_backup import extract_pulse_snippets, filter_waveforms, filter_waveforms_with_classifier, save_variable_length_waveforms
 
 # ML-related imports for classifier functionality
 try:

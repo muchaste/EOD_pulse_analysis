@@ -21,8 +21,8 @@ import json
 from pathlib import Path
 import pickle
 
-# Import consolidated EOD functions
-from eod_functions import (
+# Import EOD functions
+from eod_functions_backup import (
     save_variable_length_waveforms,
     extract_pulse_snippets,
     filter_waveforms,
