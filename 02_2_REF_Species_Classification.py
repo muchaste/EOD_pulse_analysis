@@ -1,11 +1,23 @@
 """
-# 02_01_Species_Classification.py - PUBLICATION-QUALITY VERSION
+# 02_2_REF_Species_Classification.py - UPDATED FOR FIXED-LENGTH WAVEFORMS
 # EOD Species Classification with Enhanced Wavelet Analysis
 
-CRITICAL FIXES IMPLEMENTED:
-==========================
+RECENT UPDATES:
+==============
+✅ FIXED-LENGTH WAVEFORM SUPPORT:
+- Updated to work with new fixed-length waveform storage system (.npz format)
+- Added proper waveform normalization using normalize_waveforms() function
+- Integrated P1/P2 index support for consistent waveform orientation
+- Automatic detection of fixed vs variable-length waveforms
+- Updated CWT implementation to use PyWavelets (replacing deprecated scipy.signal.cwt)
 
-✅ PRIORITY 1 - CRITICAL FIXES:
+✅ WAVEFORM NORMALIZATION:
+- P1-positive orientation (head-positive) for all waveforms
+- P1 amplitude normalization to unity for consistent scaling
+- Baseline correction for improved feature extraction
+- Normalization comparison plots for quality control
+
+✅ CRITICAL FIXES IMPLEMENTED:
 - 1.1 Fixed data leakage in preprocessing pipeline (scaler fit only on training data)
 - 1.2 Added QDA regularization (reg_param=0.01) to prevent singular covariance matrices  
 - 1.3 Fixed MDA implementation with proper Bayesian framework and class priors
@@ -51,8 +63,7 @@ from scipy import stats
 import json
 
 # Additional imports for new features
-import pywt  # For wavelet transforms
-from scipy.signal import cwt, morlet2  # For continuous wavelet transform
+import pywt  # For wavelet transforms (replaces deprecated scipy.signal.cwt)
 from scipy import signal  # For signal processing
 from sklearn.decomposition import PCA
 import glob
@@ -61,7 +72,7 @@ import pickle  # For model saving
 import joblib  # Alternative model saving (more efficient for sklearn models)
 
 # Import EOD functions
-from eod_functions_backup import load_variable_length_waveforms
+from pulse_functions import load_fixed_length_waveforms, normalize_waveforms, plot_normalization_comparison
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore')
@@ -121,6 +132,9 @@ print(f"Data types:\n{data.dtypes}")
 
 # Required columns for classification
 required_columns = ['species_code', 'eod_amplitude_ratio', 'eod_width_us', 'fft_freq_max']
+
+# Optional columns for waveform normalization (P1/P2 indices)
+optional_waveform_columns = ['eod_p1_idx', 'eod_p2_idx']
 
 # Check for required columns
 missing_columns = [col for col in required_columns if col not in data.columns]
@@ -1084,15 +1098,15 @@ print(f"\nLoading waveforms for wavelet analysis...")
 # Determine waveform file path
 waveform_base_path = os.path.join(os.path.dirname(input_file), 'master_eod_waveforms')
 
-# Check if master waveforms file exists
-if not os.path.exists(waveform_base_path + '_concatenated.npz'):
-    print(f"Warning: Master waveforms file not found at {waveform_base_path}")
+# Check if master waveforms file exists (updated for new format)
+if not os.path.exists(waveform_base_path + '.npz'):
+    print(f"Warning: Master waveforms file not found at {waveform_base_path}.npz")
     print("Skipping wavelet-based classification...")
     wavelet_results = {}
 else:
     try:
         # Load waveforms
-        all_waveforms = load_variable_length_waveforms(waveform_base_path)
+        all_waveforms = load_fixed_length_waveforms(waveform_base_path)
         print(f"Loaded {len(all_waveforms)} waveforms")
         
         if len(all_waveforms) == 0:
@@ -1129,6 +1143,87 @@ else:
             valid_y = aligned_y[valid_indices]
             
             print(f"Valid waveforms for analysis: {len(valid_waveforms)}")
+            
+            # =============================================================================
+            # WAVEFORM NORMALIZATION FOR ANALYSIS
+            # =============================================================================
+            
+            print(f"\nChecking for P1/P2 indices for waveform normalization...")
+            
+            # Check if P1/P2 indices are available in the aligned data
+            has_p1_p2_indices = all(col in aligned_data.columns for col in optional_waveform_columns)
+            
+            if has_p1_p2_indices:
+                print(f"✓ P1/P2 indices found, applying normalization...")
+                
+                # Extract P1/P2 indices for valid waveforms
+                valid_p1_indices = aligned_data.iloc[valid_indices]['eod_p1_idx'].values
+                valid_p2_indices = aligned_data.iloc[valid_indices]['eod_p2_idx'].values
+                
+                # Apply normalization for visualization and ML
+                print("  Normalizing waveforms with P1 unity method...")
+                normalized_waveforms, norm_info = normalize_waveforms(
+                    valid_waveforms, 
+                    valid_p1_indices, 
+                    valid_p2_indices,
+                    method='p1_unity',  # P1 amplitude = +1, head-positive orientation
+                    baseline_correction=True,
+                    return_normalization_info=True
+                )
+                
+                print(f"  ✓ Normalized {len(normalized_waveforms)} waveforms")
+                if norm_info['rejected_indices']:
+                    print(f"  ⚠️  Rejected {len(norm_info['rejected_indices'])} waveforms due to insufficient amplitude")
+                
+                # Update valid indices to exclude rejected waveforms
+                final_valid_indices = [i for i in range(len(valid_waveforms)) if i not in norm_info['rejected_indices']]
+                final_waveforms = normalized_waveforms
+                final_y = valid_y[final_valid_indices]
+                
+                # Create normalization comparison plot
+                if len(valid_waveforms) >= 5:
+                    print("  Creating normalization comparison plot...")
+                    sample_indices = np.random.choice(len(valid_waveforms), 
+                                                    min(5, len(valid_waveforms)), 
+                                                    replace=False)
+                    sample_original = [valid_waveforms[i] for i in sample_indices]
+                    sample_normalized = []
+                    sample_p1_idx = []
+                    sample_p2_idx = []
+                    
+                    for i in sample_indices:
+                        if i not in norm_info['rejected_indices']:
+                            norm_idx = i - sum(1 for x in norm_info['rejected_indices'] if x < i)
+                            sample_normalized.append(normalized_waveforms[norm_idx])
+                            sample_p1_idx.append(valid_p1_indices[i])
+                            sample_p2_idx.append(valid_p2_indices[i])
+                    
+                    if sample_normalized:
+                        plot_normalization_comparison(
+                            sample_original[:len(sample_normalized)], 
+                            sample_normalized,
+                            sample_p1_idx, 
+                            sample_p2_idx,
+                            method='p1_unity',
+                            title_suffix='Species Classification Data'
+                        )
+                        plt.savefig(os.path.join(output_path, 'waveform_normalization_comparison.png'), 
+                                  dpi=300, bbox_inches='tight')
+                        plt.show()
+                
+            else:
+                print(f"⚠️  P1/P2 indices not available, using raw waveforms")
+                print(f"   Missing columns: {[col for col in optional_waveform_columns if col not in aligned_data.columns]}")
+                print(f"   Recommendation: Update EOD extraction scripts to include P1/P2 indices")
+                
+                final_waveforms = valid_waveforms
+                final_y = valid_y
+            
+            print(f"Final waveforms for analysis: {len(final_waveforms)}")
+            
+            # Update valid_waveforms for the rest of the script to use normalized waveforms
+            valid_waveforms = final_waveforms
+            valid_y = final_y
             
             if len(valid_waveforms) < 20:
                 print("Insufficient valid waveforms for classification...")
@@ -1181,7 +1276,30 @@ else:
                 print(f"  Min: {min_length} samples")
                 print(f"  Max: {max_length} samples") 
                 print(f"  Mean: {mean_length:.1f} samples")
-                print(f"  Length variation: {max_length/min_length:.2f}x")
+                
+                # Check if waveforms are already fixed-length
+                if min_length == max_length:
+                    print(f"✓ All waveforms are fixed-length ({min_length} samples)")
+                    print("  No zero-padding needed for fixed-length waveforms")
+                    padded_waveforms = valid_waveforms
+                else:
+                    print(f"  Length variation: {max_length/min_length:.2f}x")
+                    print(f"⚠️  Variable-length waveforms detected - applying zero-padding for consistency")
+                    
+                    # Zero-pad all waveforms to the maximum length for consistent analysis
+                    print(f"Zero-padding all waveforms to {max_length} samples...")
+                    padded_waveforms = []
+                    for wf in valid_waveforms:
+                        if len(wf) < max_length:
+                            # Zero-pad symmetrically (center the signal)
+                            pad_total = max_length - len(wf)
+                            pad_left = pad_total // 2
+                            pad_right = pad_total - pad_left
+                            padded_wf = np.pad(wf, (pad_left, pad_right), mode='constant', constant_values=0)
+                        else:
+                            padded_wf = wf
+                        padded_waveforms.append(padded_wf)
+                    print(f"All waveforms now have {max_length} samples")
                 
                 # Determine sample rate (attempt to read from metadata, fallback to actual recording rate)
                 sample_rate = 96000  # Hz - actual sample rate for EOD recordings
@@ -1203,63 +1321,80 @@ else:
                 else:
                     print(f"No metadata file found, using actual recording sample rate: {sample_rate} Hz")
                 
-                # Zero-pad all waveforms to the maximum length for consistent analysis
-                print(f"Zero-padding all waveforms to {max_length} samples...")
-                padded_waveforms = []
-                for wf in valid_waveforms:
-                    if len(wf) < max_length:
-                        # Zero-pad symmetrically (center the signal)
-                        pad_total = max_length - len(wf)
-                        pad_left = pad_total // 2
-                        pad_right = pad_total - pad_left
-                        padded_wf = np.pad(wf, (pad_left, pad_right), mode='constant', constant_values=0)
-                    else:
-                        padded_wf = wf
-                    padded_waveforms.append(padded_wf)
-                
-                print(f"All waveforms now have {max_length} samples")
-                
-                # Create visualization comparing original vs zero-padded waveforms
+                # Create visualization of waveform preprocessing
                 if len(valid_waveforms) > 0:
-                    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-                    fig.suptitle('Waveform Preprocessing: Impact of Zero-Padding', fontsize=14)
-                    
-                    # Select a representative waveform (not the longest one)
-                    example_idx = np.argmin([abs(len(wf) - mean_length) for wf in valid_waveforms])
-                    original_wf = valid_waveforms[example_idx]
-                    padded_wf = padded_waveforms[example_idx]
-                    
-                    # Plot 1: Original waveform
-                    axes[0,0].plot(original_wf, 'b-', linewidth=1.5)
-                    axes[0,0].set_title(f'Original Waveform ({len(original_wf)} samples)')
-                    axes[0,0].set_xlabel('Sample Index')
-                    axes[0,0].set_ylabel('Amplitude')
-                    axes[0,0].grid(True, alpha=0.3)
-                    
-                    # Plot 2: Zero-padded waveform
-                    axes[0,1].plot(padded_wf, 'r-', linewidth=1.5)
-                    axes[0,1].axvline(x=(max_length-len(original_wf))//2, color='k', linestyle='--', alpha=0.5, label='Pad start')
-                    axes[0,1].axvline(x=(max_length-len(original_wf))//2 + len(original_wf), color='k', linestyle='--', alpha=0.5, label='Pad end')
-                    axes[0,1].set_title(f'Zero-Padded Waveform ({len(padded_wf)} samples)')
-                    axes[0,1].set_xlabel('Sample Index')
-                    axes[0,1].set_ylabel('Amplitude')
-                    axes[0,1].legend()
-                    axes[0,1].grid(True, alpha=0.3)
-                    
-                    # Plot 3: Length distribution
-                    axes[1,0].hist(waveform_lengths, bins=20, alpha=0.7, edgecolor='black')
-                    axes[1,0].axvline(x=mean_length, color='red', linestyle='--', label=f'Mean: {mean_length:.0f}')
-                    axes[1,0].axvline(x=max_length, color='green', linestyle='--', label=f'Max: {max_length}')
-                    axes[1,0].set_xlabel('Waveform Length (samples)')
-                    axes[1,0].set_ylabel('Count')
-                    axes[1,0].set_title('Waveform Length Distribution')
-                    axes[1,0].legend()
-                    axes[1,0].grid(True, alpha=0.3)
-                    
-                    # Plot 4: Benefits and next steps
-                    axes[1,1].text(0.05, 0.95, 'Wavelet Analysis Improvements:', transform=axes[1,1].transAxes, 
-                                  fontsize=12, fontweight='bold', verticalalignment='top')
-                    benefits_text = """
+                    if min_length == max_length:
+                        # Fixed-length waveforms - show normalization benefits
+                        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+                        fig.suptitle('Fixed-Length Waveform Analysis Setup', fontsize=14)
+                        
+                        # Select a representative waveform
+                        example_idx = min(5, len(valid_waveforms) - 1)
+                        example_wf = valid_waveforms[example_idx]
+                        
+                        # Plot 1: Example normalized waveform
+                        axes[0,0].plot(example_wf, 'b-', linewidth=1.5)
+                        axes[0,0].set_title(f'Example EOD Waveform ({len(example_wf)} samples)')
+                        axes[0,0].set_xlabel('Sample Index')
+                        axes[0,0].set_ylabel('Amplitude')
+                        axes[0,0].grid(True, alpha=0.3)
+                        
+                        # Plot 2: Multiple waveforms overlay
+                        axes[0,1].set_title('Multiple Waveforms Overlay (Fixed Length)')
+                        for i in range(min(10, len(valid_waveforms))):
+                            axes[0,1].plot(valid_waveforms[i], alpha=0.6, linewidth=1)
+                        axes[0,1].set_xlabel('Sample Index')
+                        axes[0,1].set_ylabel('Amplitude')
+                        axes[0,1].grid(True, alpha=0.3)
+                        
+                        # Plot 3: Length confirmation
+                        axes[1,0].bar(['All Waveforms'], [min_length], color='green', alpha=0.7)
+                        axes[1,0].set_ylabel('Length (samples)')
+                        axes[1,0].set_title(f'Fixed Length Confirmation: {min_length} samples')
+                        axes[1,0].grid(True, alpha=0.3)
+                        
+                    else:
+                        # Variable-length waveforms - show padding impact
+                        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+                        fig.suptitle('Waveform Preprocessing: Impact of Zero-Padding', fontsize=14)
+                        
+                        # Select a representative waveform (not the longest one)
+                        example_idx = np.argmin([abs(len(wf) - mean_length) for wf in valid_waveforms])
+                        original_wf = valid_waveforms[example_idx]
+                        padded_wf = padded_waveforms[example_idx]
+                        
+                        # Plot 1: Original waveform
+                        axes[0,0].plot(original_wf, 'b-', linewidth=1.5)
+                        axes[0,0].set_title(f'Original Waveform ({len(original_wf)} samples)')
+                        axes[0,0].set_xlabel('Sample Index')
+                        axes[0,0].set_ylabel('Amplitude')
+                        axes[0,0].grid(True, alpha=0.3)
+                        
+                        # Plot 2: Zero-padded waveform
+                        axes[0,1].plot(padded_wf, 'r-', linewidth=1.5)
+                        if len(original_wf) < max_length:
+                            axes[0,1].axvline(x=(max_length-len(original_wf))//2, color='k', linestyle='--', alpha=0.5, label='Pad start')
+                            axes[0,1].axvline(x=(max_length-len(original_wf))//2 + len(original_wf), color='k', linestyle='--', alpha=0.5, label='Pad end')
+                            axes[0,1].legend()
+                        axes[0,1].set_title(f'Zero-Padded Waveform ({len(padded_wf)} samples)')
+                        axes[0,1].set_xlabel('Sample Index')
+                        axes[0,1].set_ylabel('Amplitude')
+                        axes[0,1].grid(True, alpha=0.3)
+                        
+                        # Plot 3: Length distribution
+                        axes[1,0].hist(waveform_lengths, bins=20, alpha=0.7, edgecolor='black')
+                        axes[1,0].axvline(x=mean_length, color='red', linestyle='--', label=f'Mean: {mean_length:.0f}')
+                        axes[1,0].axvline(x=max_length, color='green', linestyle='--', label=f'Max: {max_length}')
+                        axes[1,0].set_xlabel('Waveform Length (samples)')
+                        axes[1,0].set_ylabel('Count')
+                        axes[1,0].set_title('Waveform Length Distribution')
+                        axes[1,0].legend()
+                        axes[1,0].grid(True, alpha=0.3)
+                        
+                        # Plot 4: Benefits of zero-padding for variable-length
+                        axes[1,1].text(0.05, 0.95, 'Zero-Padding Benefits:', transform=axes[1,1].transAxes, 
+                                      fontsize=12, fontweight='bold', verticalalignment='top')
+                        benefits_text = """
 Key optimizations for 96 kHz EOD data:
 
 • Zero-padding preserves temporal info
@@ -1272,12 +1407,40 @@ Key optimizations for 96 kHz EOD data:
 
 Optimized for EOD frequency content:
 dominant 500-8000 Hz, extended to 12 kHz
-                    """
-                    axes[1,1].text(0.05, 0.80, benefits_text, transform=axes[1,1].transAxes, 
-                                  fontsize=9, verticalalignment='top')
-                    axes[1,1].set_xlim(0, 1)
-                    axes[1,1].set_ylim(0, 1)
-                    axes[1,1].axis('off')
+                        """
+                        axes[1,1].text(0.05, 0.80, benefits_text, transform=axes[1,1].transAxes, 
+                                      fontsize=9, verticalalignment='top')
+                        axes[1,1].set_xlim(0, 1)
+                        axes[1,1].set_ylim(0, 1)
+                        axes[1,1].axis('off')
+                        
+                        # Plot 4: Benefits of fixed-length approach
+                        axes[1,1].text(0.05, 0.95, 'Fixed-Length Waveform Benefits:', transform=axes[1,1].transAxes, 
+                                      fontsize=12, fontweight='bold', verticalalignment='top')
+                        benefits_text = """
+Key advantages for 96 kHz EOD data:
+
+• Consistent waveform dimensions
+• No padding artifacts or distortion
+• Direct feature vector compatibility  
+• Optimal for machine learning models
+• Preserved temporal relationships
+• Enhanced classification accuracy
+
+P1/P2 Normalization Features:
+• Head-positive orientation (P1 > 0)
+• Amplitude unity scaling (P1 = +1)
+• Baseline correction applied
+• Species-specific signatures preserved
+
+Optimized for EOD frequency content:
+dominant 500-8000 Hz, extended to 12 kHz
+                        """
+                        axes[1,1].text(0.05, 0.80, benefits_text, transform=axes[1,1].transAxes, 
+                                      fontsize=9, verticalalignment='top')
+                        axes[1,1].set_xlim(0, 1)
+                        axes[1,1].set_ylim(0, 1)
+                        axes[1,1].axis('off')
                     
                     plt.tight_layout()
                     
@@ -1444,9 +1607,10 @@ dominant 500-8000 Hz, extended to 12 kHz
                         print(f"    Progress: {i}/{len(padded_waveforms)} ({progress*100:.1f}%) - ETA: {eta:.1f}s")
                     
                     try:
-                        # Perform CWT on zero-padded waveform (no resampling needed!)
-                        cwt_matrix = cwt(waveform, signal.morlet2, cwt_scales, 
-                                        dtype=np.complex128)
+                        # Perform CWT on zero-padded waveform using PyWavelets (replaces deprecated scipy.signal.cwt)
+                        cwt_matrix, _ = pywt.cwt(waveform, cwt_scales, cwt_wavelet, 
+                                               sampling_period=1/sample_rate)
+                        cwt_matrix = cwt_matrix.astype(np.complex128)
                         
                         # Extract OPTIMIZED features from CWT (reduced for speed)
                         cwt_abs = np.abs(cwt_matrix)

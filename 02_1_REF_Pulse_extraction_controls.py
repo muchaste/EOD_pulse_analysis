@@ -21,11 +21,11 @@ import os
 import json
 
 # Import consolidated EOD functions
-from eod_functions_backup import (
-    save_variable_length_waveforms,
+from pulse_functions import (
+    save_fixed_length_waveforms,
     extract_pulse_snippets,
-    # extract_pulse_snippets_control,
-    filter_waveforms
+    filter_waveforms,
+    normalize_waveforms
 )
 
 # Set directories
@@ -99,7 +99,7 @@ if import_params:
         messagebox.showerror("Import Error", f"Failed to import parameters:\n{str(e)}")
         print(f"Parameter import failed: {e}")
         # Fall back to default parameters
-        parameters = {'thresh':0.004,  # Reduced threshold for pulse detection to catch low-amplitude fish
+        parameters = {'thresh':0.1,  # Reduced threshold for pulse detection to catch low-amplitude fish
                     'min_rel_slope_diff':0.25,
                     'min_width_us':30,  # Minimum pulse width in microseconds
                     'max_width_us':1000,  # Maximum pulse width in microseconds
@@ -110,12 +110,13 @@ if import_params:
                     'save_filtered_out':True, # Option to save filtered-out pulses for quality control
                     'peak_fft_freq_min':50,
                     'peak_fft_freq_max':10000,
-                    'clip_threshold':1.6,  # Threshold for clipping detection (1.6 is conservative, adjust as needed)
-                    'top_amplitude_percent':50  # Only keep top x% highest amplitude EODs
+                    'clip_threshold':1.4,  # Threshold for clipping detection (1.6 is conservative, adjust as needed)
+                    'top_amplitude_percent':50,  # Only keep top x% highest amplitude EODs
+                    'return_diff': True
                     }
 else:
     # Default control recording parameters
-    parameters = {'thresh':0.004,  # Reduced threshold for pulse detection to catch low-amplitude fish
+    parameters = {'thresh':0.1,  # Reduced threshold for pulse detection to catch low-amplitude fish
                 'min_rel_slope_diff':0.25,
                 'min_width_us':30,  # Minimum pulse width in microseconds
                 'max_width_us':1000,  # Maximum pulse width in microseconds
@@ -126,8 +127,9 @@ else:
                 'save_filtered_out':True, # Option to save filtered-out pulses for quality control
                 'peak_fft_freq_min':50,
                 'peak_fft_freq_max':10000,
-                'clip_threshold':1.6,  # Threshold for clipping detection (1.6 is conservative, adjust as needed)
-                'top_amplitude_percent':50  # Only keep top x% highest amplitude EODs
+                'clip_threshold':1.4,  # Threshold for clipping detection (1.6 is conservative, adjust as needed)
+                'top_amplitude_percent':50,  # Only keep top x% highest amplitude EODs
+                'return_diff': True
                 }
 
 # Plot raw data
@@ -228,154 +230,58 @@ for n, individual in enumerate(individual_info):
                                 min_width=parameters['min_width_us']/1e6,  # in seconds
                                 max_width=parameters['max_width_us']/1e6,  # in seconds
                                 width_fac=parameters['width_fac_detection'],
-                                verbose=2,
+                                verbose=0,
                                 return_data=False)
     
     midpoints = (peaks + troughs) // 2  # Midpoint indices of pulses
 
         
-    # Extract variable-width snippets and analyze them
+    # Extract snippets and analyze them
     if len(midpoints) > 0:
         print(f"  Analyzing {len(midpoints)} unique events...")
 
-        # Analyze snippets with variable widths
-
-        eod_waveforms, eod_amps, eod_widths, ch_amps, ch_cor_coeffs, eod_chan, is_differential,\
-            snippet_peak_idc, snippet_trough_idc, snippet_midpoint_idc,\
-            final_peak_idc, final_trough_idc, final_midpoint_idc,\
-            pulse_orientation, amplitude_ratios, waveform_lengths, fft_peak_freqs = \
-            extract_pulse_snippets(
-            data, midpoints, peaks, troughs, thresh = parameters_df['thresh'][0],
-            width_factor = parameters_df['width_fac_detection'][0], interp_factor = parameters_df['interp_factor'][0], rate = rate,
-            source = '1ch_diff', return_differential = True
-            )
-        # eod_waveforms, eod_amps, eod_widths, snippet_peak_idc, snippet_trough_idc, snippet_midpoint_idc, \
-        #     final_peak_idc, final_trough_idc, final_midpoint_idc, pulse_orientation, amplitude_ratios, waveform_lengths, fft_peak_freqs = \
-        #     extract_pulse_snippets_control(data, parameters_df, rate=rate, midpoints=midpoints, peaks=peaks, troughs=troughs, widths=pulse_widths,
-        #                             center_on_zero_crossing=False)  # Skip centering for storage efficiency
-        
-
-
-        # DUPLICATE DETECTION: Remove events with identical peak/trough indices
-        # This handles multi-phasic EODs where low threshold detects both p1-t1 and p2-t2,
-        # but _process_waveform_common re-detects the same dominant p2-t2 in both snippets
-        print(f"  Before duplicate removal: {len(eod_waveforms)} events")
-        
-        # Create unique identifier for each event based on peak and trough indices
-        # Use tuple of (peak_idx, trough_idx) as the key
-        unique_events = {}
-        duplicate_indices = []
-        
-        for i in range(len(final_peak_idc)):
-            event_key = (final_peak_idc[i], final_trough_idc[i])
-            
-            if event_key in unique_events:
-                # Found duplicate - keep the one with better characteristics
-                existing_idx = unique_events[event_key]
-                
-                # Comparison criteria (in order of importance):
-                # 1. Smaller waveform length (more precise extraction)
-                # 2. Higher amplitude (better signal quality)
-                # 3. Better amplitude ratio (closer to expected range)
-                
-                current_length = waveform_lengths[i]
-                existing_length = waveform_lengths[existing_idx]
-                current_amp = eod_amps[i]
-                existing_amp = eod_amps[existing_idx]
-                current_ratio = amplitude_ratios[i]
-                existing_ratio = amplitude_ratios[existing_idx]
-                
-                # Decide which one to keep
-                keep_current = False
-                
-                if current_length != existing_length:
-                    # Prefer smaller length (more precise extraction)
-                    keep_current = current_length < existing_length
-                elif current_amp != existing_amp:
-                    # If lengths are equal, prefer higher amplitude
-                    keep_current = current_amp > existing_amp
-                else:
-                    # If both length and amplitude are equal, prefer better amplitude ratio
-                    # (closer to the middle of acceptable range)
-                    ratio_min = parameters['amplitude_ratio_min']
-                    ratio_max = parameters['amplitude_ratio_max']
-                    ratio_mid = (ratio_min + ratio_max) / 2
-                    
-                    current_ratio_distance = abs(current_ratio - ratio_mid)
-                    existing_ratio_distance = abs(existing_ratio - ratio_mid)
-                    keep_current = current_ratio_distance < existing_ratio_distance
-                
-                if keep_current:
-                    # Mark the existing one for removal and update the dictionary
-                    duplicate_indices.append(existing_idx)
-                    unique_events[event_key] = i
-                    # print(f"    Duplicate at indices ({final_peak_idc[i]}, {final_trough_idc[i]}): "
-                    #       f"keeping event {i} (len={current_length}) over {existing_idx} (len={existing_length})")
-                else:
-                    # Mark the current one for removal
-                    duplicate_indices.append(i)
-                    # print(f"    Duplicate at indices ({final_peak_idc[i]}, {final_trough_idc[i]}): "
-                    #       f"keeping event {existing_idx} (len={existing_length}) over {i} (len={current_length})")
-            else:
-                # First occurrence of this peak/trough pair
-                unique_events[event_key] = i
-        
-        # Remove duplicates from all arrays and lists
-        if duplicate_indices:
-            print(f"    Removing {len(duplicate_indices)} duplicate events")
-            
-            # Create mask for non-duplicate indices
-            non_duplicate_mask = np.ones(len(eod_waveforms), dtype=bool)
-            non_duplicate_mask[duplicate_indices] = False
-            
-            # Filter all arrays and lists
-            eod_waveforms = [eod_waveforms[i] for i in range(len(eod_waveforms)) if non_duplicate_mask[i]]
-            eod_amps = eod_amps[non_duplicate_mask]
-            eod_widths = eod_widths[non_duplicate_mask]
-            snippet_peak_idc = snippet_peak_idc[non_duplicate_mask]
-            snippet_trough_idc = snippet_trough_idc[non_duplicate_mask]
-            snippet_midpoint_idc = snippet_midpoint_idc[non_duplicate_mask]
-            final_peak_idc = final_peak_idc[non_duplicate_mask]
-            final_trough_idc = final_trough_idc[non_duplicate_mask]
-            final_midpoint_idc = final_midpoint_idc[non_duplicate_mask]
-            pulse_orientation = pulse_orientation[non_duplicate_mask]
-            amplitude_ratios = amplitude_ratios[non_duplicate_mask]
-            waveform_lengths = waveform_lengths[non_duplicate_mask]
-            fft_peak_freqs = fft_peak_freqs[non_duplicate_mask]
-            
-            print(f"    After duplicate removal: {len(eod_waveforms)} events")
-        else:
-            print(f"    No duplicates found")
-
-        keep_indices, filtered_features = filter_waveforms(
-            eod_waveforms, eod_widths, amplitude_ratios, fft_peak_freqs, rate*parameters['interp_factor'],
-            dur_min=parameters['min_width_us'], 
-            dur_max=parameters['max_width_us'],
-            pp_r_min=parameters['amplitude_ratio_min'], 
-            pp_r_max=parameters['amplitude_ratio_max'],
-            fft_freq_min=parameters['peak_fft_freq_min'], 
-            fft_freq_max=parameters['peak_fft_freq_max'],
-            return_features=True
+        (
+            eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
+            snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc, 
+            pulse_orientations, amp_ratios, fft_peak_freqs, peak_locations
+        ) = extract_pulse_snippets(
+            data, peaks, troughs, rate = rate, length = 2000,
+            source = '1ch_diff', return_differential = parameters_df['return_diff'][0]
         )
 
-        # Create complete DataFrame with all extracted data first (without fft_freq_max)
+        # Use basic threshold filtering
+        keep_indices, filtered_features, filteredout_features = filter_waveforms(
+            eod_snippets, eod_widths, amp_ratios, fft_peak_freqs, rate,
+            dur_min=parameters_df['min_width_us'][0], 
+            dur_max=parameters_df['max_width_us'][0],
+            pp_r_min=parameters_df['amplitude_ratio_min'][0], 
+            pp_r_max=parameters_df['amplitude_ratio_max'][0],
+            fft_freq_min=parameters_df['peak_fft_freq_min'][0], 
+            fft_freq_max=parameters_df['peak_fft_freq_max'][0],
+            return_features=True, return_filteredout_features=True
+        )
+
+        # Create complete DataFrame with all extracted data first
+        raw_midpoint_idc = (raw_p1_idc + raw_p2_idc) // 2  # Recalculate midpoints from raw p1/p2
+        snippet_midpoint_idc = (snippet_p1_idc + snippet_p2_idc) // 2  # Recalculate midpoints from raw p1/p2
         complete_eod_table = pd.DataFrame({
-            'species_code': [species_code] * len(eod_waveforms),
-            'individual_id': [individual_id] * len(eod_waveforms),
-            'midpoint_idx': final_midpoint_idc,
-            'peak_idx': final_peak_idc,
-            'trough_idx': final_trough_idc,
-            'snippet_peak_idx': snippet_peak_idc,
-            'snippet_trough_idx': snippet_trough_idc,
+            'species_code': [species_code] * len(eod_snippets),
+            'individual_id': [individual_id] * len(eod_snippets),
+            'midpoint_idx': raw_midpoint_idc,
+            'relative_time_s': raw_midpoint_idc / rate,
+            'p1_idx': raw_p1_idc,
+            'p2_idx': raw_p2_idc,
+            'eod_channel': eod_chan,
+            'snippet_p1_idx': snippet_p1_idc,
+            'snippet_p2_idx': snippet_p2_idc,
             'snippet_midpoint_idx': snippet_midpoint_idc,
             'eod_amplitude': eod_amps,
             'eod_width_us': eod_widths,
-            'eod_amplitude_ratio': amplitude_ratios,
-            'pulse_orientation': pulse_orientation,
-            'waveform_length': waveform_lengths,
+            'eod_amplitude_ratio': amp_ratios,
+            'pulse_orientation': pulse_orientations,
             'fft_freq_max': fft_peak_freqs
             })
-        
+
         # Apply amplitude-based filtering: only keep top X% highest amplitude EODs
         # First, filter by the initial criteria (duration, ratio, frequency)
         initially_filtered_table = complete_eod_table.iloc[keep_indices].copy()
@@ -421,7 +327,7 @@ for n, individual in enumerate(individual_info):
         all_clipped_mask = eod_amps >= parameters['clip_threshold']
         
         # Create filtering masks using high-amplitude indices
-        keep_mask = np.isin(np.arange(len(eod_waveforms)), high_amplitude_indices)
+        keep_mask = np.isin(np.arange(len(eod_snippets)), high_amplitude_indices)
         normal_mask = keep_mask & ~all_clipped_mask
         clipped_high_amp_mask = keep_mask & all_clipped_mask
         
@@ -433,7 +339,7 @@ for n, individual in enumerate(individual_info):
         # filtered_features['fft_freq'] has the same length as keep_indices
         if len(filtered_features) > 0 and 'fft_freq' in filtered_features:
             # Create full-length array with zeros, then fill in the filtered values
-            full_fft_freq = np.zeros(len(eod_waveforms))
+            full_fft_freq = np.zeros(len(eod_snippets))
             full_fft_freq[keep_indices] = filtered_features['fft_freq']
             
             # Add to the filtered tables
@@ -445,10 +351,10 @@ for n, individual in enumerate(individual_info):
             clipped_table['fft_freq_max'] = np.zeros(len(clipped_table))
         
         # Filter waveforms using the same masks
-        filtered_eod_waveforms = [eod_waveforms[i] for i in np.where(normal_mask)[0]]
-        clipped_eod_waveforms = [eod_waveforms[i] for i in np.where(all_clipped_mask)[0]]
+        filtered_eod_waveforms = [eod_snippets[i] for i in np.where(normal_mask)[0]]
+        clipped_eod_waveforms = [eod_snippets[i] for i in np.where(all_clipped_mask)[0]]
         
-        print(f"  Final EODs after all filtering: {len(high_amplitude_indices)} out of {len(eod_waveforms)} total")
+        print(f"  Final EODs after all filtering: {len(high_amplitude_indices)} out of {len(eod_snippets)} total")
         print(f"    Normal high-amplitude events: {len(eod_table)}")
         print(f"    All clipped events (amp >= {parameters['clip_threshold']}): {len(clipped_table)}")
                 
@@ -464,10 +370,22 @@ for n, individual in enumerate(individual_info):
         
         # Store waveform data with metadata
         if len(filtered_eod_waveforms) > 0:
-            waveform_metadata = save_variable_length_waveforms(
+            # Save original waveforms
+            waveform_metadata = save_fixed_length_waveforms(
                 filtered_eod_waveforms, 
                 f'{output_path}\\{individual_id}_eod_waveforms'
             )
+            
+            # Save normalized waveforms (if normalization was successful)
+            if 'normalized_waveforms' in locals() and len(normalized_waveforms) > 0:
+                try:
+                    normalized_waveform_metadata = save_fixed_length_waveforms(
+                        normalized_waveforms, 
+                        f'{output_path}\\{individual_id}_eod_waveforms_normalized'
+                    )
+                    print(f"    Saved {len(normalized_waveforms)} normalized waveforms for {individual_id}")
+                except Exception as e:
+                    print(f"    Warning: Could not save normalized waveforms for {individual_id}: {e}")
             
             # Add to master waveform collection
             all_waveform_data.append({
@@ -485,7 +403,7 @@ for n, individual in enumerate(individual_info):
         
         # Save clipped waveforms separately
         if len(clipped_eod_waveforms) > 0:
-            clipped_waveform_metadata = save_variable_length_waveforms(
+            clipped_waveform_metadata = save_fixed_length_waveforms(
                 clipped_eod_waveforms, 
                 f'{output_path}\\{individual_id}_clipped_eod_waveforms'
             )
@@ -515,20 +433,20 @@ for n, individual in enumerate(individual_info):
             
             # Plot all initially filtered events (before amplitude filtering)
             if len(keep_indices) > 0:
-                all_filtered_peaks = final_peak_idc[keep_indices]
-                all_filtered_troughs = final_trough_idc[keep_indices]
-                ax1.plot(all_filtered_peaks, 
-                        data[all_filtered_peaks], 'o', markersize=3, color='red', alpha=0.6, label='All filtered')
-                ax1.plot(all_filtered_troughs, 
-                        data[all_filtered_troughs], 'o', markersize=3, color='blue', alpha=0.6)
-            
+                all_filtered_p1 = raw_p1_idc[keep_indices]
+                all_filtered_p2 = raw_p2_idc[keep_indices]
+                ax1.plot(all_filtered_p1, 
+                        data[all_filtered_p1], 'o', markersize=3, color='red', alpha=0.6, label='All filtered')
+                ax1.plot(all_filtered_p2, 
+                        data[all_filtered_p2], 'o', markersize=3, color='blue', alpha=0.6)
+
             # Highlight the high-amplitude events (top 30%) in yellow
             if len(eod_table) > 0:
-                ax1.plot(eod_table['peak_idx'].values, 
-                        data[eod_table['peak_idx'].values], 'o', markersize=4, color='yellow', alpha=0.8, 
+                ax1.plot(eod_table['p1_idx'].values, 
+                        data[eod_table['p1_idx'].values], 'o', markersize=4, color='yellow', alpha=0.8, 
                         label=f'Selected high-amplitude peaks')
-                ax1.plot(eod_table['trough_idx'].values, 
-                        data[eod_table['trough_idx'].values], 'o', markersize=4, color='orange', alpha=0.8, 
+                ax1.plot(eod_table['p2_idx'].values, 
+                        data[eod_table['p2_idx'].values], 'o', markersize=4, color='orange', alpha=0.8, 
                         label=f'Selected high-amplitude troughs')
             
             # Update title based on filtering approach
@@ -545,54 +463,59 @@ for n, individual in enumerate(individual_info):
             
             # Prepare normalized waveforms for analysis
             if len(filtered_eod_waveforms) > 0:
-                # Waveforms are already normalized, just center them by their midpoint
-                centered_waveforms = []
-                for i, wf in enumerate(filtered_eod_waveforms):
-                    # Get the midpoint index for this waveform (from the corresponding DataFrame row)
-                    midpoint_idx = eod_table.iloc[i]['snippet_midpoint_idx']
+                print(f"  Normalizing {len(filtered_eod_waveforms)} waveforms for visualization...")
+                
+                # Get P1/P2 indices for the filtered waveforms
+                filtered_snippet_p1_idc = snippet_p1_idc[normal_mask]
+                filtered_snippet_p2_idc = snippet_p2_idc[normal_mask]
+                
+                # Normalize waveforms using p1_unity method (best for visualization)
+                normalized_waveforms = normalize_waveforms(
+                    filtered_eod_waveforms, 
+                    filtered_snippet_p1_idc, 
+                    filtered_snippet_p2_idc,
+                    method='p1_unity',  # P1 = +1, head-positive orientation
+                    baseline_correction=True
+                )
+                
+                print(f"    Successfully normalized {len(normalized_waveforms)} waveforms")
+                
+                # Calculate average waveform directly from normalized waveforms
+                if len(normalized_waveforms) > 0:
+                    # Find the longest waveform to set common length
+                    max_length = max(len(wf) for wf in normalized_waveforms)
                     
-                    # Center the waveform by shifting so midpoint is at index 0
-                    # Create indices relative to midpoint
-                    wf_indices = np.arange(len(wf)) - midpoint_idx
-                    centered_waveforms.append((wf_indices, wf))
-                
-                # Find the range needed to contain all waveforms when centered
-                all_min_idx = min([min(indices) for indices, _ in centered_waveforms])
-                all_max_idx = max([max(indices) for indices, _ in centered_waveforms])
-                
-                # Create a common index array
-                common_indices = np.arange(all_min_idx, all_max_idx + 1)
-                
-                # Interpolate all waveforms to the common index grid for averaging
-                aligned_waveforms = []
-                for indices, wf in centered_waveforms:
-                    # Interpolate to common grid, using NaN for extrapolated regions
-                    aligned_wf = np.interp(common_indices, indices, wf, left=np.nan, right=np.nan)
-                    aligned_waveforms.append(aligned_wf)
-                
-                # Calculate average waveform (ignoring NaN values)
-                if aligned_waveforms:
+                    # Align all waveforms by padding shorter ones
+                    aligned_waveforms = []
+                    for wf in normalized_waveforms:
+                        if len(wf) == max_length:
+                            aligned_waveforms.append(wf)
+                        else:
+                            # Pad shorter waveforms with zeros at the end
+                            padded = np.pad(wf, (0, max_length - len(wf)), 'constant')
+                            aligned_waveforms.append(padded)
+                    
+                    # Calculate average and std
                     aligned_array = np.array(aligned_waveforms)
-                    average_waveform = np.nanmean(aligned_array, axis=0)
-                    waveform_std = np.nanstd(aligned_array, axis=0)
-                    # Store common indices for plotting
-                    avg_indices = common_indices
+                    average_waveform = np.mean(aligned_array, axis=0)
+                    waveform_std = np.std(aligned_array, axis=0)
+                    avg_indices = np.arange(len(average_waveform))
                 else:
                     average_waveform = np.array([])
                     waveform_std = np.array([])
                     avg_indices = np.array([])
             else:
-                centered_waveforms = []
+                normalized_waveforms = []
                 average_waveform = np.array([])
                 waveform_std = np.array([])
                 avg_indices = np.array([])
             
             # Middle left: Normalized waveforms overlay
             ax2 = fig.add_subplot(gs[1, 0])
-            if len(filtered_eod_waveforms) > 0 and centered_waveforms:
-                # Plot individual waveforms with low alpha (centered by midpoint)
-                for indices, wf in centered_waveforms:
-                    ax2.plot(indices, wf, 'k-', alpha=0.1, linewidth=0.5)
+            if len(normalized_waveforms) > 0:
+                # Plot individual normalized waveforms with low alpha
+                for wf in normalized_waveforms:
+                    ax2.plot(wf, 'k-', alpha=0.1, linewidth=0.5)
                 
                 # Plot average waveform as bold line
                 if len(average_waveform) > 0:
@@ -602,30 +525,29 @@ for n, individual in enumerate(individual_info):
                                 average_waveform + waveform_std,
                                 alpha=0.3, color='red', label='±1 SD')
                 
-                ax2.set_title('Centered Normalized Waveforms')
-                ax2.set_xlabel('Sample (relative to midpoint)')
+                ax2.set_title('P1-Normalized Waveforms (P1=+1)')
+                ax2.set_xlabel('Sample')
                 ax2.set_ylabel('Normalized Amplitude')
                 ax2.legend()
                 ax2.grid(True, alpha=0.3)
-                ax2.axvline(0, color='gray', linestyle=':', alpha=0.5, label='Midpoint')
             else:
                 ax2.text(0.5, 0.5, 'No waveforms available', ha='center', va='center', transform=ax2.transAxes)
-                ax2.set_title('Centered Normalized Waveforms')
+                ax2.set_title('P1-Normalized Waveforms (P1=+1)')
             
             # Middle middle: Power Spectral Densities
             ax3 = fig.add_subplot(gs[1, 1])
-            if len(filtered_eod_waveforms) > 0 and centered_waveforms:
-                # Calculate PSDs for individual waveforms
+            if len(normalized_waveforms) > 0:
+                # Calculate PSDs for normalized waveforms
                 psds = []
                 freqs = None
                 
                 # Use a fixed nperseg for consistent frequency resolution
-                waveform_lengths = [len(wf) for _, wf in centered_waveforms]
-                nperseg = min(128, min(waveform_lengths) // 2)
+                waveform_lengths = [len(wf) for wf in normalized_waveforms]
+                nperseg = min(128, min(waveform_lengths) // 2) if waveform_lengths else 64
                 if nperseg < 8:  # Ensure minimum segments for meaningful PSD
                     nperseg = 8
                 
-                for indices, wf in centered_waveforms:
+                for wf in normalized_waveforms:
                     if len(wf) > nperseg:
                         # Use scipy.signal.welch for PSD with fixed nperseg
                         from scipy import signal as scipy_signal
@@ -762,7 +684,7 @@ if all_eod_tables:
             all_combined_waveforms.extend(wf_data['waveforms'])
         
         if all_combined_waveforms:
-            master_waveform_metadata = save_variable_length_waveforms(
+            master_waveform_metadata = save_fixed_length_waveforms(
                 all_combined_waveforms, 
                 f'{output_path}\\master_eod_waveforms'
             )
@@ -781,7 +703,7 @@ if all_clipped_tables:
             all_combined_clipped_waveforms.extend(wf_data['waveforms'])
         
         if all_combined_clipped_waveforms:
-            master_clipped_waveform_metadata = save_variable_length_waveforms(
+            master_clipped_waveform_metadata = save_fixed_length_waveforms(
                 all_combined_clipped_waveforms, 
                 f'{output_path}\\master_clipped_eod_waveforms'
             )
