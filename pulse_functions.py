@@ -74,7 +74,7 @@ def unify_across_channels(peaks, troughs, pulse_widths):
     return unique_midpoints, unique_peaks, unique_troughs, unique_widths
 
 def extract_pulse_snippets(data, peaks, troughs, rate, length,
-                           source, return_differential=True, use_pca_extraction=False,
+                           source, return_differential=True, use_pca=False,
                            pca_component=0, pca_interp_points=100):
     """
     Extract and analyze EOD snippets with variable widths based on detected pulse widths.
@@ -99,26 +99,26 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
         - '1ch_diff' : single-channel differential data (control recordings)
         - 'multich_linear' : multi-channel data with linear electrode arrangement (field recordings)
     return_differential : bool
-        Whether to keep only differential pulses (default True, ignored if use_pca_extraction=True)
-    use_pca_extraction : bool
+        Whether to keep only differential pulses (default True, ignored if use_pca=True)
+    use_pca : bool
         If True, use PCA-based extraction with spatial interpolation instead of differential.
         This method reduces noise by projecting multi-channel data onto principal components
         and reconstructing the signal with spatial interpolation (Zlenko et al., 2024).
         Default False for backward compatibility.
     pca_component : int
         Which principal component to use for signal reconstruction (default 0 = first component).
-        Only used when use_pca_extraction=True.
+        Only used when use_pca=True.
     pca_interp_points : int
         Number of interpolation points for 1D spatial interpolation along electrode array.
         Default 100 provides high spatial resolution for locating signal maxima.
-        Only used when use_pca_extraction=True.
+        Only used when use_pca=True.
     
     Returns
     -------
     eod_waveforms : list of 1-D arrays
         Variable-length EOD waveform snippets (no zero-padding).
-        If use_pca_extraction=True: PCA-reconstructed waveforms with spatial interpolation.
-        If use_pca_extraction=False: Differential waveforms from adjacent channel pairs.
+        If use_pca=True: PCA-reconstructed waveforms with spatial interpolation.
+        If use_pca=False: Differential waveforms from adjacent channel pairs.
     eod_amps : 1-D array
         Amplitude of extracted waveform
     eod_widths : 1-D array
@@ -166,11 +166,11 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
         print("    Multi-channel linear data source detected...")
         
         # PCA extraction requires multi-channel data
-        if use_pca_extraction and n_channels < 2:
+        if use_pca and n_channels < 2:
             print("    Warning: PCA extraction requires multi-channel data. Falling back to standard extraction.")
-            use_pca_extraction = False
+            use_pca = False
         
-        if use_pca_extraction:
+        if use_pca:
             print(f"    Using PCA-based extraction with spatial interpolation from {n_channels}-channel data...")
             print(f"    PCA settings: component={pca_component}, interpolation points={pca_interp_points}")
             # For PCA, we don't need differential channel selection
@@ -191,7 +191,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
             is_differential = np.zeros(n_pulses, dtype=int)  # All single-ended
 
 
-    if return_differential and not use_pca_extraction:
+    if return_differential and not use_pca:
         print("    Filtering to keep only differential pulses...")
         # Filter non-differential pulses
         keep_mask = is_differential == 1
@@ -203,9 +203,9 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
     filtered_eod_chans = eod_chans[keep_mask]
     n_pulses_diff = len(filtered_peak_idc)
 
-    if return_differential and not use_pca_extraction:
+    if return_differential and not use_pca:
         print(f"    Found {n_pulses_diff} differential pulses out of {n_pulses} total")
-    elif use_pca_extraction:
+    elif use_pca:
         print(f"    Processing {n_pulses_diff} pulses with PCA extraction")
         
 
@@ -235,7 +235,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
         end_idx = min(data.shape[0], center_idx + wf_length // 2)
 
         # Extract snippet based on extraction method
-        if use_pca_extraction and source == 'multich_linear':
+        if use_pca and source == 'multich_linear':
             # PCA extraction: get all channels
             snippet_multichannel = data[start_idx:end_idx, :]
             
@@ -317,7 +317,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
             end_idx = min(data.shape[0], center_idx + wf_length // 2)
 
             # Extract snippet based on method
-            if use_pca_extraction and source == 'multich_linear':
+            if use_pca and source == 'multich_linear':
                 snippet_multichannel = data[start_idx:end_idx, :]
                 try:
                     snippet, spatial_amps, var_explained, peak_ch, peak_loc = _extract_pca_waveform(
@@ -399,7 +399,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
     # Filter out any empty waveforms
     if len(eod_waveforms) == 0:
         # No valid waveforms found
-        if use_pca_extraction:
+        if use_pca:
             print("    No valid PCA-extracted waveforms found.")
         else:
             print("    No valid differential waveforms found.")
@@ -412,7 +412,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
         eod_chan = np.array(filtered_eod_chans)  # Use filtered channel list
         
         # Set is_differential based on extraction method
-        if use_pca_extraction:
+        if use_pca:
             is_differential_filtered = np.full(len(eod_waveforms), 2, dtype=int)  # 2 = PCA method
             if pca_variance_explained:
                 mean_var_explained = np.mean(pca_variance_explained)
@@ -432,7 +432,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
         if peak_locations:
             peak_locations_array = np.array(peak_locations)
             mean_peak_loc = np.mean(peak_locations_array)
-            if use_pca_extraction:
+            if use_pca:
                 print(f"    PCA spatial info: mean peak location = {mean_peak_loc:.2f} (electrode units)")
             else:
                 print(f"    Differential spatial info: mean peak location = {mean_peak_loc:.2f} (electrode units)")
@@ -1746,9 +1746,10 @@ def filter_events(events_to_filter, min_eods_per_event, min_amplitude):
     return events_filtered
 
 
-def create_event_plots(event_id, event_eods, event_data, event_start_time, sample_rate, output_path, max_plot_duration=300):
+def create_event_plots(event_id, event_eods, event_data, event_start_time, sample_rate, output_path, max_plot_duration=300, extraction_method='Differential'):
     """
-    Create differential detection plots for EOD events with memory-efficient handling.
+    Create detection plots for EOD events with memory-efficient handling.
+    Adapts to PCA (single-ended) or Differential extraction methods.
     
     Parameters:
     -----------
@@ -1766,12 +1767,14 @@ def create_event_plots(event_id, event_eods, event_data, event_start_time, sampl
         Directory to save plots
     max_plot_duration : float
         Maximum duration (seconds) before applying downsampling
+    extraction_method : str
+        'PCA' for single-ended data or 'Differential' for differential data
     
     Returns:
     --------
     str : Path to saved plot file
     """
-    print(f"        Creating event plot...")
+    print(f"        Creating event plot (method: {extraction_method})...")
     
     # Calculate event properties
     event_duration = len(event_data) / sample_rate
@@ -1826,21 +1829,38 @@ def create_event_plots(event_id, event_eods, event_data, event_start_time, sampl
         plot_step = 1  # Original resolution for shorter events
         print(f"        Normal event - using original resolution")
     
+    # Determine data format and plotting parameters based on extraction method
+    n_channels = event_data.shape[1]
+    if extraction_method == 'PCA':
+        n_plot_channels = n_channels
+        channel_label_prefix = 'Ch'
+        plot_title_method = 'Single-Ended (PCA)'
+    else:  # Differential
+        n_plot_channels = n_channels - 1
+        channel_label_prefix = 'Ch'
+        plot_title_method = 'Differential'
+    
     # Create the plot
     plt.figure(figsize=(20, 8))
     
-    # Plot differential signals for each channel pair
-    n_channels = event_data.shape[1]
-    for i in range(n_channels - 1):
-        # Calculate differential signal with memory-efficient approach
-        data_diff = np.diff(event_data[::plot_step, i:i+2], axis=1).flatten()
+    # Plot signals for each channel
+    for i in range(n_plot_channels):
+        # Calculate signal data based on extraction method
+        if extraction_method == 'PCA':
+            # Use single-ended channel data
+            channel_data = event_data[::plot_step, i]
+            ch_label = f'{channel_label_prefix}{i}'
+        else:  # Differential
+            # Calculate differential signal
+            channel_data = np.diff(event_data[::plot_step, i:i+2], axis=1).flatten()
+            ch_label = f'{channel_label_prefix}{i}-{i+1}'
         
         # Create time coordinates for downsampled data
-        time_indices = np.arange(0, len(event_data), plot_step)[:len(data_diff)]
+        time_indices = np.arange(0, len(event_data), plot_step)[:len(channel_data)]
         time_offsets = pd.to_timedelta(time_indices / sample_rate, unit='s')
         x_coords = event_start_time + time_offsets
         
-        plt.plot(x_coords, data_diff + i * offset_diff, linewidth=0.5, label=f'Ch{i}-{i+1}')
+        plt.plot(x_coords, channel_data + i * offset_diff, linewidth=0.5, label=ch_label)
         
         # Plot detected pulses for this channel
         ch_eods = event_eods[event_eods['eod_channel'] == i]
@@ -1855,10 +1875,15 @@ def create_event_plots(event_id, event_eods, event_data, event_start_time, sampl
                 if np.any(valid_peaks):
                     valid_peak_samples = peak_sample_indices[valid_peaks]
                     peak_timestamps = event_start_time + pd.to_timedelta(valid_peak_samples / sample_rate, unit='s')
-                    peak_diffs = np.diff(event_data[valid_peak_samples, i:i+2], axis=1).flatten()
-                    plt.plot(peak_timestamps, peak_diffs + i * offset_diff, 
+                    
+                    if extraction_method == 'PCA':
+                        peak_values = event_data[valid_peak_samples, i]
+                    else:
+                        peak_values = np.diff(event_data[valid_peak_samples, i:i+2], axis=1).flatten()
+                    
+                    plt.plot(peak_timestamps, peak_values + i * offset_diff, 
                             'o', markersize=3, color='red', alpha=0.8, 
-                            label='Peaks' if i == 0 else "")
+                            label='P1' if i == 0 else "")
             
             # Plot troughs (blue)
             if 'p2_idx' in ch_eods.columns:
@@ -1870,13 +1895,18 @@ def create_event_plots(event_id, event_eods, event_data, event_start_time, sampl
                 if np.any(valid_troughs):
                     valid_trough_samples = trough_sample_indices[valid_troughs]
                     trough_timestamps = event_start_time + pd.to_timedelta(valid_trough_samples / sample_rate, unit='s')
-                    trough_diffs = np.diff(event_data[valid_trough_samples, i:i+2], axis=1).flatten()
-                    plt.plot(trough_timestamps, trough_diffs + i * offset_diff, 
+                    
+                    if extraction_method == 'PCA':
+                        trough_values = event_data[valid_trough_samples, i]
+                    else:
+                        trough_values = np.diff(event_data[valid_trough_samples, i:i+2], axis=1).flatten()
+                    
+                    plt.plot(trough_timestamps, trough_values + i * offset_diff, 
                             'o', markersize=3, color='blue', alpha=0.8, 
-                            label='Troughs' if i == 0 else "")
+                            label='P2' if i == 0 else "")
         
         # Clean up arrays immediately to save memory
-        del data_diff, x_coords
+        del channel_data, x_coords
         gc.collect()
     
     # Overlay colored boxes for each original channel event
@@ -1945,9 +1975,9 @@ def create_event_plots(event_id, event_eods, event_data, event_start_time, sampl
                 color='black', linestyle='--', linewidth=2, alpha=0.5, zorder=12)
     
     # Configure plot appearance
-    plt.ylim(bottom=None, top=(n_channels - 1.5) * offset_diff)
+    plt.ylim(bottom=None, top=(n_plot_channels - 0.5) * offset_diff)
     
-    title_base = f'Event {event_id} - Differential EOD Detections'
+    title_base = f'Event {event_id} - {plot_title_method} EOD Detections'
     if plot_step > 1:
         title_base += f' (downsampled {plot_step}x)'
     title_base += f'\nDuration: {event_duration:.1f}s - Colored boxes: merged channel events'
@@ -1963,7 +1993,7 @@ def create_event_plots(event_id, event_eods, event_data, event_start_time, sampl
     plt.xticks(rotation=45)
     
     # Save plot
-    plot_filename = f'event_{event_id:03d}_differential_detection.png'
+    plot_filename = f'event_{event_id:03d}_detection.png'
     plot_path = Path(output_path) / plot_filename
     plt.savefig(plot_path, dpi=150, bbox_inches='tight')
     plt.close()

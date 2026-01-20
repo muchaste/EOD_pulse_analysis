@@ -12,16 +12,12 @@ import audioio as aio
 import numpy as np
 import pandas as pd
 import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog
-# from sklearn.preprocessing import StandardScaler
 import gc
 import glob
 import datetime as dt
 import os
 import json
-# from pathlib import Path
 import pickle
-
 
 # Import EOD functions
 from pulse_functions import (
@@ -37,140 +33,68 @@ from pulse_functions import (
     create_event_plots
 )
 
-# use_param_file = messagebox.askyesno("Use Parameter File", 
-#                                      "Do you want to use a file with control parameters?\n\n"
-# # Pick file with control parameters
-# if use_param_file:
-#     param_file = filedialog.askopenfilename(title = "Select File with Control Parameters")
-#     parameters_imported = pd.read_csv(param_file).to_dict(orient='list')
+# Import parameter configuration GUI
+from parameter_gui import ParameterConfigGUI
 
-# Option to import parameters from diagnostic tool
-import_diagnostic_params = messagebox.askyesno("Import Diagnostic Parameters", 
-                                           "Do you want to import parameters from a diagnostic tool JSON file?")
 
-diagnostic_parameters = None
-if import_diagnostic_params:
-    param_file = filedialog.askopenfilename(
-        title="Select Diagnostic Parameter File", 
-        filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
-    )
-    try:
-        with open(param_file, 'r') as f:
-            diagnostic_parameters = json.load(f)
-        print(f"Imported diagnostic parameters from: {param_file}")
-    except Exception as e:
-        messagebox.showerror("Import Error", f"Failed to import parameters:\n{str(e)}")
-        print(f"Parameter import failed: {e}")
-        diagnostic_parameters = None
+# ============================================================================
+# INITIALIZE CONFIGURATION GUI
+# ============================================================================
+print("Starting Parameter Configuration GUI...")
 
-if diagnostic_parameters is not None:
-    # Use diagnostic parameters but ensure all required parameters are present
-    parameters = diagnostic_parameters.copy()
-    # Update threshold if needed
-    if 'thresh' in parameters:
-        thresh = parameters['thresh']
-    print("Using diagnostic tool parameters")
-else:
-    # Default field recording parameters
-    parameters = {
-        'thresh': 0.02,
-        'min_rel_slope_diff': 0.25,
-        'min_width_us': 30,
-        'max_width_us': 1000,  # in microseconds
-        'width_fac_detection': 7.0,
-        'window_length_extraction_us': 4000,  # in microseconds
-        'interp_factor': 3,  # Interpolation factor for waveform extraction
-        'amplitude_ratio_min': 0.2,
-        'amplitude_ratio_max': 4,
-        'save_filtered_out': False,
-        'noise_removal': False,
-        'peak_fft_freq_min': 100,
-        'peak_fft_freq_max': 10000,
-        'return_diff': True,  # Return differential data
-        'source': 'multich_linear',
-        'filtering_method': 'basic',  # 'basic' or 'ml_enhanced'
-        'create_events': True,
-        'merge_events': True,
-        'pre_merge_filtering': True,
-        'post_merge_filtering': True,
-        'create_plots': True,
-        'max_ipi_seconds': 5.0,         # Maximum inter-pulse interval for temporal clustering
-        'min_eods_per_event': 30,       # Minimum EODs required per merged event
-        'max_merge_gap_seconds': 0.5,   # Maximum gap for merging neighboring channel events
-        'margin': 1.0,                  # Safety margin around events in seconds
-        'min_channel_event_size': 5,   # Minimum size of channel events before merging (high-pass filter)
-        'min_amplitude': 0.04           # Minimum amplitude threshold for events (at least one eod should have this size)
-    }
+root = tk.Tk()
+config_gui = ParameterConfigGUI(root)
+root.mainloop()
+
+# Check if user cancelled
+if config_gui.result is None:
+    print("Configuration cancelled by user")
+    exit()
+
+# Extract configuration
+config = config_gui.result
+input_path = config['paths']['input_path']
+cal_file = config['paths']['cal_file']
+output_path = config['paths']['output_path']
+
+use_ml_filtering = config['ml_settings']['use_ml_filtering']
+classifier_path = config['ml_settings']['classifier_path'] if use_ml_filtering else None
+fish_probability_threshold = config['ml_settings']['fish_probability_threshold']
+
+parameters = config['parameters']
+
+print("\n" + "="*60)
+print("CONFIGURATION SUMMARY")
+print("="*60)
+print(f"Input folder: {input_path}")
+print(f"Calibration file: {cal_file}")
+print(f"Output folder: {output_path}")
+print(f"ML filtering: {'Enabled' if use_ml_filtering else 'Disabled'}")
+if use_ml_filtering:
+    print(f"  Classifier: {classifier_path}")
+    print(f"  Threshold: {fish_probability_threshold}")
+print("\nAnalysis Parameters:")
+for key, value in parameters.items():
+    print(f"  {key}: {value}")
+print("="*60 + "\n")
+
+# Create output folder if it doesn't exist
+os.makedirs(output_path, exist_ok=True)
+
+# Load calibration factors
+cor_factors = np.array(pd.read_csv(cal_file))
 
 # Parameters for event creation
 if parameters['create_events']:
     print("Setting event extraction parameters...")
-
-    # # Parameters (can be adjusted based on your data)
-    # max_ipi_seconds = 5.0       # Maximum inter-pulse interval for temporal clustering
-    # min_eods_per_event = 30     # Minimum EODs required per merged event
-    # max_merge_gap_seconds = 0.5  # Maximum gap for merging neighboring channel events
-    # margin = 1.0                # Safety margin around events in seconds
-    # min_channel_event_size = 10  # Minimum size of channel events before merging (high-pass filter)
-    # min_amplitude = 0.01          # Minimum amplitude threshold for events (at least one eod should have this size)
     event_counter = 0           # Keep track of total events across files
     event_summaries = []
 
-
     print(f"  max_ipi_seconds: {parameters['max_ipi_seconds']}")
-    print(f"  min_eods_per_event: {parameters['min_eods_per_event']}")
+    print(f"  min_eods_premerge: {parameters['min_eods_premerge']}")
     print(f"  max_merge_gap_seconds: {parameters['max_merge_gap_seconds']}")
-    print(f"  min_channel_event_size: {parameters['min_channel_event_size']}")
+    print(f"  min_eods_postmerge: {parameters['min_eods_postmerge']}")
     print(f"  min_amplitude: {parameters['min_amplitude']}")
-
-# Set directories
-root = tk.Tk()
-root.withdraw()
-input_path = filedialog.askdirectory(title = "Select Folder with Logger Files")
-
-# Pick file for amplitude calibration
-cal_file = filedialog.askopenfilename(title = "Select File with Calibration Data")
-cor_factors = np.array(pd.read_csv(cal_file))
-
-# Pick output folder
-output_path = filedialog.askdirectory(title = "Select Folder to Store Analysis Results")
-# Create output folder if it doesn't exist
-os.makedirs(output_path, exist_ok=True)
-
-# Option to use enhanced ML-based filtering
-use_ml_filtering = messagebox.askyesno("Enhanced Filtering", 
-                                      "Do you want to use machine learning-based fish vs noise classification?\n\n"
-                                      "This requires a trained classifier from the annotation analysis.")
-
-classifier_path = None
-fish_probability_threshold = 0.5  # Default threshold
-if use_ml_filtering:
-    classifier_file = filedialog.askopenfilename(
-        title="Select Trained Classifier File", 
-        filetypes=[("Pickle files", "*.pkl"), ("All files", "*.*")],
-        initialdir=output_path  # Look in the output folder first
-    )
-    if classifier_file and os.path.exists(classifier_file):
-        classifier_path = classifier_file
-        print(f"Using ML classifier: {classifier_path}")
-        
-        # Ask for probability threshold
-        threshold_input = simpledialog.askfloat(
-            "Classifier Threshold",
-            "Enter the minimum probability threshold for classifying as fish:\n"
-            "(0.5 = balanced, higher = more conservative, lower = more inclusive)",
-            initialvalue=0.5,
-            minvalue=0.1,
-            maxvalue=0.9
-        )
-        if threshold_input:
-            fish_probability_threshold = threshold_input
-            print(f"Using fish probability threshold: {fish_probability_threshold}")
-        
-    else:
-        print("No valid classifier file selected - using basic filtering only")
-        use_ml_filtering = False
-
 
 # List all .wav files
 filelist = glob.glob(input_path+'/*.wav', recursive=True)
@@ -247,25 +171,10 @@ plt.ylabel('Voltage')
 plt.savefig('%s\\%s_one_minute_raw.png'%(output_path, file_set['filename'][0].split('\\')[-1][:-4]))
 plt.show(block=False)
 
-
-print(parameters)
-print("change parameters? (1/0)")
-change_params = int(input())
-while change_params:
-    print("input parameter name")
-    ch_par = input()
-    print("input parameter value")
-    ch_par_value = float(input())
-    parameters[ch_par] = ch_par_value
-    print(parameters)
-    print("done? (1/0)")
-    done = int(input())
-    if done:
-        change_params = 0
-
-# Convert to DataFrame for further processing
+# Save parameters to CSV
 parameters_df = pd.DataFrame({k: [v] for k, v in parameters.items()})
 parameters_df.to_csv('%s\\analysis_parameters.csv' % output_path, index=False)
+print(f"Analysis parameters saved to: {output_path}\\analysis_parameters.csv")
 plt.close()
 gc.collect()
 
@@ -309,14 +218,14 @@ for n, filepath in enumerate(file_set['filename']):
         print(f"    Using file timestamp: {file_start_time}")
         
     # Create differential data and determine detection channels
-    if parameters_df['source'][0] == 'multich_linear':
+    if parameters['source'] == 'multich_linear':
         data_diff = np.diff(data, axis = 1)
         n_detect_channels = n_channels - 1  # Differential pairs
-    elif parameters_df['source'][0] == '1ch_diff':
+    elif parameters['source'] == '1ch_diff':
         data_diff = data
         n_detect_channels = 1  # Only first channel for single-channel differential
     else:
-        raise ValueError(f"Unknown source: {parameters_df['source'][0]}")
+        raise ValueError(f"Unknown source: {parameters['source']}")
 
     # Detect pulses across appropriate channels
     peaks = []
@@ -326,11 +235,11 @@ for n, filepath in enumerate(file_set['filename']):
     for i in range(n_detect_channels):
         ch_peaks, ch_troughs, _, ch_pulse_widths = \
             pulses.detect_pulses(data_diff[:, i], rate, 
-                                    thresh=parameters_df['thresh'][0], 
-                                    min_rel_slope_diff=parameters_df['min_rel_slope_diff'][0],
-                                    min_width=parameters_df['min_width_us'][0] / 1e6,
-                                    max_width=parameters_df['max_width_us'][0] / 1e6,
-                                    width_fac=parameters_df['width_fac_detection'][0],
+                                    thresh=parameters['thresh'], 
+                                    min_rel_slope_diff=parameters['min_rel_slope_diff'],
+                                    min_width=parameters['min_width_us'] / 1e6,
+                                    max_width=parameters['max_width_us'] / 1e6,
+                                    width_fac=parameters['width_fac_detection'],
                                     verbose=0,
                                     return_data=False)
         peaks.append(ch_peaks)
@@ -349,14 +258,24 @@ for n, filepath in enumerate(file_set['filename']):
     if len(unique_midpoints) > 0:
         # Extract variable-width snippets and analyze them
 
-        (
-            eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
-            snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc, 
-            pulse_orientations, amp_ratios, fft_peak_freqs, peak_locations
-        ) = extract_pulse_snippets(
-            data, unique_peaks, unique_troughs, rate = rate, length = parameters_df['window_length_extraction_us'][0],
-            source = 'multich_linear', return_differential = parameters_df['return_diff'][0]
-        )
+        if parameters['waveform_extraction'] == 'Differential':
+            (
+                eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
+                snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc, 
+                pulse_orientations, amp_ratios, fft_peak_freqs, peak_locations
+            ) = extract_pulse_snippets(
+                data, unique_peaks, unique_troughs, rate = rate, length = parameters['window_length_extraction_us'],
+                source = 'multich_linear', return_differential = parameters['return_diff'], use_pca=False
+            )
+        elif parameters['waveform_extraction'] == 'PCA':
+                        (
+                eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
+                snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc, 
+                pulse_orientations, amp_ratios, fft_peak_freqs, peak_locations
+            ) = extract_pulse_snippets(
+                data, unique_peaks, unique_troughs, rate = rate, length = parameters['window_length_extraction_us'],
+                source = 'multich_linear', return_differential = parameters['return_diff'], use_pca=True
+            )
 
         # Remove duplicates
         (
@@ -377,12 +296,12 @@ for n, filepath in enumerate(file_set['filename']):
                 eod_snippets, eod_widths, amp_ratios, fft_peak_freqs, rate,
                 classifier=loaded_classifier,
                 scaler=loaded_scaler,
-                dur_min=parameters_df['min_width_us'][0], 
-                dur_max=parameters_df['max_width_us'][0],
-                pp_r_min=parameters_df['amplitude_ratio_min'][0], 
-                pp_r_max=parameters_df['amplitude_ratio_max'][0],
-                fft_freq_min=parameters_df['peak_fft_freq_min'][0], 
-                fft_freq_max=parameters_df['peak_fft_freq_max'][0],
+                dur_min=parameters['min_width_us'], 
+                dur_max=parameters['max_width_us'],
+                pp_r_min=parameters['amplitude_ratio_min'], 
+                pp_r_max=parameters['amplitude_ratio_max'],
+                fft_freq_min=parameters['peak_fft_freq_min'], 
+                fft_freq_max=parameters['peak_fft_freq_max'],
                 fish_probability_threshold=fish_probability_threshold,
                 use_basic_filtering=True,
                 return_features=True, 
@@ -392,12 +311,12 @@ for n, filepath in enumerate(file_set['filename']):
             # Use basic threshold filtering
             keep_indices, filtered_features, filteredout_features = filter_waveforms(
                 eod_snippets, eod_widths, amp_ratios, fft_peak_freqs, rate,
-                dur_min=parameters_df['min_width_us'][0], 
-                dur_max=parameters_df['max_width_us'][0],
-                pp_r_min=parameters_df['amplitude_ratio_min'][0], 
-                pp_r_max=parameters_df['amplitude_ratio_max'][0],
-                fft_freq_min=parameters_df['peak_fft_freq_min'][0], 
-                fft_freq_max=parameters_df['peak_fft_freq_max'][0],
+                dur_min=parameters['min_width_us'], 
+                dur_max=parameters['max_width_us'],
+                pp_r_min=parameters['amplitude_ratio_min'], 
+                pp_r_max=parameters['amplitude_ratio_max'],
+                fft_freq_min=parameters['peak_fft_freq_min'], 
+                fft_freq_max=parameters['peak_fft_freq_max'],
                 return_features=True, return_filteredout_features=True
             )
         
@@ -471,7 +390,7 @@ for n, filepath in enumerate(file_set['filename']):
         # Save individual file results and create plots
         # =============================================================================
         # Save individual file results if not creating events
-        if not parameters_df['create_events'][0]:
+        if not parameters['create_events']:
             output_file = os.path.join(output_path, f'{fname[:-4]}_eod_table.csv')
             eod_table.to_csv(output_file, index=False)
 
@@ -496,106 +415,83 @@ for n, filepath in enumerate(file_set['filename']):
                             f, separators=(',', ':'))
             
             # Control plot
-            if parameters_df['create_plots'][0]:
+            if parameters['create_plots']:
                 # Control plots
                 if len(keep_indices) > 0:
-                    # Plot: Differential detections with differential data
+                    # Plot: EOD detections with appropriate data based on extraction method
                     eod_idc = np.arange(len(filtered_eod_waveforms))
-                    # data_diff = np.diff(data, axis=1)
-                    offset_diff = np.max(eod_table['eod_amplitude']) * 1.5
-
+                    
+                    # Determine what to plot based on extraction method
+                    if parameters['waveform_extraction'] == 'PCA':
+                        # Plot single-ended multi-channel data
+                        plot_data = data
+                        n_plot_channels = data.shape[1]
+                        channel_label_prefix = 'Ch'
+                        plot_title = f'{fname} - Single-Ended EOD Detections (PCA) - Red=P1, Blue=P2, Grey=Filtered Out (n={len(eod_idc)} kept, {len(filtered_out_indices)} filtered)'
+                    else:  # Differential
+                        # Plot differential data
+                        n_plot_channels = data.shape[1] - 1
+                        channel_label_prefix = 'Ch'
+                        plot_title = f'{fname} - Differential EOD Detections - Red=P1, Blue=P2, Grey=Filtered Out (n={len(eod_idc)} kept, {len(filtered_out_indices)} filtered)'
+                    
+                    offset = np.max(eod_table['eod_amplitude']) * 1.5
+                    
                     plt.figure(figsize=(20, 8))
-                    for i in range(data.shape[1]-1):
-                        # Find pulses detected on this differential channel
-                        data_diff = np.diff(data[:,i:i+2])
-                        ch_diff_idc = np.where(eod_table['eod_channel'] == i)[0]
-                        actual_diff_idc = eod_idc[ch_diff_idc]
+                    for i in range(n_plot_channels):
+                        if parameters['waveform_extraction'] == 'PCA':
+                            # Plot single-ended channel
+                            plot_ch_data = data[:, i]
+                            ch_label = f'{channel_label_prefix}{i}'
+                        else:
+                            # Plot differential channel
+                            plot_ch_data = np.diff(data[:, i:i+2]).flatten()
+                            ch_label = f'{channel_label_prefix}{i}-{i+1}'
                         
-                        # Plot only every nth sample for large datasets to save memory
-                        step = max(1, len(data_diff) // 15000000)  # Limit to ~15 mio points per channel
-                        x_coords = np.arange(0, len(data_diff), step)
-                        plt.plot(x_coords, data_diff[::step] + i * offset_diff, linewidth=0.5, label=f'Ch{i}-{i+1}')
+                        # Downsample for plotting if needed
+                        step = max(1, len(plot_ch_data) // 15000000)
+                        x_coords = np.arange(0, len(plot_ch_data), step)
+                        plt.plot(x_coords, plot_ch_data[::step] + i * offset, linewidth=0.5, label=ch_label)
                         
-                        # Plot filtered (accepted) pulses
-                        if len(actual_diff_idc) > 0:
-                            plt.plot(eod_table['p1_idx'].iloc[actual_diff_idc], 
-                                    data_diff[eod_table['p1_idx'].iloc[actual_diff_idc]] + i * offset_diff, 
+                        # Find pulses on this channel and plot them
+                        ch_idc = np.where(eod_table['eod_channel'] == i)[0]
+                        actual_idc = eod_idc[ch_idc]
+                        
+                        if len(actual_idc) > 0:
+                            plt.plot(eod_table['p1_idx'].iloc[actual_idc], 
+                                    plot_ch_data[eod_table['p1_idx'].iloc[actual_idc]] + i * offset, 
                                     'o', markersize=1, color='red')
-                            plt.plot(eod_table['p2_idx'].iloc[actual_diff_idc], 
-                                    data_diff[eod_table['p2_idx'].iloc[actual_diff_idc]] + i * offset_diff, 
+                            plt.plot(eod_table['p2_idx'].iloc[actual_idc], 
+                                    plot_ch_data[eod_table['p2_idx'].iloc[actual_idc]] + i * offset, 
                                     'o', markersize=1, color='blue')
                         
                         # Plot filtered-out pulses in grey
                         if len(filtered_out_indices) > 0:
-                            # Find filtered-out pulses detected on this differential channel
                             filteredout_eod_chan = filteredout_eod_table['eod_channel']
                             filteredout_final_p1_idc = filteredout_eod_table['p1_idx']
                             filteredout_final_p2_idc = filteredout_eod_table['p2_idx']
                             
-                            filteredout_ch_diff_idc = np.where(filteredout_eod_chan == i)[0]
-                            if len(filteredout_ch_diff_idc) > 0:
-                                plt.plot(filteredout_final_p1_idc.iloc[filteredout_ch_diff_idc], 
-                                        data_diff[filteredout_final_p1_idc.iloc[filteredout_ch_diff_idc]] + i * offset_diff, 
+                            filteredout_ch_idc = np.where(filteredout_eod_chan == i)[0]
+                            if len(filteredout_ch_idc) > 0:
+                                plt.plot(filteredout_final_p1_idc.iloc[filteredout_ch_idc], 
+                                        plot_ch_data[filteredout_final_p1_idc.iloc[filteredout_ch_idc]] + i * offset, 
                                         'o', markersize=1, color='grey', alpha=0.6)
-                                plt.plot(filteredout_final_p2_idc.iloc[filteredout_ch_diff_idc], 
-                                        data_diff[filteredout_final_p2_idc.iloc[filteredout_ch_diff_idc]] + i * offset_diff, 
+                                plt.plot(filteredout_final_p2_idc.iloc[filteredout_ch_idc], 
+                                        plot_ch_data[filteredout_final_p2_idc.iloc[filteredout_ch_idc]] + i * offset, 
                                         'o', markersize=1, color='grey', alpha=0.6)
                     
-                    plt.ylim(bottom=None, top=(data.shape[1]-1.5)*offset_diff)
-                    plt.title(f'{fname} - Differential EOD Detections - Red=Peaks, Blue=Troughs, Grey=Filtered Out (n={len(eod_idc)} kept, {len(filtered_out_indices)} filtered)')
+                    plt.ylim(bottom=None, top=(n_plot_channels-0.5)*offset)
+                    plt.title(plot_title)
                     plt.legend(loc='upper right')
                     plt.xlabel('Sample')
                     plt.ylabel('Voltage')
-                    plt.savefig(f'{output_path}\\{fname[:-4]}_differential_detection_plot.png', dpi=150, bbox_inches='tight')
-                    plt.close()
-                    
-                    # Clear differential data from memory
-                    del data_diff
-                    gc.collect()
-                    
-                    # Summary analysis plots
-                    plt.figure(figsize=(12, 8))  # Reduced size
-                    
-                    # Check if we have any data to plot
-                    if len(filtered_eod_waveforms) == 0:
-                        plt.text(0.5, 0.5, 'No filtered pulses to display', ha='center', va='center', 
-                                transform=plt.gcf().transFigure, fontsize=16)
-                        plt.savefig(f'{output_path}\\{fname[:-4]}_analysis_summary.png', dpi=150, bbox_inches='tight')
-                        plt.close()
-                        continue
-                    
-                    # Plot some example waveforms (limit to 25 for memory)
-                    plt.subplot(1, 3, 1)
-                    n_examples = min(25, len(filtered_eod_waveforms))
-                    for i in range(n_examples):
-                        plt.plot(filtered_eod_waveforms[i], alpha=0.4, linewidth=0.5)
-                    plt.title(f'Example EOD Waveforms (n={n_examples})')
-                    plt.xlabel('Sample')
-                    plt.ylabel('Normalized Amplitude')
-                    
-                    # Plot width distribution
-                    plt.subplot(1, 3, 2)
-                    plt.hist(eod_table['eod_width_us'], bins=20, alpha=0.7)  # Fewer bins
-                    plt.title(f'EOD Width Distribution (n={len(filtered_eod_waveforms)})')
-                    plt.xlabel('Peak-Trough Width (uS)')
-                    plt.ylabel('Count')
-                    
-                    # Plot fft distribution
-                    plt.subplot(1, 3, 3)
-                    plt.hist(eod_table['fft_freq_max'], bins=20, alpha=0.7)  # Fewer bins
-                    plt.title(f'EOD FFT-Peak Distribution (n={len(filtered_eod_waveforms)})')
-                    plt.xlabel('Peak-FFT Frequency (Hz)')
-                    plt.ylabel('Count')
-                    
-                    plt.tight_layout()
-                    plt.savefig(f'{output_path}\\{fname[:-4]}_analysis_summary.png', dpi=150, bbox_inches='tight')  # Reduced DPI
+                    plt.savefig(f'{output_path}\\{fname[:-4]}_detection_plot.png', dpi=150, bbox_inches='tight')
                     plt.close()
                     gc.collect()
 
        
         
             # Optional: Save filtered-out pulses for quality control
-            if len(filtered_out_indices) > 0 and parameters_df['save_filtered_out'][0]:
+            if len(filtered_out_indices) > 0 and parameters['save_filtered_out']:
                 try:
                     # Create filtered-out data structures  
                     filteredout_eod_waveforms = [eod_snippets[i] for i in filtered_out_indices]
@@ -618,7 +514,7 @@ for n, filepath in enumerate(file_set['filename']):
         else: # Create events
             print("  Creating events from extracted EODs...")
             # Create events from eod_table
-            print(f"    Stage 1 - Channel-wise temporal clustering using max_ipi_seconds = {parameters_df['max_ipi_seconds'][0]}")
+            print(f"    Stage 1 - Channel-wise temporal clustering using max_ipi_seconds = {parameters['max_ipi_seconds']}")
 
             if len(eod_table) == 0:
                 print("No data to process!")
@@ -627,15 +523,15 @@ for n, filepath in enumerate(file_set['filename']):
             # Create Channel Events
             channel_events = create_channel_events(
                 eod_table, 
-                parameters_df['max_ipi_seconds'][0]
+                parameters['max_ipi_seconds']
             )
 
             if len(channel_events) == 0:
                 print("No channel events created!")
                 continue
 
-            if parameters_df['pre_merge_filtering'][0]:
-                filtered_channel_events = filter_events(channel_events, parameters_df['min_channel_event_size'][0], parameters_df['min_amplitude'][0])
+            if parameters['pre_merge_filtering']:
+                filtered_channel_events = filter_events(channel_events, parameters['min_eods_premerge'], parameters['min_amplitude'])
             else:
                 filtered_channel_events = channel_events.copy()
 
@@ -643,10 +539,10 @@ for n, filepath in enumerate(file_set['filename']):
                 print("    No channel events remaining after pre-merge filtering!")
                 continue
 
-            if parameters_df['merge_events'][0]:
+            if parameters['merge_events']:
                 # Merge channel events across channels
-                print(f"    Stage 2 - Merging channel events using max_merge_gap_seconds = {parameters_df['max_merge_gap_seconds'][0]}")
-                merged_events = merge_channel_events(filtered_channel_events, parameters_df['max_merge_gap_seconds'][0])
+                print(f"    Stage 2 - Merging channel events using max_merge_gap_seconds = {parameters['max_merge_gap_seconds']}")
+                merged_events = merge_channel_events(filtered_channel_events, parameters['max_merge_gap_seconds'])
 
                 if len(merged_events) == 0:
                     print("No merged events created!")
@@ -658,7 +554,7 @@ for n, filepath in enumerate(file_set['filename']):
                 merged_events['event_end_time'] = merged_events['channel_end_time']
                         
             # Flag events that reach the end of the file
-            merged_events['reaches_file_end'] = merged_events['event_end_time'] >= file_start_time + dt.timedelta(seconds=len(data)/rate - parameters_df['max_ipi_seconds'][0])
+            merged_events['reaches_file_end'] = merged_events['event_end_time'] >= file_start_time + dt.timedelta(seconds=len(data)/rate - parameters['max_ipi_seconds'])
 
             # Retain events that reach the end of the file and prepare data for next file
             events_at_end = merged_events[merged_events['reaches_file_end']].copy()
@@ -666,7 +562,7 @@ for n, filepath in enumerate(file_set['filename']):
                 print(f"    Found {len(events_at_end['merged_event_id'].unique())} event(s) reaching file end - will retain for next file")
                 
                 # Calculate retention start index
-                retain_start_time = events_at_end['event_start_time'].min() - dt.timedelta(seconds=parameters_df['margin'][0])
+                retain_start_time = events_at_end['event_start_time'].min() - dt.timedelta(seconds=parameters['margin'])
                 retain_start_idx = max(0, int((retain_start_time - file_start_time).total_seconds() * rate))
                 
                 # Store data and timing info for next iteration
@@ -688,8 +584,8 @@ for n, filepath in enumerate(file_set['filename']):
             print(f"    Events to process normally: {len(events_to_filter['merged_event_id'].unique())}")
 
             # Post-merge filter: remove events based on size AND amplitude criteria
-            if parameters_df['post_merge_filtering'][0]:
-                final_events = filter_events(events_to_filter, parameters_df['min_eods_per_event'][0], parameters_df['min_amplitude'][0])
+            if parameters['post_merge_filtering']:
+                final_events = filter_events(events_to_filter, parameters['min_eods_postmerge'], parameters['min_amplitude'])
             else:
                 final_events = events_to_filter.copy()
             
@@ -725,8 +621,8 @@ for n, filepath in enumerate(file_set['filename']):
                     'event_id': event_id,
                     'eod_start_time': event_eods['timestamp_dt'].min(),
                     'eod_end_time': event_eods['timestamp_dt'].max(),
-                    'event_start_time': max(file_start_time, event_eods['event_start_time'].iloc[0] - dt.timedelta(seconds=parameters_df['margin'][0])),
-                    'event_end_time': event_eods['event_end_time'].iloc[0] + dt.timedelta(seconds=parameters_df['margin'][0]),
+                    'event_start_time': max(file_start_time, event_eods['event_start_time'].iloc[0] - dt.timedelta(seconds=parameters['margin'])),
+                    'event_end_time': event_eods['event_end_time'].iloc[0] + dt.timedelta(seconds=parameters['margin']),
                     'duration_seconds': duration,
                     'n_eods': len(event_eods),
                     'n_channels': event_eods['eod_channel'].nunique(),
@@ -781,14 +677,15 @@ for n, filepath in enumerate(file_set['filename']):
                 print(f"      Saved event EOD table: {event_output_file}")
 
                 # Create event plots
-                if parameters_df['create_plots'][0]:
+                if parameters['create_plots']:
                     create_event_plots(
                         event_id=event_id,
                         event_eods=event_eods,
                         event_data=event_data,
                         event_start_time=event_start_time,
                         sample_rate=rate,
-                        output_path=output_path
+                        output_path=output_path,
+                        extraction_method=parameters['waveform_extraction']
                     )
 
     # Clear memory
@@ -798,7 +695,7 @@ for n, filepath in enumerate(file_set['filename']):
     gc.collect()
             
 # Save event summaries across all files
-if parameters_df['create_events'][0] and len(event_summaries) > 0:
+if parameters['create_events'] and len(event_summaries) > 0:
     event_summary_df = pd.DataFrame(event_summaries)
     event_summary_df = event_summary_df.sort_values(by=['event_start_time']).reset_index(drop=True)
     event_summary_file = os.path.join(output_path, 'all_event_summaries.csv')
