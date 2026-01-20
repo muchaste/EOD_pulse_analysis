@@ -268,7 +268,7 @@ for n, filepath in enumerate(file_set['filename']):
                 source = 'multich_linear', return_differential = parameters['return_diff'], use_pca=False
             )
         elif parameters['waveform_extraction'] == 'PCA':
-                        (
+            (
                 eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
                 snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc, 
                 pulse_orientations, amp_ratios, fft_peak_freqs, peak_locations
@@ -370,6 +370,7 @@ for n, filepath in enumerate(file_set['filename']):
             'p1_idx': raw_p1_idc,
             'p2_idx': raw_p2_idc,
             'eod_channel': eod_chan,
+            'peak_location': peak_locations,
             'snippet_p1_idx': snippet_p1_idc,
             'snippet_p2_idx': snippet_p2_idc,
             'snippet_midpoint_idx': snippet_midpoint_idc,
