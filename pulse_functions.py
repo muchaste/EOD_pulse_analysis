@@ -1278,9 +1278,9 @@ def filter_waveforms_with_classifier(eod_waveforms, eod_widths, amplitude_ratios
     return return_vars
 
 
-def save_fixed_length_waveforms(waveforms_list, output_path):
+def save_fixed_length_waveforms(waveforms_list, output_path, format="csv"):
     """
-    Save fixed-length waveforms as compressed .npz file.
+    Save fixed-length waveforms in specified format.
     
     Parameters
     ----------
@@ -1288,63 +1288,98 @@ def save_fixed_length_waveforms(waveforms_list, output_path):
         List of waveforms (all same length)
     output_path : str
         Base path for output files (without extension)
+    format : str, optional
+        Output format: 'csv' (default, human-readable) or 'npz' (compressed binary)
     
     Returns
     -------
     metadata : dict
         Basic metadata about the saved waveforms
     """
+    if format not in ["csv", "npz"]:
+        raise ValueError(f"Unsupported format: {format}. Use 'csv' or 'npz'.")
+    
     if not waveforms_list:
         # Save empty file
-        np.savez_compressed(f"{output_path}.npz", waveforms=np.array([]))
+        if format == "csv":
+            pd.DataFrame().to_csv(f"{output_path}.csv", index=False)
+        else:  # npz
+            np.savez_compressed(f"{output_path}.npz", waveforms=np.array([]))
+        
         metadata = {
             'n_waveforms': 0,
             'waveform_length': 0,
-            'total_samples': 0
+            'total_samples': 0,
+            'shape': '(0, 0)' if format == "csv" else (0, 0),
+            'dtype': 'float64'
         }
     else:
         # Stack waveforms into 2D array (n_waveforms, waveform_length)
         waveforms_array = np.stack(waveforms_list, axis=0)
         
-        # Save as compressed npz
-        np.savez_compressed(f"{output_path}.npz", waveforms=waveforms_array)
+        if format == "csv":
+            # Save as CSV (each row is a waveform, each column is a time point)
+            waveforms_df = pd.DataFrame(waveforms_array)
+            waveforms_df.to_csv(f"{output_path}.csv", index=False)
+        else:  # npz
+            # Save as compressed npz
+            np.savez_compressed(f"{output_path}.npz", waveforms=waveforms_array)
         
         metadata = {
             'n_waveforms': len(waveforms_list),
             'waveform_length': len(waveforms_list[0]),
             'total_samples': waveforms_array.size,
-            'shape': waveforms_array.shape,
+            'shape': str(waveforms_array.shape) if format == "csv" else waveforms_array.shape,
             'dtype': str(waveforms_array.dtype)
         }
     
-    # Save minimal metadata (optional - only if you need it)
-    with open(f"{output_path}_metadata.json", 'w') as f:
-        json.dump(metadata, f, separators=(',', ':'))
+    # Save minimal metadata
+    if format == "csv":
+        metadata_df = pd.DataFrame([metadata])
+        metadata_df.to_csv(f"{output_path}_metadata.csv", index=False)
+    else:  # npz -> json
+        with open(f"{output_path}_metadata.json", 'w') as f:
+            json.dump(metadata, f, separators=(',', ':'))
     
     return metadata
 
 
-def load_fixed_length_waveforms(base_path):
+def load_fixed_length_waveforms(base_path, format="csv"):
     """
-    Load fixed-length waveforms from .npz file.
+    Load fixed-length waveforms from specified format.
     
     Parameters
     ----------
     base_path : str
-        Base path (without .npz extension)
+        Base path (without extension)
+    format : str, optional
+        Input format: 'csv' (default, human-readable) or 'npz' (compressed binary)
     
     Returns
     -------
     waveforms_list : list of 1D arrays
         List of waveforms
     """
+    if format not in ["csv", "npz"]:
+        raise ValueError(f"Unsupported format: {format}. Use 'csv' or 'npz'.")
+    
     try:
-        # Load from npz file
-        data = np.load(f"{base_path}.npz")
-        waveforms_array = data['waveforms']
-        
-        if waveforms_array.size == 0:
-            return []
+        if format == "csv":
+            # Load from CSV file
+            waveforms_df = pd.read_csv(f"{base_path}.csv")
+            
+            if waveforms_df.empty:
+                return []
+            
+            # Convert to numpy array
+            waveforms_array = waveforms_df.values
+        else:  # npz
+            # Load from npz file
+            data = np.load(f"{base_path}.npz")
+            waveforms_array = data['waveforms']
+            
+            if waveforms_array.size == 0:
+                return []
         
         # Convert back to list of 1D arrays
         waveforms_list = [waveforms_array[i] for i in range(waveforms_array.shape[0])]
@@ -1352,7 +1387,8 @@ def load_fixed_length_waveforms(base_path):
         return waveforms_list
         
     except FileNotFoundError:
-        print(f"Warning: File {base_path}.npz not found")
+        file_ext = ".csv" if format == "csv" else ".npz"
+        print(f"Warning: File {base_path}{file_ext} not found")
         return []
     except Exception as e:
         print(f"Error loading waveforms: {e}")
