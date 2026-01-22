@@ -1940,6 +1940,21 @@ def create_event_plots(event_id, event_eods, event_data, event_start_time, sampl
                     plt.plot(trough_timestamps, trough_values + i * offset_diff, 
                             'o', markersize=3, color='blue', alpha=0.8, 
                             label='P2' if i == 0 else "")
+            
+            # Plot peak_location visualization for this channel
+            if 'peak_location' in ch_eods.columns and len(ch_eods) > 0:
+                for _, eod_row in ch_eods.iterrows():
+                    if 'p1_idx' in eod_row and not pd.isna(eod_row['p1_idx']):
+                        p1_idx = int(eod_row['p1_idx'])
+                        if p1_idx >= 0 and p1_idx < len(event_data) and 'peak_location' in eod_row:
+                            peak_loc = eod_row['peak_location']
+                            if not pd.isna(peak_loc):
+                                p1_timestamp = event_start_time + pd.to_timedelta(p1_idx / sample_rate, unit='s')
+                                # Draw thin line from channel offset to peak_location offset
+                                plt.plot([p1_timestamp, p1_timestamp], [i * offset_diff, peak_loc * offset_diff], 
+                                        'k-', linewidth=0.5, alpha=0.6)
+                                # Mark peak_location with small black marker
+                                plt.plot(p1_timestamp, peak_loc * offset_diff, 'ko', markersize=2, alpha=0.8)
         
         # Clean up arrays immediately to save memory
         del channel_data, x_coords
@@ -2011,7 +2026,7 @@ def create_event_plots(event_id, event_eods, event_data, event_start_time, sampl
                 color='black', linestyle='--', linewidth=2, alpha=0.5, zorder=12)
     
     # Configure plot appearance
-    plt.ylim(bottom=None, top=(n_plot_channels - 0.5) * offset_diff)
+    # plt.ylim(bottom=None, top=(n_plot_channels - 0.5) * offset_diff)
     
     title_base = f'Event {event_id} - {plot_title_method} EOD Detections'
     if plot_step > 1:
@@ -2042,7 +2057,8 @@ def create_event_plots(event_id, event_eods, event_data, event_start_time, sampl
 
 def normalize_waveforms(eod_snippets, snippet_p1_idc, snippet_p2_idc, 
                        method='p1_unity', baseline_correction=True,
-                       min_amplitude_threshold=0.001, return_normalization_info=False):
+                       min_amplitude_threshold=0.001, return_normalization_info=False,
+                       crop_and_interpolate=False, crop_factor=7, target_length=150):
     """
     Normalize EOD waveforms for visualization, averaging, and classification.
     
@@ -2067,6 +2083,13 @@ def normalize_waveforms(eod_snippets, snippet_p1_idc, snippet_p2_idc,
         Minimum P1-P2 amplitude difference for valid normalization
     return_normalization_info : bool, default False
         If True, return additional normalization metadata
+    crop_and_interpolate : bool, default False
+        If True, crop waveforms relative to P-P duration and interpolate to fixed length.
+        Removes excess baseline and normalizes temporal scale across different pulse durations.
+    crop_factor : float, default 7
+        Multiplier for peak-peak duration to define crop window size (only used if crop_and_interpolate=True)
+    target_length : int, default 150
+        Target number of samples after interpolation (only used if crop_and_interpolate=True)
     
     Returns
     -------
@@ -2084,6 +2107,7 @@ def normalize_waveforms(eod_snippets, snippet_p1_idc, snippet_p2_idc,
     - Waveforms with insufficient P1-P2 amplitude difference are flagged
     - For machine learning applications, consider 'zscore' method
     - For visualization and averaging, 'p1_unity' or 'peak_to_peak' work well
+    - Crop and interpolate option useful for waveform similarity comparisons with minimal baseline interference
     """
     
     if len(eod_snippets) == 0:
@@ -2199,6 +2223,40 @@ def normalize_waveforms(eod_snippets, snippet_p1_idc, snippet_p2_idc,
                 raise ValueError(f"Unknown normalization method: {method}")
             
             scaling_factors.append(scale_factor)
+            
+            # Apply cropping and interpolation if requested
+            if crop_and_interpolate:
+                # Calculate peak-peak duration and midpoint
+                pp_duration = abs(p2_idx - p1_idx)
+                midpoint = (p1_idx + p2_idx) // 2
+                
+                # Define crop window: crop_factor × P-P duration, centered on midpoint
+                half_window = int(pp_duration * crop_factor / 2)
+                start_idx = max(0, midpoint - half_window)
+                end_idx = min(len(snippet), midpoint + half_window)
+                
+                # Crop waveform
+                cropped = snippet[start_idx:end_idx]
+                
+                # Handle edge case: very short crop
+                if len(cropped) < 2:
+                    # Use wider window around midpoint
+                    start_idx = max(0, midpoint - 25)
+                    end_idx = min(len(snippet), midpoint + 25)
+                    cropped = snippet[start_idx:end_idx]
+                
+                # Interpolate to fixed length
+                if len(cropped) >= 2:
+                    x_old = np.linspace(0, 1, len(cropped))
+                    x_new = np.linspace(0, 1, target_length)
+                    
+                    # Use linear interpolation (fast and sufficient for EODs)
+                    f = interp1d(x_old, cropped, kind='linear', fill_value='extrapolate')
+                    snippet = f(x_new)
+                else:
+                    # Fallback: pad with zeros if something went wrong
+                    snippet = np.zeros(target_length)
+            
             normalized_snippets.append(snippet)
             
         except Exception as e:
