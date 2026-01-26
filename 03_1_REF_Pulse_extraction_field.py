@@ -370,7 +370,7 @@ for n, filepath in enumerate(file_set['filename']):
             'p1_idx': raw_p1_idc,
             'p2_idx': raw_p2_idc,
             'eod_channel': eod_chan,
-            'peak_location': peak_locations,
+            'pulse_location': peak_locations,
             'snippet_p1_idx': snippet_p1_idc,
             'snippet_p2_idx': snippet_p2_idc,
             'snippet_midpoint_idx': snippet_midpoint_idc,
@@ -464,6 +464,17 @@ for n, filepath in enumerate(file_set['filename']):
                             plt.plot(eod_table['p2_idx'].iloc[actual_idc], 
                                     plot_ch_data[eod_table['p2_idx'].iloc[actual_idc]] + i * offset, 
                                     'o', markersize=1, color='blue')
+                            
+                            # Plot pulse_location visualization for this channel
+                            if 'pulse_location' in eod_table.columns:
+                                for idx in actual_idc:
+                                    peak_loc = peak_locations[idx]
+                                    p1_idx = eod_table['p1_idx'].iloc[idx]
+                                    # Draw thin line from channel offset to pulse_location offset
+                                    plt.plot([p1_idx, p1_idx], [i * offset, peak_loc * offset], 
+                                            'k-', linewidth=0.5, alpha=0.6)
+                                    # Mark pulse_location with small black marker
+                                    plt.plot(p1_idx, peak_loc * offset, 'ko', markersize=2, alpha=0.8)
                         
                         # Plot filtered-out pulses in grey
                         if len(filtered_out_indices) > 0:
@@ -650,9 +661,9 @@ for n, filepath in enumerate(file_set['filename']):
                 event_eod_indices = event_eods['original_index'].values
                 event_eod_waveforms = [filtered_eod_waveforms[i] for i in event_eod_indices]
                 if len(event_eod_waveforms) > 0:
-                    event_waveform_base = os.path.join(output_path, f'{fname[:-4]}_event_{event_id}_{event_start_time_str}_waveforms')
+                    event_waveform_base = os.path.join(output_path, f'{fname[:-4]}_event_{event_id}_waveforms')
                     save_fixed_length_waveforms(event_eod_waveforms, event_waveform_base)
-                    print(f"      Saved event waveforms: {event_waveform_base}_waveforms.npz")
+                    print(f"      Saved event waveforms: {event_waveform_base}_waveforms")
 
                 # Save audio segment for this event
                 event_audio_start_idx = max(0, int((event_start_time - file_start_time).total_seconds() * rate))
@@ -660,7 +671,7 @@ for n, filepath in enumerate(file_set['filename']):
 
                 # Extract and save the audio segment
                 event_data = data[event_audio_start_idx:event_audio_end_idx,:]
-                event_audio_output_file = os.path.join(output_path, f'{fname[:-4]}_event_{event_id}_{event_start_time_str}.wav')
+                event_audio_output_file = os.path.join(output_path, f'{fname[:-4]}_event_{event_id}.wav')
                 aio.write_audio(event_audio_output_file, event_data, rate)
                 print(f"      Saved event audio segment: {event_audio_output_file}")
 
@@ -673,7 +684,7 @@ for n, filepath in enumerate(file_set['filename']):
                 event_eods['midpoint_idx'] = event_eods['midpoint_idx'] - event_audio_start_idx
 
                 # Save event EOD table
-                event_output_file = os.path.join(output_path, f'{fname[:-4]}_event_{event_id}_{event_start_time_str}.csv')
+                event_output_file = os.path.join(output_path, f'{fname[:-4]}_event_{event_id}_eod_table.csv')
                 event_eods.to_csv(event_output_file, index=False)
                 print(f"      Saved event EOD table: {event_output_file}")
 
@@ -684,7 +695,7 @@ for n, filepath in enumerate(file_set['filename']):
                         event_eods=event_eods,
                         event_data=event_data,
                         event_start_time=event_start_time,
-                        sample_rate=rate,
+                        sample_rate=rate,   
                         output_path=output_path,
                         extraction_method=parameters['waveform_extraction']
                     )
