@@ -51,7 +51,7 @@ class PulseDiagnosticTool:
         self.sample_rate = None
         self.calibration_factors = None
         self.calibrated_data = None
-        self.data_source = 'multich_linear'  # 'multich_linear' or '1ch_diff'
+        self.data_source = 'multich_linear'  # 'multich_linear', '1ch_diff'
         self.file_name = None
         
         # File metadata for reloading
@@ -72,7 +72,6 @@ class PulseDiagnosticTool:
             'amplitude_ratio_min': 0.2,
             'amplitude_ratio_max': 4.0,
             'save_filtered_out': False,
-            'noise_removal': False,
             'peak_fft_freq_min': 50,
             'peak_fft_freq_max': 10000,
             'return_diff': True,
@@ -535,7 +534,7 @@ class PulseDiagnosticTool:
                 print(f"Channels: {n_channels}, Time window: {start_time}-{end_time}s")
                 
                 # Plot the data immediately
-                self.plot_data()
+                self.data()
                 
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to load NI source data:\n{str(e)}")
@@ -912,10 +911,10 @@ class PulseDiagnosticTool:
             # Get time window parameters
             try:
                 start_sec = float(self.start_time_var.get().strip()) if self.start_time_var.get().strip() else 0.0
-                end_sec = float(self.end_time_var.get().strip()) if self.end_time_var.get().strip() else 0.0
+                # end_sec = float(self.end_time_var.get().strip()) if self.end_time_var.get().strip() else 0.0
             except ValueError:
                 start_sec = 0.0
-                end_sec = 0.0
+                # end_sec = 0.0
             
             # Get data for plotting
             data = self.calibrated_data
@@ -929,28 +928,28 @@ class PulseDiagnosticTool:
             else:   
                 n_channels = data.shape[1]
             
-            # Apply time windowing if specified
-            if start_sec > 0 or end_sec > 0:
-                total_duration = len(data) / rate
-                if end_sec <= 0:
-                    end_sec = total_duration
+            # # Apply time windowing if specified
+            # if start_sec > 0 or end_sec > 0:
+            #     total_duration = len(data) / rate
+            #     if end_sec <= 0:
+            #         end_sec = total_duration
                     
-                if start_sec < 0:
-                    start_sec = 0
+            #     if start_sec < 0:
+            #         start_sec = 0
                     
-                if start_sec >= end_sec:
-                    start_sec = 0
-                    end_sec = total_duration
+            #     if start_sec >= end_sec:
+            #         start_sec = 0
+            #         end_sec = total_duration
                     
-                if end_sec > total_duration:
-                    end_sec = total_duration
+            #     if end_sec > total_duration:
+            #         end_sec = total_duration
                 
-                start_idx = int(start_sec * rate)
-                end_idx = int(end_sec * rate)
-                data = data[start_idx:end_idx, :]
-            else:
-                start_sec = 0
-                end_sec = len(data) / rate
+            #     start_idx = int(start_sec * rate)
+            #     end_idx = int(end_sec * rate)
+            #     data = data[start_idx:end_idx, :]
+            # else:
+            #     start_sec = 0
+            #     end_sec = len(data) / rate
             
             # Plot the data using the current plot mode
             if self.plot_mode.get() == "single_ended":
@@ -965,19 +964,11 @@ class PulseDiagnosticTool:
     
     def plot_data_differential(self, data, rate, start_sec, n_channels):
         """Plot differential signals without pulse markers"""
-        # Plot exactly like pulse detection plot but without markers
-        # plot_duration = min(60.0, len(data) / rate)  # Max 60 seconds
-        plot_duration = len(data) / rate 
-        plot_samples = int(plot_duration * rate)
-        plot_data = data[:plot_samples]
-        
-        # Calculate offset
-        offset_diff = np.max(abs(plot_data))
         
         # Handle different data source types
         if self.data_source == '1ch_diff':
             # For single-channel differential, data is already differential
-            data_diff = plot_data[:, 0]
+            data_diff = data[:, 0]
             
             # Downsample for plotting
             step = max(1, len(data_diff) // 1500000)
@@ -991,21 +982,28 @@ class PulseDiagnosticTool:
             self.ax.set_ylim(bottom=np.min(data_diff)*1.2, top=np.max(data_diff)*1.2)
             source_desc = "Single-Ch Diff"
         else:
-            # Multi-channel linear data - create differential pairs
-            for i in range(n_channels - 1):  # Differential channels
+            data_diff = np.diff(data, axis=1)
+            # Downsample for plotting
+            step = max(1, len(data_diff[:,0]) // 1500000)
+            x_coords = np.arange(0, len(data_diff[:,0]), step)
+
+            offset_diff = np.max(np.abs(data_diff)) * 1.2
+
+            for ch in range(n_channels - 1):  # Differential channels
                 # Create differential signal for this channel pair
-                data_diff = np.diff(plot_data[:, i:i+2], axis=1).flatten()
+                # data_diff = np.diff(data[:, i:i+2], axis=1).flatten()
                 
-                # Downsample for plotting
-                step = max(1, len(data_diff) // 1500000)
-                x_coords = np.arange(0, len(data_diff), step)
+                # # Downsample for plotting
+                # step = max(1, len(data_diff[:,i]) // 1500000)
+                # x_coords = np.arange(0, len(data_diff), step)
                 
                 # Plot differential signal
                 self.ax.plot((x_coords / rate) + start_sec, 
-                           data_diff[::step] + i * offset_diff, 
-                           linewidth=0.5, label=f'Ch{i}-{i+1}')
+                           data_diff[::step, ch] + ch * offset_diff, 
+                           linewidth=0.5, label=f'Ch{ch}-{ch+1}')
             
-            self.ax.set_ylim(bottom=np.min(plot_data)*1.2, top=(n_channels-1.5)*offset_diff)
+            # self.ax.set_ylim(bottom=np.min(data_diff)*1.2, top=(n_channels-1.5)*offset_diff)
+            self.ax.set_ylim(bottom=-0.5*offset_diff, top=(n_channels-0.5)*offset_diff)
             source_desc = "Multi-Ch Diff"
         
         # Format plot
@@ -1030,22 +1028,17 @@ class PulseDiagnosticTool:
             self.ax.set_title('Single-Ended View Not Applicable')
             return
         
-        # Plot single-ended channels (multi-channel linear data)
-        plot_duration = len(data) / rate 
-        plot_samples = int(plot_duration * rate)
-        plot_data = data[:plot_samples]
-        
         # Calculate offset for stacking channels
-        offset_se = np.max(abs(plot_data)) * 1.2
+        offset_se = np.max(abs(data)) * 1.2
         
         # Downsample for plotting
-        step = max(1, len(plot_data) // 1500000)
-        x_coords = np.arange(0, len(plot_data), step)
+        step = max(1, len(data) // 1500000)
+        x_coords = np.arange(0, len(data), step)
         
         # Plot all single-ended channels
         for ch in range(n_channels):
             self.ax.plot((x_coords / rate) + start_sec, 
-                        plot_data[::step, ch] + ch * offset_se, 
+                        data[::step, ch] + ch * offset_se, 
                         linewidth=0.5, label=f'SE Ch{ch}')
         
         # Format plot
@@ -1065,7 +1058,7 @@ class PulseDiagnosticTool:
             for param, var in self.param_vars.items():
                 value_str = var.get().strip()
                 
-                if param in ['save_filtered_out', 'noise_removal', 'return_diff']:
+                if param in ['save_filtered_out', 'return_diff']:
                     self.parameters[param] = value_str.lower() in ['true', '1', 'yes', 'on']
                 elif param in ['interp_factor', 'min_width_us', 'max_width_us', 'peak_fft_freq_min', 'peak_fft_freq_max', 'length']:
                     self.parameters[param] = int(float(value_str))
@@ -1107,32 +1100,32 @@ class PulseDiagnosticTool:
             else:   
                 n_channels = data.shape[1]
             
-            # Apply time windowing if specified
-            if start_sec > 0 or end_sec > 0:
-                total_duration = len(data) / rate
-                if end_sec <= 0:
-                    end_sec = total_duration
+            # # Apply time windowing if specified
+            # if start_sec > 0 or end_sec > 0:
+            #     total_duration = len(data) / rate
+            #     if end_sec <= 0:
+            #         end_sec = total_duration
                     
-                if start_sec < 0:
-                    start_sec = 0
+            #     if start_sec < 0:
+            #         start_sec = 0
                     
-                if start_sec >= end_sec:
-                    messagebox.showerror("Error", "Start time must be less than end time")
-                    return
+            #     if start_sec >= end_sec:
+            #         messagebox.showerror("Error", "Start time must be less than end time")
+            #         return
                     
-                if end_sec > total_duration:
-                    end_sec = total_duration
-                    messagebox.showwarning("Warning", f"End time adjusted to file duration: {end_sec:.2f}s")
+            #     if end_sec > total_duration:
+            #         end_sec = total_duration
+            #         messagebox.showwarning("Warning", f"End time adjusted to file duration: {end_sec:.2f}s")
                 
-                start_idx = int(start_sec * rate)
-                end_idx = int(end_sec * rate)
-                data = data[start_idx:end_idx, :]
+            #     start_idx = int(start_sec * rate)
+            #     end_idx = int(end_sec * rate)
+            #     data = data[start_idx:end_idx, :]
                 
-                print(f"Using time window: {start_sec:.2f}s to {end_sec:.2f}s ({len(data)} samples)")
-            else:
-                start_sec = 0
-                end_sec = len(data) / rate
-                print(f"Using full recording: {end_sec:.2f}s ({len(data)} samples)")
+            #     print(f"Using time window: {start_sec:.2f}s to {end_sec:.2f}s ({len(data)} samples)")
+            # else:
+            #     start_sec = 0
+            #     end_sec = len(data) / rate
+            #     print(f"Using full recording: {end_sec:.2f}s ({len(data)} samples)")
             
             print(f"Detecting pulses on {n_channels} channels...")
             
@@ -1188,7 +1181,7 @@ class PulseDiagnosticTool:
                 (
                     eod_waveforms, eod_amps, eod_widths, eod_chan, is_differential,
                     snippet_p1_idc, snippet_p2_idc, final_p1_idc, final_p2_idc, 
-                    pulse_orientation, amplitude_ratios, fft_peak_freqs, peak_locations
+                    pulse_orientation, amplitude_ratios, fft_peak_freqs, pulse_locations
                 ) = extract_pulse_snippets(
                     data, peaks, troughs, rate = rate, length = self.parameters['length'], 
                     source=self.data_source, return_differential=self.parameters['return_diff']
@@ -1299,7 +1292,8 @@ class PulseDiagnosticTool:
                     'snippet_p1_idc': snippet_p1_idc[keep_indices],
                     'snippet_p2_idc': snippet_p2_idc[keep_indices],
                     'pulse_orientation': pulse_orientation[keep_indices],
-                    'eod_chan': eod_chan[keep_indices]
+                    'eod_chan': eod_chan[keep_indices],
+                    'pulse_location': pulse_locations[keep_indices]
                 }
                 
                 filtered_out_data = {
@@ -1321,7 +1315,8 @@ class PulseDiagnosticTool:
                     'snippet_p1_idc': kept_data['snippet_p1_idc'],
                     'snippet_p2_idc': kept_data['snippet_p2_idc'],
                     'pulse_orientation': kept_data['pulse_orientation'],
-                    'eod_chan': kept_data['eod_chan']
+                    'eod_chan': kept_data['eod_chan'],
+                    'pulse_location': kept_data['pulse_location']
                 }
                 
                 # Clear existing markers from previous detections
@@ -1358,23 +1353,17 @@ class PulseDiagnosticTool:
 
     def add_pulse_markers_differential(self, data, rate, start_sec, n_channels, kept_data, filtered_out_data):
         """Add pulse markers to existing differential plot without re-plotting the data"""
-        # Get plot data limits
-        plot_duration = len(data) / rate 
-        plot_samples = int(plot_duration * rate)
-        plot_data = data[:plot_samples]
-        
-        # Calculate offset (same as original plotting)
-        offset_diff = np.max(abs(plot_data))
         
         # Handle different data source types
         if self.data_source == '1ch_diff':
             # For single-channel differential, data is already differential
-            data_diff = plot_data[:, 0]
+            data_diff = data[:, 0]
             
             # Plot kept pulses (red=p1, blue=p2)
             for idx in range(len(kept_data['eod_chan'])):
                 p1_idx = int(kept_data['final_p1_idc'][idx])
                 p2_idx = int(kept_data['final_p2_idc'][idx])
+
                 if p1_idx < len(data_diff):
                     self.ax.plot((p1_idx / rate) + start_sec, 
                                 data_diff[p1_idx], 
@@ -1383,7 +1372,7 @@ class PulseDiagnosticTool:
                     self.ax.plot((p2_idx / rate) + start_sec, 
                                 data_diff[p2_idx], 
                                 'o', markersize=4, color='blue')
-            
+
             # Plot filtered out pulses (grey)
             for idx in range(len(filtered_out_data['eod_chan'])):
                 p1_idx = int(filtered_out_data['final_p1_idc'][idx])
@@ -1398,39 +1387,50 @@ class PulseDiagnosticTool:
                                 'o', markersize=4, color='grey', alpha=0.6)
                                             
         else:
+            # Create differential data for multi-channel linear
+            data_diff = np.diff(data, axis=1)
+            # Calculate offset
+            offset_diff = np.max(np.abs(data_diff)) * 1.2
+
             # Multi-channel linear data - create differential pairs
-            for i in range(n_channels - 1):  # Differential channels
+            for ch in range(n_channels - 1):  # Differential channels
                 # Create differential signal for this channel pair
-                data_diff = np.diff(plot_data[:, i:i+2], axis=1).flatten()
+                # data_diff = np.diff(data[:, ch:ch+2], axis=1).flatten()
                 
                 # Plot kept pulses (red=p1, blue=p2) on this channel
-                kept_ch_mask = (kept_data['eod_chan'] == i)
+                kept_ch_mask = (kept_data['eod_chan'] == ch)
                 for idx in np.where(kept_ch_mask)[0]:
                     p1_idx = int(kept_data['final_p1_idc'][idx])
                     p2_idx = int(kept_data['final_p2_idc'][idx])
+                    pulse_location = kept_data['pulse_location'][idx]
                     
                     if p1_idx < len(data_diff):
                         self.ax.plot((p1_idx / rate) + start_sec, 
-                                   data_diff[p1_idx] + i * offset_diff, 
+                                   data_diff[p1_idx, ch] + ch * offset_diff, 
                                    'o', markersize=4, color='red')
+                        self.ax.plot((p1_idx / rate) + start_sec, 
+                               pulse_location * offset_diff, 
+                               'o', markersize=4, color='black')
                     if p2_idx < len(data_diff):
                         self.ax.plot((p2_idx / rate) + start_sec, 
-                                   data_diff[p2_idx] + i * offset_diff, 
+                                   data_diff[p2_idx, ch] + ch * offset_diff, 
                                    'o', markersize=4, color='blue')
+                    
+                    
                 
                 # Plot filtered out pulses (grey) on this channel
-                filtered_ch_mask = (filtered_out_data['eod_chan'] == i)
+                filtered_ch_mask = (filtered_out_data['eod_chan'] == ch)
                 for idx in np.where(filtered_ch_mask)[0]:
                     p1_idx = int(filtered_out_data['final_p1_idc'][idx])
                     p2_idx = int(filtered_out_data['final_p2_idc'][idx])
                     
                     if p1_idx < len(data_diff):
                         self.ax.plot((p1_idx / rate) + start_sec, 
-                                   data_diff[p1_idx] + i * offset_diff, 
+                                   data_diff[p1_idx, ch] + ch * offset_diff, 
                                    'o', markersize=4, color='grey', alpha=0.6)
                     if p2_idx < len(data_diff):
                         self.ax.plot((p2_idx / rate) + start_sec, 
-                                   data_diff[p2_idx] + i * offset_diff, 
+                                   data_diff[p2_idx, ch] + ch * offset_diff, 
                                    'o', markersize=4, color='grey', alpha=0.6)
         
         # Update title to show detection results
@@ -1452,13 +1452,8 @@ class PulseDiagnosticTool:
             self.ax.set_title('Single-Ended view not applicable for Single-Channel Differential data')
             return
         
-        # Get plot data limits
-        plot_duration = len(data) / rate 
-        plot_samples = int(plot_duration * rate)
-        plot_data = data[:plot_samples]
-        
         # Calculate offset for stacking channels (same as original plotting)
-        offset_se = np.max(abs(plot_data)) * 1.2
+        offset_se = np.max(abs(data)) * 1.2
         
         # Mark peaks and troughs on the appropriate single-ended channels
         for diff_ch in range(n_channels - 1):
@@ -1472,23 +1467,23 @@ class PulseDiagnosticTool:
                 p2_idx = int(kept_data['final_p2_idc'][idx])
                 
                 # Mark on first single-ended channel (se_ch1)
-                if p1_idx < len(plot_data):
+                if p1_idx < len(data):
                     self.ax.plot((p1_idx / rate) + start_sec, 
-                               plot_data[p1_idx, se_ch1] + se_ch1 * offset_se, 
+                               data[p1_idx, se_ch1] + se_ch1 * offset_se, 
                                'o', markersize=5, color='red')
-                if p2_idx < len(plot_data):
+                if p2_idx < len(data):
                     self.ax.plot((p2_idx / rate) + start_sec, 
-                               plot_data[p2_idx, se_ch1] + se_ch1 * offset_se, 
+                               data[p2_idx, se_ch1] + se_ch1 * offset_se, 
                                'o', markersize=5, color='blue')
                 
                 # Mark on second single-ended channel (se_ch2)
-                if p1_idx < len(plot_data):
+                if p1_idx < len(data):
                     self.ax.plot((p1_idx / rate) + start_sec, 
-                               plot_data[p1_idx, se_ch2] + se_ch2 * offset_se, 
+                               data[p1_idx, se_ch2] + se_ch2 * offset_se, 
                                'o', markersize=5, color='red')
-                if p2_idx < len(plot_data):
+                if p2_idx < len(data):
                     self.ax.plot((p2_idx / rate) + start_sec, 
-                               plot_data[p2_idx, se_ch2] + se_ch2 * offset_se, 
+                               data[p2_idx, se_ch2] + se_ch2 * offset_se, 
                                'o', markersize=5, color='blue')
             
             # Plot filtered out pulses (grey) on both single-ended channels
@@ -1498,23 +1493,23 @@ class PulseDiagnosticTool:
                 p2_idx = int(filtered_out_data['final_p2_idc'][idx])
                 
                 # Mark on first single-ended channel (se_ch1)
-                if p1_idx < len(plot_data):
+                if p1_idx < len(data):
                     self.ax.plot((p1_idx / rate) + start_sec, 
-                               plot_data[p1_idx, se_ch1] + se_ch1 * offset_se, 
+                               data[p1_idx, se_ch1] + se_ch1 * offset_se, 
                                'o', markersize=5, color='grey', alpha=0.6)
-                if p2_idx < len(plot_data):
+                if p2_idx < len(data):
                     self.ax.plot((p2_idx / rate) + start_sec, 
-                               plot_data[p2_idx, se_ch1] + se_ch1 * offset_se, 
+                               data[p2_idx, se_ch1] + se_ch1 * offset_se, 
                                'o', markersize=5, color='grey', alpha=0.6)
                 
                 # Mark on second single-ended channel (se_ch2)
-                if p1_idx < len(plot_data):
+                if p1_idx < len(data):
                     self.ax.plot((p1_idx / rate) + start_sec, 
-                               plot_data[p1_idx, se_ch2] + se_ch2 * offset_se, 
+                               data[p1_idx, se_ch2] + se_ch2 * offset_se, 
                                'o', markersize=5, color='grey', alpha=0.6)
-                if p2_idx < len(plot_data):
+                if p2_idx < len(data):
                     self.ax.plot((p2_idx / rate) + start_sec, 
-                               plot_data[p2_idx, se_ch2] + se_ch2 * offset_se, 
+                               data[p2_idx, se_ch2] + se_ch2 * offset_se, 
                                'o', markersize=5, color='grey', alpha=0.6)
         
         # Update title to show detection results
@@ -1632,25 +1627,25 @@ Current Parameters:
                 # Get data to save
                 data_to_save = self.calibrated_data
                 
-                # Apply time windowing if specified
-                if start_sec > 0 or end_sec > 0:
-                    total_duration = len(data_to_save) / self.sample_rate
-                    if end_sec <= 0:
-                        end_sec = total_duration
+                # # Apply time windowing if specified
+                # if start_sec > 0 or end_sec > 0:
+                #     total_duration = len(data_to_save) / self.sample_rate
+                #     if end_sec <= 0:
+                #         end_sec = total_duration
                     
-                    if start_sec < 0:
-                        start_sec = 0
+                #     if start_sec < 0:
+                #         start_sec = 0
                     
-                    if start_sec >= end_sec:
-                        start_sec = 0
-                        end_sec = total_duration
+                #     if start_sec >= end_sec:
+                #         start_sec = 0
+                #         end_sec = total_duration
                     
-                    if end_sec > total_duration:
-                        end_sec = total_duration
+                #     if end_sec > total_duration:
+                #         end_sec = total_duration
                     
-                    start_idx = int(start_sec * self.sample_rate)
-                    end_idx = int(end_sec * self.sample_rate)
-                    data_to_save = data_to_save[start_idx:end_idx, :]
+                #     start_idx = int(start_sec * self.sample_rate)
+                #     end_idx = int(end_sec * self.sample_rate)
+                #     data_to_save = data_to_save[start_idx:end_idx, :]
                 
                 # Save using audioio
                 aio.write_audio(file_path, data_to_save, self.sample_rate)
