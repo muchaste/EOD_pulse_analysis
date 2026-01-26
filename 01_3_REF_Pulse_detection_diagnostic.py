@@ -1222,6 +1222,7 @@ class PulseDiagnosticTool:
                 snippet_p1_idc = np.array(snippet_p1_idc)[non_clipped_indices]
                 snippet_p2_idc = np.array(snippet_p2_idc)[non_clipped_indices]
                 pulse_orientation = np.array(pulse_orientation)[non_clipped_indices]
+                pulse_locations = np.array(pulse_locations)[non_clipped_indices]
 
                 # Select top x% by amplitude
                 n_top = max(1, int(len(eod_amps) * top_pct / 100.0))
@@ -1239,6 +1240,7 @@ class PulseDiagnosticTool:
                 snippet_p1_idc = np.array(snippet_p1_idc)[top_indices]
                 snippet_p2_idc = np.array(snippet_p2_idc)[top_indices]
                 pulse_orientation = np.array(pulse_orientation)[top_indices]
+                pulse_locations = pulse_locations[top_indices]
 
                 print(f"Analyzing {len(eod_waveforms)} pulses (top {top_pct}% below clip threshold {clip_thresh})")
 
@@ -1408,9 +1410,17 @@ class PulseDiagnosticTool:
                         self.ax.plot((p1_idx / rate) + start_sec, 
                                    data_diff[p1_idx, ch] + ch * offset_diff, 
                                    'o', markersize=4, color='red')
-                        self.ax.plot((p1_idx / rate) + start_sec, 
-                               pulse_location * offset_diff, 
-                               'o', markersize=4, color='black')
+                        
+                        # Pulse location visualization
+                        time_coord = (p1_idx / rate) + start_sec
+                        # Draw thin line from channel offset to pulse_location offset
+                        self.ax.plot([time_coord, time_coord], 
+                                   [ch * offset_diff, pulse_location * offset_diff], 
+                                   'k-', linewidth=0.5, alpha=0.6)
+                        # Mark pulse_location with small black marker
+                        self.ax.plot(time_coord, 
+                                   pulse_location * offset_diff, 
+                                   'ko', markersize=2, alpha=0.8)
                     if p2_idx < len(data_diff):
                         self.ax.plot((p2_idx / rate) + start_sec, 
                                    data_diff[p2_idx, ch] + ch * offset_diff, 
