@@ -2055,6 +2055,8 @@ def create_event_plots(event_id, event_eods, event_data, event_start_time, sampl
     return str(plot_path)
 
 
+############################### Clustering and Tracking ######################################
+
 def normalize_waveforms(eod_snippets, snippet_p1_idc, snippet_p2_idc, 
                        method='p1_unity', baseline_correction=True,
                        min_amplitude_threshold=0.001, return_normalization_info=False,
@@ -2104,7 +2106,7 @@ def normalize_waveforms(eod_snippets, snippet_p1_idc, snippet_p2_idc,
     Notes
     -----
     - All waveforms are oriented so P1 is positive (head-positive)
-    - Waveforms with insufficient P1-P2 amplitude difference are flagged
+    - Waveforms with insufficient P1-P2 amplitude difference are flagged # DEACTIVATED, UNNECESSARY
     - For machine learning applications, consider 'zscore' method
     - For visualization and averaging, 'p1_unity' or 'peak_to_peak' work well
     - Crop and interpolate option useful for waveform similarity comparisons with minimal baseline interference
@@ -2143,18 +2145,18 @@ def normalize_waveforms(eod_snippets, snippet_p1_idc, snippet_p2_idc,
                 continue
             
             # Get original amplitudes
-            original_snippet = snippet.copy()
+            # original_snippet = snippet.copy()
             p1_amp = snippet[p1_idx]
             p2_amp = snippet[p2_idx]
             original_p1_amplitudes.append(p1_amp)
             original_p2_amplitudes.append(p2_amp)
             
-            # Check for sufficient amplitude difference
-            amplitude_diff = abs(p1_amp - p2_amp)
-            if amplitude_diff < min_amplitude_threshold:
-                print(f"Warning: Insufficient amplitude difference ({amplitude_diff:.6f}) for snippet {i}, skipping")
-                rejected_indices.append(i)
-                continue
+            # # Check for sufficient amplitude difference
+            # amplitude_diff = abs(p1_amp - p2_amp)
+            # if amplitude_diff < min_amplitude_threshold:
+            #     print(f"Warning: Insufficient amplitude difference ({amplitude_diff:.6f}) for snippet {i}, skipping")
+            #     rejected_indices.append(i)
+            #     continue
             
             # Baseline correction
             baseline_offset = 0
@@ -2428,3 +2430,200 @@ def plot_normalization_comparison(original_snippets, normalized_snippets,
     plt.show()
     
     return fig
+
+def create_tracking_plot(event_id, event_eods, event_data, event_start_time, sample_rate, output_path, max_plot_duration=300, extraction_method='Differential'):
+    """
+    Create tracking plots for EOD events with memory-efficient handling.
+    Adapts to PCA (single-ended) or Differential extraction methods.
+    
+    Parameters:
+    -----------
+    event_id : str
+        Unique identifier for the event
+    event_eods : pd.DataFrame
+        DataFrame containing EOD detection data for this event
+    event_data : np.ndarray
+        Audio data for the event (samples x channels)
+    event_start_time : datetime
+        Start time of the event
+    sample_rate : int
+        Audio sampling rate
+    output_path : str or Path
+        Directory to save plots
+    max_plot_duration : float
+        Maximum duration (seconds) before applying downsampling
+    extraction_method : str
+        'PCA' for single-ended data or 'Differential' for differential data
+    
+    Returns:
+    --------
+    str : Path to saved plot file
+    """
+    print(f"        Creating event plot (method: {extraction_method})...")
+    
+    # Calculate event properties
+    event_duration = len(event_data) / sample_rate
+    event_size_mb = event_data.nbytes / (1024 * 1024)
+    print(f"        Event duration: {event_duration:.1f}s, size: {event_size_mb:.1f}MB")
+    
+    if len(event_eods) == 0:
+        print(f"        Warning: No EODs found for event {event_id}")
+        return None
+    
+    # Determine fish IDs from tracking data if available
+    fish_ids = event_eods['fish_id'].unique() if 'fish_id' in event_eods.columns else []
+    if len(fish_ids) == 0:
+        print(f"        No fish IDs associated with this event")
+        return None
+    
+    # Create color map for fish IDs
+    color_map = cm.get_cmap('tab10', len(fish_ids))
+    
+    if len(fish_ids) > 1:
+        id_colors = {
+            int(iteration): color_map(i) 
+            for i, iteration in enumerate(event_eods['fish_id'].unique())
+        }
+    else:
+        id_colors = {fish_ids[0]: color_map(0)}
+    
+    # Calculate plotting parameters
+    offset_diff = np.max(event_eods['eod_amplitude']) * 1.5
+    
+    # Determine downsampling strategy
+    if event_duration > max_plot_duration:
+        plot_step = 3  # Fixed 3x downsampling for long events
+        print(f"        Long event detected - applying 3x downsampling")
+    else:
+        plot_step = 1  # Original resolution for shorter events
+        print(f"        Normal event - using original resolution")
+    
+    # Determine data format and plotting parameters based on extraction method
+    n_channels = event_data.shape[1]
+    if extraction_method == 'PCA':
+        n_plot_channels = n_channels
+        channel_label_prefix = 'Ch'
+        plot_title_method = 'Single-Ended (PCA)'
+    else:  # Differential
+        n_plot_channels = n_channels - 1
+        channel_label_prefix = 'Ch'
+        plot_title_method = 'Differential'
+    
+    # Create the plot
+    plt.figure(figsize=(20, 8))
+    
+    # Plot signals for each channel
+    for i in range(n_plot_channels):
+        # Calculate signal data based on extraction method
+        if extraction_method == 'PCA':
+            # Use single-ended channel data
+            channel_data = event_data[::plot_step, i]
+            ch_label = f'{channel_label_prefix}{i}'
+        else:  # Differential
+            # Calculate differential signal
+            channel_data = np.diff(event_data[::plot_step, i:i+2], axis=1).flatten()
+            ch_label = f'{channel_label_prefix}{i}-{i+1}'
+        
+        # Create time coordinates for downsampled data
+        time_indices = np.arange(0, len(event_data), plot_step)[:len(channel_data)]
+        time_offsets = pd.to_timedelta(time_indices / sample_rate, unit='s')
+        x_coords = event_start_time + time_offsets
+        
+        plt.plot(x_coords, channel_data + i * offset_diff, linewidth=0.5, label=ch_label)
+        
+        # Plot detected pulses for this channel and fish id
+        for fish_id in fish_ids:
+        
+            ch_eods = event_eods[(event_eods['eod_channel'] == i) & (event_eods['fish_id'] == fish_id)]
+            if len(ch_eods) > 0:
+                # Plot peaks (red)
+                if 'p1_idx' in ch_eods.columns:
+                    peak_sample_indices = ch_eods['p1_idx'].values.astype(np.int64)
+                    valid_peaks = ((peak_sample_indices >= 0) & 
+                                    (peak_sample_indices < len(event_data)) & 
+                                    (~np.isnan(peak_sample_indices)))
+                    
+                    if np.any(valid_peaks):
+                        valid_peak_samples = peak_sample_indices[valid_peaks]
+                        peak_timestamps = event_start_time + pd.to_timedelta(valid_peak_samples / sample_rate, unit='s')
+                        
+                        if extraction_method == 'PCA':
+                            peak_values = event_data[valid_peak_samples, i]
+                        else:
+                            peak_values = np.diff(event_data[valid_peak_samples, i:i+2], axis=1).flatten()
+                        
+                        plt.plot(peak_timestamps, peak_values + i * offset_diff, 
+                                'o', markersize=3, color=id_colors[fish_id], alpha=0.8, 
+                                label='P1' if i == 0 else "")
+                
+                # Plot troughs (blue)
+                if 'p2_idx' in ch_eods.columns:
+                    trough_sample_indices = ch_eods['p2_idx'].values.astype(np.int64)
+                    valid_troughs = ((trough_sample_indices >= 0) & 
+                                    (trough_sample_indices < len(event_data)) & 
+                                    (~np.isnan(trough_sample_indices)))
+                    
+                    if np.any(valid_troughs):
+                        valid_trough_samples = trough_sample_indices[valid_troughs]
+                        trough_timestamps = event_start_time + pd.to_timedelta(valid_trough_samples / sample_rate, unit='s')
+                        
+                        if extraction_method == 'PCA':
+                            trough_values = event_data[valid_trough_samples, i]
+                        else:
+                            trough_values = np.diff(event_data[valid_trough_samples, i:i+2], axis=1).flatten()
+                        
+                        plt.plot(trough_timestamps, trough_values + i * offset_diff, 
+                                'o', markersize=3, color=id_colors[fish_id], alpha=0.8, 
+                                label='P2' if i == 0 else "")
+                
+                # Plot peak_location visualization for this channel
+                if 'peak_location' in ch_eods.columns and 'midpoint_idx' in ch_eods.columns:
+                    midpoint_sample_indices = ch_eods['midpoint_idx'].values.astype(np.int64)
+                    valid_midpoints = ((midpoint_sample_indices >= 0) &
+                                    (midpoint_sample_indices < len(event_data)) & 
+                                    (~np.isnan(midpoint_sample_indices)))
+                    if np.any(valid_midpoints):
+                        valid_midpoint_samples = midpoint_sample_indices[valid_midpoints]
+                        midpoint_timestamps = event_start_time + pd.to_timedelta(valid_midpoint_samples / sample_rate, unit='s')
+                    
+                    plt.plot(midpoint_timestamps, ch_eods['peak_location'].values[valid_midpoints] * offset_diff, 
+                            '-', linewidth=0.5, color=id_colors[fish_id], alpha=0.8, 
+                            label='Peak Loc' if i == 0 else "")
+
+                    plt.plot(midpoint_timestamps, ch_eods['peak_location'].values[valid_midpoints] * offset_diff, 
+                            'x', markersize=3, color=id_colors[fish_id], alpha=0.8, 
+                            label='Peak Loc' if i == 0 else "")
+                    
+        # Clean up arrays immediately to save memory
+        del channel_data, x_coords
+        gc.collect()
+    
+    
+    # Configure plot appearance
+    # plt.ylim(bottom=None, top=(n_plot_channels - 0.5) * offset_diff)
+    
+    title_base = f'Event {event_id} - {plot_title_method} EOD Detections'
+    if plot_step > 1:
+        title_base += f' (downsampled {plot_step}x)'
+    title_base += f'\nDuration: {event_duration:.1f}s - Colored boxes: merged channel events'
+    plt.title(title_base)
+    
+    # plt.legend(loc='upper right')
+    plt.xlabel('Time')
+    plt.ylabel('Voltage (stacked by channel)')
+    
+    # Format x-axis for better timestamp readability
+    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+    plt.gca().xaxis.set_major_locator(mdates.SecondLocator(interval=max(1, int(event_duration/10))))
+    plt.xticks(rotation=45)
+    
+    # Save plot
+    plot_filename = f'{event_id}_detection.png'
+    plot_path = Path(output_path) / plot_filename
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    plt.clf()
+    plt.close('all')
+    
+    print(f"        Created plot: {plot_filename}")
+    return str(plot_path)
