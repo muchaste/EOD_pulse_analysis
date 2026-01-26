@@ -565,7 +565,7 @@ def _estimate_differential_peak_location(data, peak_idx, trough_idx, channel_idx
     
     Returns
     -------
-    interpolated_location : float
+    weighted_location : float
         Continuous location estimate (channel_idx to channel_idx+1)
     """
     # For differential extraction, we use channel_idx and channel_idx+1
@@ -581,22 +581,16 @@ def _estimate_differential_peak_location(data, peak_idx, trough_idx, channel_idx
         ch2_peak = abs(data[peak_idx, channel_idx + 1])
         ch2_trough = abs(data[trough_idx, channel_idx + 1])
         
-        # Average amplitude for each channel
-        ch1_amp = (ch1_peak + ch1_trough) / 2
-        ch2_amp = (ch2_peak + ch2_trough) / 2
+        # Weights = sqrt of amplitude for each channel
+        ch1_weight = np.sqrt((ch1_peak + ch1_trough))
+        ch2_weight = np.sqrt((ch2_peak + ch2_trough))
         
         # Weight the location between the two channels
-        total_amp = ch1_amp + ch2_amp
-        if total_amp > 0:
-            # Location weighted by relative amplitudes
-            # Higher amplitude channel pulls the location toward it
-            weight_ch2 = ch2_amp / total_amp
-            interpolated_location = channel_idx + weight_ch2
-        else:
-            # No signal - use midpoint
-            interpolated_location = channel_idx + 0.5
+        total_weight = ch1_weight + ch2_weight
+
+        weighted_location = (channel_idx * ch1_weight + (channel_idx + 1) * ch2_weight) / total_weight if total_weight > 0 else channel_idx + 0.5
             
-        return interpolated_location
+        return weighted_location
         
     except (IndexError, ValueError):
         # Fallback to midpoint if any error occurs
@@ -1941,19 +1935,19 @@ def create_event_plots(event_id, event_eods, event_data, event_start_time, sampl
                             'o', markersize=3, color='blue', alpha=0.8, 
                             label='P2' if i == 0 else "")
             
-            # Plot peak_location visualization for this channel
-            if 'peak_location' in ch_eods.columns and len(ch_eods) > 0:
+            # Plot pulse_location visualization for this channel
+            if 'pulse_location' in ch_eods.columns and len(ch_eods) > 0:
                 for _, eod_row in ch_eods.iterrows():
                     if 'p1_idx' in eod_row and not pd.isna(eod_row['p1_idx']):
                         p1_idx = int(eod_row['p1_idx'])
-                        if p1_idx >= 0 and p1_idx < len(event_data) and 'peak_location' in eod_row:
-                            peak_loc = eod_row['peak_location']
+                        if p1_idx >= 0 and p1_idx < len(event_data) and 'pulse_location' in eod_row:
+                            peak_loc = eod_row['pulse_location']
                             if not pd.isna(peak_loc):
                                 p1_timestamp = event_start_time + pd.to_timedelta(p1_idx / sample_rate, unit='s')
-                                # Draw thin line from channel offset to peak_location offset
+                                # Draw thin line from channel offset to pulse_location offset
                                 plt.plot([p1_timestamp, p1_timestamp], [i * offset_diff, peak_loc * offset_diff], 
                                         'k-', linewidth=0.5, alpha=0.6)
-                                # Mark peak_location with small black marker
+                                # Mark pulse_location with small black marker
                                 plt.plot(p1_timestamp, peak_loc * offset_diff, 'ko', markersize=2, alpha=0.8)
         
         # Clean up arrays immediately to save memory
@@ -2576,8 +2570,8 @@ def create_tracking_plot(event_id, event_eods, event_data, event_start_time, sam
                                 'o', markersize=3, color=id_colors[fish_id], alpha=0.8, 
                                 label='P2' if i == 0 else "")
                 
-                # Plot peak_location visualization for this channel
-                if 'peak_location' in ch_eods.columns and 'midpoint_idx' in ch_eods.columns:
+                # Plot pulse_location visualization for this channel
+                if 'pulse_location' in ch_eods.columns and 'midpoint_idx' in ch_eods.columns:
                     midpoint_sample_indices = ch_eods['midpoint_idx'].values.astype(np.int64)
                     valid_midpoints = ((midpoint_sample_indices >= 0) &
                                     (midpoint_sample_indices < len(event_data)) & 
@@ -2586,11 +2580,11 @@ def create_tracking_plot(event_id, event_eods, event_data, event_start_time, sam
                         valid_midpoint_samples = midpoint_sample_indices[valid_midpoints]
                         midpoint_timestamps = event_start_time + pd.to_timedelta(valid_midpoint_samples / sample_rate, unit='s')
                     
-                    plt.plot(midpoint_timestamps, ch_eods['peak_location'].values[valid_midpoints] * offset_diff, 
+                    plt.plot(midpoint_timestamps, ch_eods['pulse_location'].values[valid_midpoints] * offset_diff, 
                             '-', linewidth=0.5, color=id_colors[fish_id], alpha=0.8, 
                             label='Peak Loc' if i == 0 else "")
 
-                    plt.plot(midpoint_timestamps, ch_eods['peak_location'].values[valid_midpoints] * offset_diff, 
+                    plt.plot(midpoint_timestamps, ch_eods['pulse_location'].values[valid_midpoints] * offset_diff, 
                             'x', markersize=3, color=id_colors[fish_id], alpha=0.8, 
                             label='Peak Loc' if i == 0 else "")
                     
