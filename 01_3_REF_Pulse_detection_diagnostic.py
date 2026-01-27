@@ -999,7 +999,7 @@ class PulseDiagnosticTool:
                 
                 # Plot differential signal
                 self.ax.plot((x_coords / rate) + start_sec, 
-                           data_diff[::step, ch] + ch * offset_diff, 
+                           data_diff[::step, ch] + ((ch + 0.5) * offset_diff), 
                            linewidth=0.5, label=f'Ch{ch}-{ch+1}')
             
             # self.ax.set_ylim(bottom=np.min(data_diff)*1.2, top=(n_channels-1.5)*offset_diff)
@@ -1408,14 +1408,14 @@ class PulseDiagnosticTool:
                     
                     if p1_idx < len(data_diff):
                         self.ax.plot((p1_idx / rate) + start_sec, 
-                                   data_diff[p1_idx, ch] + ch * offset_diff, 
+                                   data_diff[p1_idx, ch] + ((ch + 0.5) * offset_diff), 
                                    'o', markersize=4, color='red')
                         
                         # Pulse location visualization
                         time_coord = (p1_idx / rate) + start_sec
                         # Draw thin line from channel offset to pulse_location offset
                         self.ax.plot([time_coord, time_coord], 
-                                   [ch * offset_diff, pulse_location * offset_diff], 
+                                   [(ch + 0.5) * offset_diff, pulse_location * offset_diff], 
                                    'k-', linewidth=0.5, alpha=0.6)
                         # Mark pulse_location with small black marker
                         self.ax.plot(time_coord, 
@@ -1423,7 +1423,7 @@ class PulseDiagnosticTool:
                                    'ko', markersize=2, alpha=0.8)
                     if p2_idx < len(data_diff):
                         self.ax.plot((p2_idx / rate) + start_sec, 
-                                   data_diff[p2_idx, ch] + ch * offset_diff, 
+                                   data_diff[p2_idx, ch] + ((ch + 0.5) * offset_diff), 
                                    'o', markersize=4, color='blue')
                     
                     
@@ -1436,11 +1436,11 @@ class PulseDiagnosticTool:
                     
                     if p1_idx < len(data_diff):
                         self.ax.plot((p1_idx / rate) + start_sec, 
-                                   data_diff[p1_idx, ch] + ch * offset_diff, 
+                                   data_diff[p1_idx, ch] + ((ch + 0.5) * offset_diff), 
                                    'o', markersize=4, color='grey', alpha=0.6)
                     if p2_idx < len(data_diff):
                         self.ax.plot((p2_idx / rate) + start_sec, 
-                                   data_diff[p2_idx, ch] + ch * offset_diff, 
+                                   data_diff[p2_idx, ch] + ((ch + 0.5) * offset_diff), 
                                    'o', markersize=4, color='grey', alpha=0.6)
         
         # Update title to show detection results
