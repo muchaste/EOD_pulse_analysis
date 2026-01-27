@@ -1099,6 +1099,12 @@ class PulseDiagnosticTool:
                 n_channels = 1
             else:   
                 n_channels = data.shape[1]
+
+            # Adjust time window if needed
+            if end_sec <= 0:
+                end_sec = len(data) / rate
+            if start_sec < 0:
+                start_sec = 0
             
             # # Apply time windowing if specified
             # if start_sec > 0 or end_sec > 0:
