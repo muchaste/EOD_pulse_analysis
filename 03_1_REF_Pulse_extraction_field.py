@@ -438,31 +438,31 @@ for n, filepath in enumerate(file_set['filename']):
                     offset = np.max(eod_table['eod_amplitude']) * 1.5
                     
                     plt.figure(figsize=(20, 8))
-                    for i in range(n_plot_channels):
+                    for ch in range(n_plot_channels):
                         if parameters['waveform_extraction'] == 'PCA':
                             # Plot single-ended channel
-                            plot_ch_data = data[:, i]
-                            ch_label = f'{channel_label_prefix}{i}'
+                            plot_ch_data = data[:, ch]
+                            ch_label = f'{channel_label_prefix}{ch}'
                         else:
                             # Plot differential channel
-                            plot_ch_data = np.diff(data[:, i:i+2]).flatten()
-                            ch_label = f'{channel_label_prefix}{i}-{i+1}'
+                            plot_ch_data = np.diff(data[:, ch:ch+2]).flatten()
+                            ch_label = f'{channel_label_prefix}{ch}-{ch+1}'
                         
                         # Downsample for plotting if needed
                         step = max(1, len(plot_ch_data) // 15000000)
                         x_coords = np.arange(0, len(plot_ch_data), step)
-                        plt.plot(x_coords, plot_ch_data[::step] + i * offset, linewidth=0.5, label=ch_label)
+                        plt.plot(x_coords, plot_ch_data[::step] + ((ch + 0.5) * offset), linewidth=0.5, label=ch_label)
                         
                         # Find pulses on this channel and plot them
-                        ch_idc = np.where(eod_table['eod_channel'] == i)[0]
+                        ch_idc = np.where(eod_table['eod_channel'] == ch)[0]
                         actual_idc = eod_idc[ch_idc]
                         
                         if len(actual_idc) > 0:
                             plt.plot(eod_table['p1_idx'].iloc[actual_idc], 
-                                    plot_ch_data[eod_table['p1_idx'].iloc[actual_idc]] + i * offset, 
+                                    plot_ch_data[eod_table['p1_idx'].iloc[actual_idc]] + ((ch + 0.5) * offset), 
                                     'o', markersize=1, color='red')
                             plt.plot(eod_table['p2_idx'].iloc[actual_idc], 
-                                    plot_ch_data[eod_table['p2_idx'].iloc[actual_idc]] + i * offset, 
+                                    plot_ch_data[eod_table['p2_idx'].iloc[actual_idc]] + ((ch + 0.5) * offset), 
                                     'o', markersize=1, color='blue')
                             
                             # Plot pulse_location visualization for this channel
@@ -471,7 +471,7 @@ for n, filepath in enumerate(file_set['filename']):
                                     peak_loc = peak_locations[idx]
                                     p1_idx = eod_table['p1_idx'].iloc[idx]
                                     # Draw thin line from channel offset to pulse_location offset
-                                    plt.plot([p1_idx, p1_idx], [i * offset, peak_loc * offset], 
+                                    plt.plot([p1_idx, p1_idx], [(ch + 0.5) * offset, peak_loc * offset], 
                                             'k-', linewidth=0.5, alpha=0.6)
                                     # Mark pulse_location with small black marker
                                     plt.plot(p1_idx, peak_loc * offset, 'ko', markersize=2, alpha=0.8)
@@ -482,13 +482,13 @@ for n, filepath in enumerate(file_set['filename']):
                             filteredout_final_p1_idc = filteredout_eod_table['p1_idx']
                             filteredout_final_p2_idc = filteredout_eod_table['p2_idx']
                             
-                            filteredout_ch_idc = np.where(filteredout_eod_chan == i)[0]
+                            filteredout_ch_idc = np.where(filteredout_eod_chan == ch)[0]
                             if len(filteredout_ch_idc) > 0:
                                 plt.plot(filteredout_final_p1_idc.iloc[filteredout_ch_idc], 
-                                        plot_ch_data[filteredout_final_p1_idc.iloc[filteredout_ch_idc]] + i * offset, 
+                                        plot_ch_data[filteredout_final_p1_idc.iloc[filteredout_ch_idc]] + ((ch + 0.5) * offset), 
                                         'o', markersize=1, color='grey', alpha=0.6)
                                 plt.plot(filteredout_final_p2_idc.iloc[filteredout_ch_idc], 
-                                        plot_ch_data[filteredout_final_p2_idc.iloc[filteredout_ch_idc]] + i * offset, 
+                                        plot_ch_data[filteredout_final_p2_idc.iloc[filteredout_ch_idc]] + ((ch + 0.5) * offset), 
                                         'o', markersize=1, color='grey', alpha=0.6)
                     
                     plt.ylim(bottom=None, top=(n_plot_channels-0.5)*offset)
