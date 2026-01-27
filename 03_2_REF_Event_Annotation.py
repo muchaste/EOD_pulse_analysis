@@ -28,6 +28,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from matplotlib.widgets import Button, RadioButtons, Slider
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import threading
@@ -332,8 +333,10 @@ class EventAnnotationTool:
             self.load_event_audio(event_file)
             
             # Load EOD table if available
-            # New format: loggerID_loggerTimestamp_event_###_eventTimestamp.csv
-            eod_file = self.events_folder / f"{event_id}.csv"
+            # Old format: loggerID_loggerTimestamp_event_###_eventTimestamp.csv
+            # Old format: loggerID_loggerTimestamp_event_###_eod_table.csv
+            eod_file = self.events_folder / f"{event_id}_eod_table.csv"
+            print(f"Loading EOD table from: {eod_file}")
             
             self.current_eod_table = None
             if eod_file.exists():
@@ -470,7 +473,7 @@ class EventAnnotationTool:
             features['n_channels'] = self.current_audio.shape[1] if len(self.current_audio.shape) > 1 else 1
             features['audio_rms'] = np.sqrt(np.mean(self.current_audio**2))
             features['audio_max_amplitude'] = np.max(np.abs(self.current_audio))
-        
+
         # EOD-based features
         if self.current_eod_table is not None and len(self.current_eod_table) > 0:
             eods = self.current_eod_table
@@ -506,7 +509,7 @@ class EventAnnotationTool:
             if 'eod_amplitude_ratio' in eods.columns:
                 features['mean_amplitude_ratio'] = eods['eod_amplitude_ratio'].mean()
                 features['std_amplitude_ratio'] = eods['eod_amplitude_ratio'].std()
-            
+
             # Frequency features
             if 'fft_freq_max' in eods.columns:
                 features['mean_peak_frequency'] = eods['fft_freq_max'].mean()
@@ -518,7 +521,7 @@ class EventAnnotationTool:
                 features['primary_channel'] = channel_counts.index[0]
                 features['channel_concentration'] = channel_counts.iloc[0] / len(eods)  # Fraction on primary channel
                 features['channel_span'] = eods['eod_channel'].max() - eods['eod_channel'].min() + 1
-        
+            
         # Summary-based features
         if self.current_event_summary is not None:
             for col in ['duration_seconds', 'n_eods', 'n_channels', 'mean_ipi_seconds', 
@@ -615,7 +618,7 @@ class EventAnnotationTool:
             return
         
         # Create matplotlib figure
-        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+
         
         self.fig, self.ax = plt.subplots(1, 1, figsize=(14, 6))
         
@@ -635,12 +638,13 @@ class EventAnnotationTool:
         
         # print(f"Audio size: {audio_size_mb:.1f} MB, using max {max_points} points for display")
         
-        offset_multiplier = np.max(np.abs(self.current_audio)) * 1.5
+        offset_multiplier = np.max(self.current_eod_table['eod_amplitude']) * 1.5
         
         if n_channels > 1:
-            for i in range(n_channels - 1):
+            
+            for ch in range(n_channels - 1):
                 # Calculate differential signal
-                diff_signal = np.diff(self.current_audio[:, i:i+2], axis=1).flatten()
+                diff_signal = np.diff(self.current_audio[:, ch:ch+2], axis=1).flatten()
 
                 # Downsample for display if too long
                 # max_points = 500000  # Max points to display
@@ -655,39 +659,49 @@ class EventAnnotationTool:
                 step = max(1, len(diff_signal) // max_points)
                 
                 x_coords = np.arange(0, len(diff_signal), step)
-                y_coords = diff_signal[::step] + i * offset_multiplier
                 
-                self.ax.plot(x_coords, y_coords, linewidth=0.5, label=f'Ch{i}-{i+1}', alpha=0.8)
+                self.ax.plot(x_coords, diff_signal[::step] + (ch + 0.5) * offset_multiplier, linewidth=0.5, label=f'Ch{ch}-{ch+1}', alpha=0.8)
                 
                 # Clean up temporary arrays
-                del diff_signal, x_coords, y_coords
+                del x_coords
                 
                 # Plot EOD markers (limit to avoid memory issues)
                 if self.current_eod_table is not None and len(self.current_eod_table) > 0:
-                    ch_eods = self.current_eod_table[self.current_eod_table['eod_channel'] == i]
+                    ch_eods = self.current_eod_table[self.current_eod_table['eod_channel'] == ch]
                     
-                    if len(ch_eods) > 0 and 'p1_idx' in ch_eods.columns:
-                        # Limit number of markers for very large datasets
-                        if len(ch_eods) > 1000:
-                            # Sample every nth marker to avoid too many points
-                            marker_step = len(ch_eods) // 1000
-                            ch_eods = ch_eods.iloc[::marker_step]
+                    if len(ch_eods) > 0:
+                        # # Limit number of markers for very large datasets
+                        # if len(ch_eods) > 1000:
+                        #     # Sample every nth marker to avoid too many points
+                        #     marker_step = len(ch_eods) // 1000
+                        #     ch_eods = ch_eods.iloc[::marker_step]
                         
-                        peak_indices = ch_eods['p1_idx'].values
+                        p1_idc = ch_eods['p1_idx'].values
+                        p2_idc = ch_eods['p2_idx'].values
                         
-                        # Recompute diff_signal just for markers (more memory efficient)
-                        diff_signal_for_markers = np.diff(self.current_audio[:, i:i+2], axis=1).flatten()
-                        valid_peaks = (peak_indices >= 0) & (peak_indices < len(diff_signal_for_markers)) & (~np.isnan(peak_indices))
+                        # # Recompute diff_signal just for markers (more memory efficient)
+                        # valid_peaks = (p1_idc >= 0) & (p1_idc < len(diff_signal)) & (~np.isnan(p1_idc))
                         
-                        if np.any(valid_peaks):
-                            valid_peak_samples = peak_indices[valid_peaks].astype(int)
-                            peak_values = diff_signal_for_markers[valid_peak_samples] + i * offset_multiplier
+                        # if np.any(valid_peaks):
+                            # valid_peak_samples = p1_idc[valid_peaks].astype(int)
                             
-                            self.ax.plot(valid_peak_samples, peak_values, 'ro', markersize=2, alpha=0.7,
-                                       label='Peaks' if i == 0 else "")
+                        self.ax.plot(p1_idc, diff_signal[p1_idc] + (ch + 0.5) * offset_multiplier, 'o', markersize=1, alpha=0.7, color='red',
+                                    label='P1' if ch == 0 else "")
+                        self.ax.plot(p2_idc, diff_signal[p2_idc] + (ch + 0.5) * offset_multiplier, 'o', markersize=1, alpha=0.7, color='blue',
+                                    label='P2' if ch == 0 else "")
+                        # Plot pulse_location visualization for this channel
+                        if 'pulse_location' in ch_eods.columns:
+                            for i, p1_idx in enumerate(p1_idc):
+                                peak_loc = ch_eods['pulse_location'].iloc[i]
+                                # p1_idx = ch_eods['p1_idx'].iloc[i]
+                                # Draw thin line from channel offset to pulse_location offset
+                                plt.plot([p1_idx, p1_idx], [(ch + 0.5) * offset_multiplier, peak_loc * offset_multiplier], 
+                                        'k-', linewidth=0.5, alpha=0.6)
+                                # Mark pulse_location with small black marker
+                                plt.plot(p1_idx, peak_loc * offset_multiplier, 'ko', markersize=1, alpha=0.8)
                         
-                        # Clean up
-                        del diff_signal_for_markers
+                # Clean up
+                del diff_signal
         else:
             # Single channel - just plot it
             audio_data = self.current_audio.flatten() if len(self.current_audio.shape) > 1 else self.current_audio
