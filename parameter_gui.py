@@ -29,8 +29,8 @@ class ParameterConfigGUI:
         parent.rowconfigure(0, weight=1)
         main_frame.columnconfigure(0, weight=1)
         
-        # Create canvas and scrollbar
-        canvas = tk.Canvas(main_frame, height=600, width=800)
+        # Create canvas and scrollbar (wider for landscape layout)
+        canvas = tk.Canvas(main_frame, height=950, width=700)
         scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=canvas.yview)
         scrollable_frame = ttk.Frame(canvas)
         
@@ -88,6 +88,13 @@ class ParameterConfigGUI:
         ttk.Button(path_frame, text="Browse", 
                   command=lambda: self.browse_folder('output_path')).grid(row=2, column=2)
         
+        # Source parameter (special case - dropdown)
+        ttk.Label(path_frame, text="Data Source:").grid(row=3, column=0, sticky=tk.W, pady=2)
+        self.param_vars['source'] = tk.StringVar(value='multich_linear')
+        source_combo = ttk.Combobox(path_frame, textvariable=self.param_vars['source'], 
+                                    values=['multich_linear', '1ch_diff'], state='readonly', width=15)
+        source_combo.grid(row=3, column=1, sticky=tk.W, padx=5)
+
         # ===== ML FILTERING SETTINGS =====
         ml_frame = ttk.LabelFrame(scrollable_frame, text="Machine Learning Filtering", padding="10")
         ml_frame.grid(row=current_row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
@@ -114,73 +121,128 @@ class ParameterConfigGUI:
                                             width=10, state='disabled')
         self.ml_threshold_entry.grid(row=2, column=1, sticky=tk.W, padx=5)
         
-        # ===== DETECTION PARAMETERS =====
-        detect_frame = ttk.LabelFrame(scrollable_frame, text="Detection Parameters", padding="10")
-        detect_frame.grid(row=current_row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
+        # ===== PULSE EXTRACTION PARAMETERS (Detection + Filtering + Options) =====
+        pulse_frame = ttk.LabelFrame(scrollable_frame, text="Pulse Extraction", padding="10")
+        pulse_frame.grid(row=current_row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
         current_row += 1
+        
+        # Left column 
+        # Bandpass Filter Option
+        self.param_vars['enable_bandpass_filter'] = tk.BooleanVar(value=False)
+        ttk.Checkbutton(pulse_frame, text="Bandpass Filter (Detection Only)", 
+                       variable=self.param_vars['enable_bandpass_filter']).grid(
+            row=0, column=0, columnspan=2, sticky=tk.W, pady=2)
         
         detection_params = [
             ('thresh', 'Detection Threshold:', 0.02, float),
+            ('bandpass_low_cutoff', 'BP Low Cutoff (Hz):', 100, float),
+            ('bandpass_high_cutoff', 'BP High Cutoff (Hz):', 6000, float),
             ('min_rel_slope_diff', 'Min Relative Slope Difference:', 0.25, float),
             ('min_width_us', 'Min Pulse Width (μs):', 30, float),
             ('max_width_us', 'Max Pulse Width (μs):', 1000, float),
-            ('width_fac_detection', 'Width Factor for Detection:', 7.0, float),
-            ('window_length_extraction_us', 'Waveform Window Length (μs):', 4000, float),
-            ('interp_factor', 'Interpolation Factor:', 3, int),
+            ('width_fac_detection', 'Width Factor for Detection:', 7.0, float)
         ]
         
         for i, (key, label, default, dtype) in enumerate(detection_params):
-            ttk.Label(detect_frame, text=label).grid(row=i, column=0, sticky=tk.W, pady=2)
+            ttk.Label(pulse_frame, text=label).grid(row=i+1, column=0, sticky=tk.W, pady=2)
             if dtype == float:
                 self.param_vars[key] = tk.DoubleVar(value=default)
             else:
                 self.param_vars[key] = tk.IntVar(value=default)
-            ttk.Entry(detect_frame, textvariable=self.param_vars[key], width=15).grid(
-                row=i, column=1, sticky=tk.W, padx=5)
+            ttk.Entry(pulse_frame, textvariable=self.param_vars[key], width=12).grid(
+                row=i+1, column=1, sticky=tk.W, padx=5)
         
-        # ===== FILTERING PARAMETERS =====
-        filter_frame = ttk.LabelFrame(scrollable_frame, text="Waveform Filtering Parameters", padding="10")
-        filter_frame.grid(row=current_row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
-        current_row += 1
+        # Add vertical separator
+        ttk.Separator(pulse_frame, orient='vertical').grid(row=0, column=2, rowspan=15, sticky='ns', padx=10)
+        
+        # Right column
         
         filter_params = [
+            ('window_length_extraction_us', 'Waveform Window Length (μs):', 4000, float),
+            ('interp_factor', 'Interpolation Factor:', 3, int),
             ('amplitude_ratio_min', 'Min Amplitude Ratio:', 0.2, float),
             ('amplitude_ratio_max', 'Max Amplitude Ratio:', 4.0, float),
             ('peak_fft_freq_min', 'Min FFT Peak Frequency (Hz):', 100, float),
             ('peak_fft_freq_max', 'Max FFT Peak Frequency (Hz):', 10000, float),
-            ('min_amplitude', 'Min Event Amplitude:', 0.04, float),
         ]
         
         for i, (key, label, default, dtype) in enumerate(filter_params):
-            ttk.Label(filter_frame, text=label).grid(row=i, column=0, sticky=tk.W, pady=2)
+            ttk.Label(pulse_frame, text=label).grid(row=i, column=3, sticky=tk.W, pady=2)
             if dtype == float:
                 self.param_vars[key] = tk.DoubleVar(value=default)
             else:
                 self.param_vars[key] = tk.IntVar(value=default)
-            ttk.Entry(filter_frame, textvariable=self.param_vars[key], width=15).grid(
-                row=i, column=1, sticky=tk.W, padx=5)
+            ttk.Entry(pulse_frame, textvariable=self.param_vars[key], width=12).grid(
+                row=i, column=4, sticky=tk.W, padx=5)
+        
+        # Waveform extraction method dropdown
+        next_row = len(filter_params)
+        ttk.Label(pulse_frame, text="Waveform Extraction:").grid(row=next_row, column=3, sticky=tk.W, pady=2)
+        self.param_vars['waveform_extraction'] = tk.StringVar(value='Differential')
+        waveform_combo = ttk.Combobox(pulse_frame, textvariable=self.param_vars['waveform_extraction'], 
+                                      values=['Differential', 'PCA'], state='readonly', width=12)
+        waveform_combo.grid(row=next_row, column=4, sticky=tk.W, padx=5)
+        
+        # Return only Head-to-Tail checkbox
+        self.param_vars['return_diff'] = tk.BooleanVar(value=True)
+        ttk.Checkbutton(pulse_frame, text="Return only Head-to-Tail", 
+                       variable=self.param_vars['return_diff']).grid(
+            row=next_row+1, column=3, columnspan=2, sticky=tk.W, pady=2)
         
         # ===== EVENT CREATION PARAMETERS =====
         event_frame = ttk.LabelFrame(scrollable_frame, text="Event Creation Parameters", padding="10")
         event_frame.grid(row=current_row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
         current_row += 1
         
+        # Create Events checkbox at the top
+        self.param_vars['create_events'] = tk.BooleanVar(value=True)
+        self.create_events_checkbox = ttk.Checkbutton(
+            event_frame, text="Create Events from EODs", 
+            variable=self.param_vars['create_events'],
+            command=self.toggle_event_fields)
+        self.create_events_checkbox.grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+        
+        # Left column - Numeric parameters
         event_params = [
+            ('min_amplitude', 'Min Event Amplitude:', 0.04, float),
             ('max_ipi_seconds', 'Max Inter-Pulse Interval (s):', 5.0, float),
-            ('min_eods_per_event', 'Min EODs per Event:', 30, int),
+            ('min_eods_premerge', 'Min EODs Pre-Merge:', 5, int),
             ('max_merge_gap_seconds', 'Max Merge Gap (s):', 0.5, float),
+            ('min_eods_postmerge', 'Min EODs Post-Merge:', 30, int),
             ('margin', 'Event Time Margin (s):', 1.0, float),
-            ('min_channel_event_size', 'Min Channel Event Size:', 5, int),
         ]
         
+        self.event_param_widgets = []  # Store widgets for enable/disable
+        
         for i, (key, label, default, dtype) in enumerate(event_params):
-            ttk.Label(event_frame, text=label).grid(row=i, column=0, sticky=tk.W, pady=2)
+            lbl = ttk.Label(event_frame, text=label)
+            lbl.grid(row=i+1, column=0, sticky=tk.W, pady=2)
             if dtype == float:
                 self.param_vars[key] = tk.DoubleVar(value=default)
             else:
                 self.param_vars[key] = tk.IntVar(value=default)
-            ttk.Entry(event_frame, textvariable=self.param_vars[key], width=15).grid(
-                row=i, column=1, sticky=tk.W, padx=5)
+            entry = ttk.Entry(event_frame, textvariable=self.param_vars[key], width=12)
+            entry.grid(row=i+1, column=1, sticky=tk.W, padx=5)
+            self.event_param_widgets.extend([lbl, entry])
+        
+        # Add vertical separator
+        ttk.Separator(event_frame, orient='vertical').grid(row=0, column=2, rowspan=7, sticky='ns', padx=10)
+        
+        # Right column - Boolean options
+        ttk.Label(event_frame, text="Event Processing Options", font=('TkDefaultFont', 9, 'bold')).grid(
+            row=0, column=3, columnspan=2, sticky=tk.W, pady=(0, 10))
+        
+        event_boolean_params = [
+            ('merge_events', 'Merge Channel Events', True),
+            ('pre_merge_filtering', 'Filter Before Merging', True),
+            ('post_merge_filtering', 'Filter After Merging', True),
+        ]
+        
+        for i, (key, label, default) in enumerate(event_boolean_params):
+            self.param_vars[key] = tk.BooleanVar(value=default)
+            cb = ttk.Checkbutton(event_frame, text=label, variable=self.param_vars[key])
+            cb.grid(row=i+1, column=3, columnspan=2, sticky=tk.W, pady=2)
+            self.event_param_widgets.append(cb)
         
         # ===== PROCESSING OPTIONS =====
         options_frame = ttk.LabelFrame(scrollable_frame, text="Processing Options", padding="10")
@@ -188,12 +250,7 @@ class ParameterConfigGUI:
         current_row += 1
         
         boolean_params = [
-            ('return_diff', 'Return Differential Data', True),
             ('save_filtered_out', 'Save Filtered-Out Pulses', False),
-            ('create_events', 'Create Events from EODs', True),
-            ('merge_events', 'Merge Channel Events', True),
-            ('pre_merge_filtering', 'Filter Before Merging', True),
-            ('post_merge_filtering', 'Filter After Merging', True),
             ('create_plots', 'Create Diagnostic Plots', True),
         ]
         
@@ -202,19 +259,12 @@ class ParameterConfigGUI:
             ttk.Checkbutton(options_frame, text=label, variable=self.param_vars[key]).grid(
                 row=i, column=0, sticky=tk.W, pady=2)
         
-        # Source parameter (special case - dropdown)
-        ttk.Label(options_frame, text="Data Source:").grid(row=len(boolean_params), column=0, sticky=tk.W, pady=2)
-        self.param_vars['source'] = tk.StringVar(value='multich_linear')
-        source_combo = ttk.Combobox(options_frame, textvariable=self.param_vars['source'], 
-                                    values=['multich_linear', '1ch_diff'], state='readonly', width=15)
-        source_combo.grid(row=len(boolean_params), column=1, sticky=tk.W, padx=5)
-        
-        # Filtering method
-        ttk.Label(options_frame, text="Filtering Method:").grid(row=len(boolean_params)+1, column=0, sticky=tk.W, pady=2)
-        self.param_vars['filtering_method'] = tk.StringVar(value='basic')
-        filter_combo = ttk.Combobox(options_frame, textvariable=self.param_vars['filtering_method'], 
-                                    values=['basic', 'ml_enhanced'], state='readonly', width=15)
-        filter_combo.grid(row=len(boolean_params)+1, column=1, sticky=tk.W, padx=5)
+        # # Filtering method
+        # ttk.Label(options_frame, text="Filtering Method:").grid(row=len(boolean_params)+1, column=0, sticky=tk.W, pady=2)
+        # self.param_vars['filtering_method'] = tk.StringVar(value='basic')
+        # filter_combo = ttk.Combobox(options_frame, textvariable=self.param_vars['filtering_method'], 
+        #                             values=['basic', 'ml_enhanced'], state='readonly', width=15)
+        # filter_combo.grid(row=len(boolean_params)+1, column=1, sticky=tk.W, padx=5)
         
         # ===== ACTION BUTTONS =====
         button_frame = ttk.Frame(scrollable_frame, padding="10")
@@ -228,6 +278,9 @@ class ParameterConfigGUI:
         # Result flag
         self.result = None
         
+        # Initialize event fields state
+        self.toggle_event_fields()
+        
     def toggle_ml_fields(self):
         """Enable/disable ML-related fields based on checkbox state."""
         if self.ml_vars['use_ml_filtering'].get():
@@ -238,6 +291,12 @@ class ParameterConfigGUI:
             self.ml_classifier_entry.config(state='disabled')
             self.ml_classifier_btn.config(state='disabled')
             self.ml_threshold_entry.config(state='disabled')
+    
+    def toggle_event_fields(self):
+        """Enable/disable event-related fields based on create_events checkbox state."""
+        state = 'normal' if self.param_vars['create_events'].get() else 'disabled'
+        for widget in self.event_param_widgets:
+            widget.config(state=state)
     
     def browse_folder(self, var_name):
         """Open folder selection dialog."""
@@ -387,6 +446,13 @@ class ParameterConfigGUI:
                 errors.append("Detection threshold must be positive")
             if self.param_vars['min_width_us'].get() >= self.param_vars['max_width_us'].get():
                 errors.append("Min pulse width must be less than max pulse width")
+            
+            if self.param_vars['enable_bandpass_filter'].get():
+                if self.param_vars['bandpass_low_cutoff'].get() >= self.param_vars['bandpass_high_cutoff'].get():
+                    errors.append("Bandpass low cutoff must be less than high cutoff")
+                if self.param_vars['bandpass_low_cutoff'].get() <= 0:
+                     errors.append("Bandpass cutoff must be positive")
+                     
         except tk.TclError:
             errors.append("One or more numeric parameters have invalid values")
         
