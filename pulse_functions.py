@@ -145,7 +145,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
         Peak-to-trough amplitude ratios for filtering
     fft_peak_freqs : 1-D array
         Peak FFT frequency for each waveform
-    peak_locations : 1-D array
+    pulse_locations : 1-D array
         Interpolated continuous location of peak amplitude along electrode array.
         Range: 0.0 (first electrode) to N-1 (last electrode) with sub-electrode precision.
         For PCA: Based on cubic spline interpolation of spatial amplitude profile.
@@ -221,7 +221,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
     eod_widths = []
     fft_peak_freqs = []
     pca_variance_explained = []  # Track PCA quality
-    peak_locations = []  # Track interpolated peak locations (for both PCA and differential)
+    pulse_locations = []  # Track interpolated peak locations (for both PCA and differential)
     re_extract = False
     
     for i in range(n_pulses_diff):
@@ -248,7 +248,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
                     apply_common_average=True
                 )
                 pca_variance_explained.append(var_explained)
-                peak_locations.append(peak_loc)
+                pulse_locations.append(peak_loc)
                 # Update the channel assignment to the electrode with strongest signal
                 filtered_eod_chans[i] = peak_ch
             except Exception as e:
@@ -260,7 +260,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
             # Single channel differential
             snippet = data[start_idx:end_idx].flatten()
             # Single channel has no spatial information
-            peak_locations.append(0.0)
+            pulse_locations.append(0.0)
         elif source == 'multich_linear':
             # Standard differential extraction between adjacent channels
             snippet = np.diff(data[start_idx:end_idx, filtered_eod_chans[i]:filtered_eod_chans[i]+2]).flatten()
@@ -268,7 +268,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
             diff_location = _estimate_differential_peak_location(
                 data, peak_idx, trough_idx, filtered_eod_chans[i], n_channels
             )
-            peak_locations.append(diff_location)
+            pulse_locations.append(diff_location)
 
         if snippet.shape[0] == 0:
             # If snippet extraction failed, append default values
@@ -327,7 +327,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
                         apply_common_average=True
                     )
                     pca_variance_explained[-1] = var_explained  # Update the last entry
-                    peak_locations[-1] = peak_loc  # Update the last entry
+                    pulse_locations[-1] = peak_loc  # Update the last entry
                     filtered_eod_chans[i] = peak_ch  # Update channel assignment
                 except Exception as e:
                     print(f"    Warning: PCA re-extraction failed for pulse {i}: {e}")
@@ -335,14 +335,14 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
             elif source == '1ch_diff':
                 snippet = data[start_idx:end_idx].flatten()
                 # Update location (single channel)
-                peak_locations[-1] = 0.0
+                pulse_locations[-1] = 0.0
             elif source == 'multich_linear':
                 snippet = np.diff(data[start_idx:end_idx, filtered_eod_chans[i]:filtered_eod_chans[i]+2]).flatten()
                 # Update interpolated location for differential
                 diff_location = _estimate_differential_peak_location(
                     data, peak_idx, trough_idx, filtered_eod_chans[i], n_channels
                 )
-                peak_locations[-1] = diff_location
+                pulse_locations[-1] = diff_location
 
             # Update snippet-relative peak/trough indices after re-extraction
             snippet_peak_idx = peak_idx - start_idx
@@ -429,8 +429,8 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
         fft_peak_freqs = np.array(fft_peak_freqs)
         
         # Convert peak locations to array (populated for both PCA and differential extraction)
-        if peak_locations:
-            peak_locations_array = np.array(peak_locations)
+        if pulse_locations:
+            peak_locations_array = np.array(pulse_locations)
             mean_peak_loc = np.mean(peak_locations_array)
             if use_pca:
                 print(f"    PCA spatial info: mean peak location = {mean_peak_loc:.2f} (electrode units)")
@@ -565,7 +565,7 @@ def _estimate_differential_peak_location(data, peak_idx, trough_idx, channel_idx
     
     Returns
     -------
-    weighted_location : float
+    interpolated_location : float
         Continuous location estimate (channel_idx to channel_idx+1)
     """
     # For differential extraction, we use channel_idx and channel_idx+1
@@ -576,21 +576,18 @@ def _estimate_differential_peak_location(data, peak_idx, trough_idx, channel_idx
     
     try:
         # Get amplitudes at peak and trough for both channels
-        ch1_peak = abs(data[peak_idx, channel_idx])
-        ch1_trough = abs(data[trough_idx, channel_idx])
-        ch2_peak = abs(data[peak_idx, channel_idx + 1])
-        ch2_trough = abs(data[trough_idx, channel_idx + 1])
-        
-        # Weights = sqrt of amplitude for each channel
-        ch1_weight = np.sqrt((ch1_peak + ch1_trough))
-        ch2_weight = np.sqrt((ch2_peak + ch2_trough))
-        
-        # Weight the location between the two channels
+        ch1_weight = np.sqrt(abs(data[peak_idx, channel_idx] - (data[trough_idx, channel_idx])))
+        ch2_weight = np.sqrt(abs(data[peak_idx, channel_idx + 1] - (data[trough_idx, channel_idx + 1])))
         total_weight = ch1_weight + ch2_weight
 
-        weighted_location = (channel_idx * ch1_weight + (channel_idx + 1) * ch2_weight) / total_weight if total_weight > 0 else channel_idx + 0.5
+        if total_weight > 0:
+            weight_ch2 = ch2_weight / total_weight
+            interpolated_location = channel_idx + weight_ch2
+        else:
+            # No signal - use midpoint
+            interpolated_location = channel_idx + 0.5
             
-        return weighted_location
+        return interpolated_location
         
     except (IndexError, ValueError):
         # Fallback to midpoint if any error occurs
@@ -882,7 +879,7 @@ def remove_exact_duplicates(arrays_dict, parameters):
 
 def remove_duplicates(eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
                         snippet_peak_idc, snippet_trough_idc, raw_peak_idc, raw_trough_idc,
-                        pulse_orientation, amp_ratios, fft_peak_freqs, peak_locations, parameters):
+                        pulse_orientation, amp_ratios, fft_peak_freqs, pulse_locations, parameters):
     """
     Complete duplicate removal pipeline for EOD detection results.
     
@@ -914,7 +911,7 @@ def remove_duplicates(eod_snippets, eod_amps, eod_widths, eod_chan, is_different
         'amplitude_ratios': amp_ratios,
         'waveform_lengths': np.array([len(wf) for wf in eod_snippets]),
         'fft_peak_freqs': fft_peak_freqs,
-        'peak_locations': peak_locations
+        'pulse_locations': pulse_locations
     }
     
     # Step 1: Remove proximity-based duplicates
@@ -943,7 +940,7 @@ def remove_duplicates(eod_snippets, eod_amps, eod_widths, eod_chan, is_different
         arrays_dict['original_pulse_orientation'],
         arrays_dict['amplitude_ratios'],
         arrays_dict['fft_peak_freqs'],
-        arrays_dict['peak_locations']
+        arrays_dict['pulse_locations']
     )
 
 
