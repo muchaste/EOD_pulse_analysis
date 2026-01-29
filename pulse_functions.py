@@ -1901,26 +1901,26 @@ def create_event_plots(event_id, event_eods, event_data, event_start_time, sampl
     plt.figure(figsize=(20, 8))
     
     # Plot signals for each channel
-    for i in range(n_plot_channels):
+    for ch in range(n_plot_channels):
         # Calculate signal data based on extraction method
         if extraction_method == 'PCA':
             # Use single-ended channel data
-            channel_data = event_data[::plot_step, i]
-            ch_label = f'{channel_label_prefix}{i}'
+            channel_data = event_data[::plot_step, ch]
+            ch_label = f'{channel_label_prefix}{ch}'
         else:  # Differential
             # Calculate differential signal
-            channel_data = np.diff(event_data[::plot_step, i:i+2], axis=1).flatten()
-            ch_label = f'{channel_label_prefix}{i}-{i+1}'
+            channel_data = np.diff(event_data[::plot_step, ch:ch+2], axis=1).flatten()
+            ch_label = f'{channel_label_prefix}{ch}-{ch+1}'
         
         # Create time coordinates for downsampled data
         time_indices = np.arange(0, len(event_data), plot_step)[:len(channel_data)]
         time_offsets = pd.to_timedelta(time_indices / sample_rate, unit='s')
         x_coords = event_start_time + time_offsets
         
-        plt.plot(x_coords, channel_data + i * offset_diff, linewidth=0.5, label=ch_label)
+        plt.plot(x_coords, channel_data + (ch + 0.5) * offset_diff, linewidth=0.5, label=ch_label)
         
         # Plot detected pulses for this channel
-        ch_eods = event_eods[event_eods['eod_channel'] == i]
+        ch_eods = event_eods[event_eods['eod_channel'] == ch]
         if len(ch_eods) > 0:
             # Plot peaks (red)
             if 'p1_idx' in ch_eods.columns:
@@ -1934,13 +1934,13 @@ def create_event_plots(event_id, event_eods, event_data, event_start_time, sampl
                     peak_timestamps = event_start_time + pd.to_timedelta(valid_peak_samples / sample_rate, unit='s')
                     
                     if extraction_method == 'PCA':
-                        peak_values = event_data[valid_peak_samples, i]
+                        peak_values = event_data[valid_peak_samples, ch]
                     else:
-                        peak_values = np.diff(event_data[valid_peak_samples, i:i+2], axis=1).flatten()
+                        peak_values = np.diff(event_data[valid_peak_samples, ch:ch+2], axis=1).flatten()
                     
-                    plt.plot(peak_timestamps, peak_values + i * offset_diff, 
+                    plt.plot(peak_timestamps, peak_values + (ch + 0.5) * offset_diff, 
                             'o', markersize=3, color='red', alpha=0.8, 
-                            label='P1' if i == 0 else "")
+                            label='P1' if ch == 0 else "")
             
             # Plot troughs (blue)
             if 'p2_idx' in ch_eods.columns:
@@ -1954,13 +1954,13 @@ def create_event_plots(event_id, event_eods, event_data, event_start_time, sampl
                     trough_timestamps = event_start_time + pd.to_timedelta(valid_trough_samples / sample_rate, unit='s')
                     
                     if extraction_method == 'PCA':
-                        trough_values = event_data[valid_trough_samples, i]
+                        trough_values = event_data[valid_trough_samples, ch]
                     else:
-                        trough_values = np.diff(event_data[valid_trough_samples, i:i+2], axis=1).flatten()
+                        trough_values = np.diff(event_data[valid_trough_samples, ch:ch+2], axis=1).flatten()
                     
-                    plt.plot(trough_timestamps, trough_values + i * offset_diff, 
+                    plt.plot(trough_timestamps, trough_values + (ch + 0.5) * offset_diff, 
                             'o', markersize=3, color='blue', alpha=0.8, 
-                            label='P2' if i == 0 else "")
+                            label='P2' if ch == 0 else "")
             
             # Plot pulse_location visualization for this channel
             if 'pulse_location' in ch_eods.columns and len(ch_eods) > 0:
@@ -1972,7 +1972,7 @@ def create_event_plots(event_id, event_eods, event_data, event_start_time, sampl
                             if not pd.isna(peak_loc):
                                 p1_timestamp = event_start_time + pd.to_timedelta(p1_idx / sample_rate, unit='s')
                                 # Draw thin line from channel offset to pulse_location offset
-                                plt.plot([p1_timestamp, p1_timestamp], [i * offset_diff, peak_loc * offset_diff], 
+                                plt.plot([p1_timestamp, p1_timestamp], [ch * offset_diff, peak_loc * offset_diff], 
                                         'k-', linewidth=0.5, alpha=0.6)
                                 # Mark pulse_location with small black marker
                                 plt.plot(p1_timestamp, peak_loc * offset_diff, 'ko', markersize=2, alpha=0.8)
@@ -2014,11 +2014,11 @@ def create_event_plots(event_id, event_eods, event_data, event_start_time, sampl
         mean_timestamp_mpl = mdates.date2num(mean_timestamp.to_pydatetime())
         
         # Store midpoint for merge lines
-        midpoints_for_merge_lines.append((mean_timestamp_mpl, ch * offset_diff, iteration))
+        midpoints_for_merge_lines.append((mean_timestamp_mpl, (ch + 0.5) * offset_diff, iteration))
         
         # Draw colored rectangle for this channel event
         rect = mpatches.Rectangle(
-            (min_timestamp_mpl, ch * offset_diff - 0.5 * offset_diff),
+            (min_timestamp_mpl, (ch + 0.5) * offset_diff - 0.5 * offset_diff),
             width_days, offset_diff,
             linewidth=2, edgecolor=channel_event_colors[iteration], 
             facecolor='none', alpha=0.7, zorder=10
@@ -2027,7 +2027,7 @@ def create_event_plots(event_id, event_eods, event_data, event_start_time, sampl
         
         # Add iteration number annotation
         text_timestamp_mpl = min_timestamp_mpl + width_days * 0.05
-        text_y = ch * offset_diff + 0.3 * offset_diff
+        text_y = (ch + 0.5) * offset_diff + 0.3 * offset_diff
         plt.text(text_timestamp_mpl, text_y, str(iteration), 
                 fontsize=12, fontweight='bold', 
                 color=channel_event_colors[iteration], 
@@ -2036,7 +2036,7 @@ def create_event_plots(event_id, event_eods, event_data, event_start_time, sampl
                 ha='center', va='center', zorder=15)
         
         # Draw mean midpoint marker
-        plt.plot([mean_timestamp_mpl], [ch * offset_diff], 
+        plt.plot([mean_timestamp_mpl], [(ch + 0.5) * offset_diff], 
                 marker='s', color=channel_event_colors[iteration], 
                 markersize=10, zorder=11)
     
