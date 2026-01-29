@@ -82,7 +82,7 @@ print("="*60 + "\n")
 os.makedirs(output_path, exist_ok=True)
 
 # Load calibration factors
-cor_factors = np.array(pd.read_csv(cal_file))
+cor_factors_all = pd.read_csv(cal_file)
 
 # Parameters for event creation
 if parameters['create_events']:
@@ -155,8 +155,9 @@ except Exception as e:
     exit()
 
 # Apply calibration factors
+cor_factors = cor_factors_all.iloc[np.where(cor_factors_all['file_id']==os.path.basename(file_set['filename'][0]).split('.')[0])[0][0]]
 for i in range(n_channels):
-    data[:, i] *= cor_factors[i, 1]
+    data[:, i] *= cor_factors[i]
 
 # Plot raw data
 offset = np.max(abs(data))#*1.5
@@ -198,8 +199,9 @@ for n, filepath in enumerate(file_set['filename']):
     print(f"    Loaded file: {file_duration:.1f}s, {n_channels} channels, {len(data)} samples")
     
     # Calibrate with correction factor
+    cor_factors = cor_factors_all.iloc[np.where(cor_factors_all['file_id']==fname.split('.')[0])[0][0]]
     for i in range(n_channels):
-        data[:, i] *= cor_factors[i, 1]
+        data[:, i] *= cor_factors[i]
     
     # Handle cross-file continuation: prepend retained data from previous file
     if retained_data is not None:
@@ -262,19 +264,19 @@ for n, filepath in enumerate(file_set['filename']):
             (
                 eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
                 snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc, 
-                pulse_orientations, amp_ratios, fft_peak_freqs, peak_locations
+                pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations
             ) = extract_pulse_snippets(
                 data, unique_peaks, unique_troughs, rate = rate, length = parameters['window_length_extraction_us'],
-                source = 'multich_linear', return_differential = parameters['return_diff'], use_pca=False
+                source = 'multich_linear', return_differential = parameters['return_diff'], use_pca=False, pca_interp_points = 300
             )
         elif parameters['waveform_extraction'] == 'PCA':
             (
                 eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
                 snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc, 
-                pulse_orientations, amp_ratios, fft_peak_freqs, peak_locations
+                pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations
             ) = extract_pulse_snippets(
                 data, unique_peaks, unique_troughs, rate = rate, length = parameters['window_length_extraction_us'],
-                source = 'multich_linear', return_differential = parameters['return_diff'], use_pca=True
+                source = 'multich_linear', return_differential = parameters['return_diff'], use_pca=True, pca_interp_points = 300
             )
 
         # Remove duplicates
@@ -282,11 +284,11 @@ for n, filepath in enumerate(file_set['filename']):
             eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
             snippet_p1_idc, snippet_p2_idc, 
             raw_p1_idc, raw_p2_idc,
-            pulse_orientations, amp_ratios, fft_peak_freqs, peak_locations
+            pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations
         ) = remove_duplicates(
             eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
             snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc,
-            pulse_orientations, amp_ratios, fft_peak_freqs, peak_locations, parameters
+            pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations, parameters
         )
         
         # Apply filtering pipeline
@@ -370,7 +372,7 @@ for n, filepath in enumerate(file_set['filename']):
             'p1_idx': raw_p1_idc,
             'p2_idx': raw_p2_idc,
             'eod_channel': eod_chan,
-            'pulse_location': peak_locations,
+            'pulse_location': pulse_locations,
             'snippet_p1_idx': snippet_p1_idc,
             'snippet_p2_idx': snippet_p2_idc,
             'snippet_midpoint_idx': snippet_midpoint_idc,
@@ -468,7 +470,7 @@ for n, filepath in enumerate(file_set['filename']):
                             # Plot pulse_location visualization for this channel
                             if 'pulse_location' in eod_table.columns:
                                 for idx in actual_idc:
-                                    peak_loc = peak_locations[idx]
+                                    peak_loc = pulse_locations[idx]
                                     p1_idx = eod_table['p1_idx'].iloc[idx]
                                     # Draw thin line from channel offset to pulse_location offset
                                     plt.plot([p1_idx, p1_idx], [(ch + 0.5) * offset, peak_loc * offset], 
