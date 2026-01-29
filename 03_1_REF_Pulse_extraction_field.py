@@ -21,6 +21,7 @@ import pickle
 
 # Import EOD functions
 from pulse_functions import (
+    bandpass_filter,
     unify_across_channels,
     extract_pulse_snippets,
     remove_duplicates,
@@ -234,9 +235,22 @@ for n, filepath in enumerate(file_set['filename']):
     troughs = []
     pulse_widths = []
     
+    # Check for bandpass filter settings
+    enable_bp = parameters.get('enable_bandpass_filter', False)
+    bp_low = parameters.get('bandpass_low_cutoff', 300)
+    bp_high = parameters.get('bandpass_high_cutoff', 2000)
+
+    if enable_bp:
+        print(f"    Applying bandpass filter ({bp_low}-{bp_high} Hz) for detection")
+
     for i in range(n_detect_channels):
+        # Prepare signal for detection (optionally filtered)
+        detection_signal = data_diff[:, i]
+        if enable_bp:
+            detection_signal = bandpass_filter(detection_signal, rate, bp_low, bp_high)
+
         ch_peaks, ch_troughs, _, ch_pulse_widths = \
-            pulses.detect_pulses(data_diff[:, i], rate, 
+            pulses.detect_pulses(detection_signal, rate, 
                                     thresh=parameters['thresh'], 
                                     min_rel_slope_diff=parameters['min_rel_slope_diff'],
                                     min_width=parameters['min_width_us'] / 1e6,
