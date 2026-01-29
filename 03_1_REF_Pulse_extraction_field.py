@@ -293,6 +293,10 @@ for n, filepath in enumerate(file_set['filename']):
                 source = 'multich_linear', return_differential = parameters['return_diff'], use_pca=True, pca_interp_points = 300
             )
 
+        if len(eod_snippets) == 0:
+            print("    No valid EOD snippets extracted after waveform extraction")
+            continue
+
         # Remove duplicates
         (
             eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
@@ -305,6 +309,10 @@ for n, filepath in enumerate(file_set['filename']):
             pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations, parameters
         )
         
+        if len(eod_snippets) == 0:
+            print("    No valid EOD snippets extracted after duplicate removal")
+            continue
+
         # Apply filtering pipeline
         if use_ml_filtering and loaded_classifier is not None and loaded_scaler is not None:
             # Use enhanced ML-based filtering
@@ -336,6 +344,10 @@ for n, filepath in enumerate(file_set['filename']):
                 return_features=True, return_filteredout_features=True
             )
         
+        if len(keep_indices) == 0:
+            print("    No pulses remaining after filtering")
+            continue
+
         print(f"    Filtered {len(eod_snippets) - len(keep_indices)} out of {len(eod_snippets)} pulses")
 
 
