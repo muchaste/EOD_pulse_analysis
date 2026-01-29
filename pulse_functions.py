@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import json
 import os
 from pathlib import Path
-from scipy.signal import find_peaks, correlate, windows, find_peaks
+from scipy.signal import find_peaks, correlate, windows, find_peaks, butter, filtfilt
 from scipy.interpolate import interp1d
 from scipy import stats
 import glob
@@ -20,6 +20,38 @@ import matplotlib.cm as cm
 import matplotlib.dates as mdates
 import matplotlib.patches as mpatches
 
+############################### Pulse Extraction ######################################
+
+def bandpass_filter(data, rate, lowcut, highcut, order=4):
+    """
+    Apply a Butterworth bandpass filter to the data.
+
+    Parameters:
+    -----------
+    data : 1-D array
+        The input signal data
+    rate : int
+        Sampling rate of the data
+    lowcut : float
+        Low cutoff frequency in Hz
+    highcut : float
+        High cutoff frequency in Hz
+    order : int
+        Order of the Butterworth filter
+
+    Returns:
+    --------
+    filtered_data : 1-D array
+        The bandpass filtered signal
+    """
+    nyquist = 0.5 * rate
+    low = lowcut / nyquist
+    high = highcut / nyquist
+
+    b, a = butter(order, [low, high], btype='band')
+    filtered_data = filtfilt(b, a, data)
+
+    return filtered_data
 
 def unify_across_channels(peaks, troughs, pulse_widths):
     """
@@ -431,11 +463,6 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
         # Convert peak locations to array (populated for both PCA and differential extraction)
         if pulse_locations:
             peak_locations_array = np.array(pulse_locations)
-            mean_peak_loc = np.mean(peak_locations_array)
-            if use_pca:
-                print(f"    PCA spatial info: mean peak location = {mean_peak_loc:.2f} (electrode units)")
-            else:
-                print(f"    Differential spatial info: mean peak location = {mean_peak_loc:.2f} (electrode units)")
         else:
             peak_locations_array = np.array([])  # Empty fallback
 
