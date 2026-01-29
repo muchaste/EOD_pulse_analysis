@@ -27,6 +27,7 @@ from scipy import signal
 # Import from Script 03
 import thunderfish.pulses as pulses
 from pulse_functions import (extract_pulse_snippets, 
+                             bandpass_filter,
                              filter_waveforms, 
                              filter_waveforms_with_classifier,
                              unify_across_channels,
@@ -95,6 +96,13 @@ class PulseDiagnosticTool:
         self.loaded_classifier = None
         self.loaded_scaler = None
         self.classifier_name = None
+
+        # Bandpass configuration variables
+        self.use_bandpass_filter = tk.BooleanVar(value=False)
+        self.bandpass_lowcut = tk.DoubleVar(value=100.0)
+        self.bandpass_highcut = tk.DoubleVar(value=6000.0)
+        self.bandpass_order = tk.IntVar(value=4)
+
         
         self.setup_gui()
         
@@ -281,6 +289,31 @@ class PulseDiagnosticTool:
         ttk.Label(analysis_row1, text="Top%:", width=5).pack(side=tk.LEFT, padx=(10,0))
         percent_entry = ttk.Entry(analysis_row1, textvariable=self.top_percent, width=6)
         percent_entry.pack(side=tk.LEFT, padx=2)
+
+        # Bandpass filter control
+        bp_frame = ttk.LabelFrame(right_controls, text="Bandpass Filter", padding=5)
+        bp_frame.pack(fill=tk.X, pady=2)
+
+        # BP enable
+        bp_enable_checkbox = ttk.Checkbutton(bp_frame, text="Enable Bandpass", variable=self.use_bandpass_filter)
+        bp_enable_checkbox.pack(side=tk.LEFT, padx=5, pady=2)
+
+        # BP parameters in one row
+        bp_row = ttk.Frame(bp_frame)
+        bp_row.pack(fill=tk.X, pady=1)
+        ttk.Label(bp_row, text="Lowcut (Hz):", width=10).pack(side=tk.LEFT)
+        lowcut_entry = ttk.Entry(bp_row, textvariable=self.bandpass_lowcut, width=8)
+        lowcut_entry.pack(side=tk.LEFT, padx=2)
+        ttk.Label(bp_row, text="Highcut (Hz):", width=10).pack(side=tk.LEFT, padx=(10,0))
+        highcut_entry = ttk.Entry(bp_row, textvariable=self.bandpass_highcut, width=8)
+        highcut_entry.pack(side=tk.LEFT, padx=2)
+
+        # Order in second row
+        bp_row2 = ttk.Frame(bp_frame)
+        bp_row2.pack(fill=tk.X, pady=1)
+        ttk.Label(bp_row2, text="Order:", width=6).pack(side=tk.LEFT, padx=(10,0))
+        order_entry = ttk.Entry(bp_row2, textvariable=self.bandpass_order, width=4)
+        order_entry.pack(side=tk.LEFT, padx=2)
         
         # Main action buttons
         buttons_row = ttk.Frame(button_frame)
@@ -1141,8 +1174,19 @@ class PulseDiagnosticTool:
             all_widths = []
             
             for i in range(n_channels):
+                if self.use_bandpass_filter.get():
+                    # Apply bandpass filter before detection
+                    ch_data = bandpass_filter(
+                        data[:, i], rate, 
+                        lowcut=float(self.bandpass_lowcut.get()), 
+                        highcut=float(self.bandpass_highcut.get()), 
+                        order=int(self.bandpass_order.get())
+                    )
+                else:
+                    ch_data = data[:, i]
+
                 ch_peaks, ch_troughs, _, ch_pulse_widths = pulses.detect_pulses(
-                    data[:, i], 
+                    ch_data, 
                     rate,
                     thresh=self.parameters['thresh'], 
                     min_rel_slope_diff=self.parameters['min_rel_slope_diff'],
