@@ -297,7 +297,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
             # Standard differential extraction between adjacent channels
             snippet = np.diff(data[start_idx:end_idx, filtered_eod_chans[i]:filtered_eod_chans[i]+2]).flatten()
             # Estimate interpolated location for differential
-            diff_location = _estimate_differential_peak_location(
+            diff_location = _estimate_differential_pulse_location(
                 data, peak_idx, trough_idx, filtered_eod_chans[i], n_channels
             )
             pulse_locations.append(diff_location)
@@ -371,7 +371,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
             elif source == 'multich_linear':
                 snippet = np.diff(data[start_idx:end_idx, filtered_eod_chans[i]:filtered_eod_chans[i]+2]).flatten()
                 # Update interpolated location for differential
-                diff_location = _estimate_differential_peak_location(
+                diff_location = _estimate_differential_pulse_location(
                     data, peak_idx, trough_idx, filtered_eod_chans[i], n_channels
                 )
                 pulse_locations[-1] = diff_location
@@ -570,7 +570,7 @@ def _select_differential_channel_pointwise(data, n_channels, peaks, troughs):
     return eod_chan, is_differential, amps, cor_coeffs
 
 
-def _estimate_differential_peak_location(data, peak_idx, trough_idx, channel_idx, n_channels):
+def _estimate_differential_pulse_location(data, peak_idx, trough_idx, channel_idx, n_channels):
     """
     Estimate interpolated peak location for differential extraction.
     
@@ -608,8 +608,11 @@ def _estimate_differential_peak_location(data, peak_idx, trough_idx, channel_idx
         total_weight = ch1_weight + ch2_weight
 
         if total_weight > 0:
-            weight_ch2 = ch2_weight / total_weight
-            interpolated_location = channel_idx + weight_ch2
+            # Use ch1_weight for zero-crossing estimation (parabolic model)
+            # The zero-crossing is closer to the channel with smaller amplitude
+            # Derivation: |A1| = a(x0)^2, |A2| = a(1-x0)^2  =>  x0 = sqrt(A1) / (sqrt(A1) + sqrt(A2))
+            offset = ch1_weight / total_weight
+            interpolated_location = channel_idx + offset
         else:
             # No signal - use midpoint
             interpolated_location = channel_idx + 0.5
@@ -621,7 +624,7 @@ def _estimate_differential_peak_location(data, peak_idx, trough_idx, channel_idx
         return channel_idx + 0.5
 
 
-def _extract_pca_waveform(snippet_multichannel, pca_component=0, interp_points=100, 
+def _extract_pca_waveform(snippet_multichannel, pca_component=0, interp_points=300, 
                          apply_common_average=True):
     """
     Extract EOD waveform using PCA-based noise reduction with 1D spatial interpolation.
