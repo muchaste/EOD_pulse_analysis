@@ -945,7 +945,7 @@ def remove_duplicates(eod_snippets, eod_amps, eod_widths, eod_chan, is_different
     }
     
     # Step 1: Remove proximity-based duplicates
-    arrays_dict, n_proximity_removed = remove_proximity_duplicates(arrays_dict)
+    arrays_dict, n_proximity_removed = remove_proximity_duplicates(arrays_dict, proximity_threshold=parameters.get('duplicate_samples'))
     print(f"    Removed {n_proximity_removed} proximity-based duplicate pulses")
     
     # Step 2: Remove exact duplicates
@@ -1972,7 +1972,7 @@ def create_event_plots(event_id, event_eods, event_data, event_start_time, sampl
                             if not pd.isna(peak_loc):
                                 p1_timestamp = event_start_time + pd.to_timedelta(p1_idx / sample_rate, unit='s')
                                 # Draw thin line from channel offset to pulse_location offset
-                                plt.plot([p1_timestamp, p1_timestamp], [ch * offset_diff, peak_loc * offset_diff], 
+                                plt.plot([p1_timestamp, p1_timestamp], [(ch + 0.5) * offset_diff, peak_loc * offset_diff], 
                                         'k-', linewidth=0.5, alpha=0.6)
                                 # Mark pulse_location with small black marker
                                 plt.plot(p1_timestamp, peak_loc * offset_diff, 'ko', markersize=2, alpha=0.8)
