@@ -27,6 +27,7 @@ from scipy import signal
 # Import from Script 03
 import thunderfish.pulses as pulses
 from pulse_functions import (extract_pulse_snippets, 
+                             remove_duplicates,
                              bandpass_filter,
                              filter_waveforms, 
                              filter_waveforms_with_classifier,
@@ -70,6 +71,7 @@ class PulseDiagnosticTool:
             'max_width_us': 1000,
             'width_fac_detection': 7.0,
             'interp_factor': 3,
+            'duplicate_samples': 5,
             'amplitude_ratio_min': 0.2,
             'amplitude_ratio_max': 4.0,
             'save_filtered_out': False,
@@ -1219,7 +1221,7 @@ class PulseDiagnosticTool:
                 
                 print(f"    Detected {len(unique_pulses)} pulses on single-channel differential data")
             
-            # Process pulses even if none detected - for analysis purposes
+            # Process pulses if any detected
             if len(unique_pulses) > 0:
                 # Extract pulse snippets
                 midpoints = np.array([p[0] for p in unique_pulses])
@@ -1238,6 +1240,22 @@ class PulseDiagnosticTool:
                 )
 
                 print(f"    Filtering for differential pulses...{len(unique_pulses)} total, {np.sum(is_differential)} differential")
+
+                if len(eod_waveforms) == 0:
+                    messagebox.showwarning("    No valid EOD snippets extracted after waveform extraction")
+                    return
+
+                # Remove duplicates
+                (
+                    eod_waveforms, eod_amps, eod_widths, eod_chan, is_differential,
+                    snippet_p1_idc, snippet_p2_idc, 
+                    final_p1_idc, final_p2_idc,
+                    pulse_orientation, amplitude_ratios, fft_peak_freqs, pulse_locations
+                ) = remove_duplicates(
+                    eod_waveforms, eod_amps, eod_widths, eod_chan, is_differential,
+                    snippet_p1_idc, snippet_p2_idc, final_p1_idc, final_p2_idc,
+                    pulse_orientation, amplitude_ratios, fft_peak_freqs, pulse_locations, self.parameters
+                )
 
                 # Filter clipped and low-quality pulses
                 clip_thresh = self.clip_threshold.get()
