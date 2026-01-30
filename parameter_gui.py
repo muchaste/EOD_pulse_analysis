@@ -30,7 +30,7 @@ class ParameterConfigGUI:
         main_frame.columnconfigure(0, weight=1)
         
         # Create canvas and scrollbar (wider for landscape layout)
-        canvas = tk.Canvas(main_frame, height=950, width=700)
+        canvas = tk.Canvas(main_frame, height=1000, width=700)
         scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=canvas.yview)
         scrollable_frame = ttk.Frame(canvas)
         
@@ -140,7 +140,8 @@ class ParameterConfigGUI:
             ('min_rel_slope_diff', 'Min Relative Slope Difference:', 0.25, float),
             ('min_width_us', 'Min Pulse Width (μs):', 30, float),
             ('max_width_us', 'Max Pulse Width (μs):', 1000, float),
-            ('width_fac_detection', 'Width Factor for Detection:', 7.0, float)
+            ('width_fac_detection', 'Width Factor for Detection:', 7.0, float),
+            ('duplicate_samples', 'Duplicate Removal Samples:', 5, int)
         ]
         
         for i, (key, label, default, dtype) in enumerate(detection_params):
