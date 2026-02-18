@@ -316,27 +316,64 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
 
             continue
 
-        # Re-detect peaks/troughs but constrain search area
-        search_window = len(snippet) // 2  # Search within 50% of snippet length
-        center_pos = len(snippet) // 2
+        # # Re-detect peaks/troughs but constrain search area
+        # search_window = len(snippet) # // 2  # Search within 50% of snippet length
+        # center_pos = len(snippet) // 2 - 1 # IMPORTANT - the -1 adjusts for the first index being 0 -.- this took wayyyy too long to figure out!
         
-        # Find peaks in constrained region around center
-        search_start = max(0, center_pos - search_window)
-        search_end = min(len(snippet), center_pos + search_window)
-        search_region = snippet[search_start:search_end]
-        snippet_peak_idx = np.argmax(search_region)
-        snippet_trough_idx = np.argmin(search_region)
+        # # Find peaks in constrained region around center
+        # search_start = max(0, center_pos - (search_window//2))
+        # search_end = min(len(snippet), center_pos + (search_window//2))
+        # search_region = snippet[search_start:search_end]
+        # # ARGMIN/ARGMAX ARE RELATIVELY DUMB BUT THEY ARE MUCH FASTER THAN FIND_PEAKS, AND WE ONLY NEED TO FIND THE MOST EXTREME PEAK/TROUGH IN THIS REGION
+        # # POSSIBLE ISSUE: BASELINE DRIFT
+        # snippet_peak_idx = np.argmax(search_region) + search_start
+        # snippet_trough_idx = np.argmin(search_region) + search_start
+
+        # Alternative approach using find_peaks around the peak and trough indices (very small search window, very low threshold)
+        search_window = 10
+        # Find peaks around the original peak index
+        peak_search_start = max(0, (peak_idx - start_idx) - search_window)
+        peak_search_end = min(len(snippet), (peak_idx - start_idx) + search_window)
+        peak_search_region = snippet[peak_search_start:peak_search_end]
+        peaks_in_region, _ = find_peaks(peak_search_region, height=np.max(peak_search_region)*0.5)
+        if len(peaks_in_region) == 1:
+            snippet_peak_idx = peaks_in_region[0] + peak_search_start
+        elif len(peaks_in_region) > 1:
+            snippet_peak_idx = peaks_in_region[np.argmax(peak_search_region[peaks_in_region])] + peak_search_start
+        elif len(peaks_in_region) == 0:
+            snippet_peak_idx = peak_idx - start_idx  # Fallback to original index if no peak found
+
+        # Find troughs around the original trough index
+        trough_search_start = max(0, (trough_idx - start_idx) - search_window)
+        trough_search_end = min(len(snippet), (trough_idx - start_idx) + search_window)
+        trough_search_region = snippet[trough_search_start:trough_search_end]
+        troughs_in_region, _ = find_peaks(-trough_search_region, height=-np.min(trough_search_region)*0.5)
+        if len(troughs_in_region) == 1:
+            snippet_trough_idx = troughs_in_region[0] + trough_search_start
+        elif len(troughs_in_region) > 1:
+            snippet_trough_idx = troughs_in_region[np.argmin(trough_search_region[troughs_in_region])] + trough_search_start
+        elif len(troughs_in_region) == 0:
+            snippet_trough_idx = trough_idx - start_idx  # Fallback to original index if no trough found
 
         # Update snippet indices based on re-detected peaks/troughs
+        # NEW: if the peak/trough has shifted too much (>10 samples), we will skip this pulse as it may be a sign of a noisy extraction or a different pulse than originally detected. This is a more conservative approach to ensure we are analyzing the correct pulse.
         if snippet_peak_idx != peak_idx - start_idx: # in this case, the peak has shifted
-            peak_diff = snippet_peak_idx - (peak_idx - start_idx)
-            filtered_peak_idc[i] += peak_diff
-            re_extract = True    
+            if abs(snippet_peak_idx - (peak_idx - start_idx)) > 10:
+                # print(f"    Warning: Peak index shifted by {abs(snippet_peak_idx - (peak_idx - start_idx))} samples for pulse {i}. Skipping this pulse.")
+                continue
+            else:
+                peak_diff = snippet_peak_idx - (peak_idx - start_idx)
+                filtered_peak_idc[i] += peak_diff
+                re_extract = True    
 
         if snippet_trough_idx != trough_idx - start_idx: # in this case, the trough has shifted
-            trough_diff = snippet_trough_idx - (trough_idx - start_idx)
-            filtered_trough_idc[i] += trough_diff
-            re_extract = True
+            if abs(snippet_trough_idx - (trough_idx - start_idx)) > 10:
+                # print(f"    Warning: Trough index shifted by {abs(snippet_trough_idx - (trough_idx - start_idx))} samples for pulse {i}. Skipping this pulse.")
+                continue
+            else:
+                trough_diff = snippet_trough_idx - (trough_idx - start_idx)
+                filtered_trough_idc[i] += trough_diff
+                re_extract = True
 
         if re_extract:
             # Re-extract snippet with updated peak/trough indices
