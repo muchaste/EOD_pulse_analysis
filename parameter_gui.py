@@ -136,7 +136,7 @@ class ParameterConfigGUI:
         detection_params = [
             ('thresh', 'Detection Threshold:', 0.02, float),
             ('bandpass_low_cutoff', 'BP Low Cutoff (Hz):', 100, float),
-            ('bandpass_high_cutoff', 'BP High Cutoff (Hz):', 6000, float),
+            ('bandpass_high_cutoff', 'BP High Cutoff (Hz):', 10000, float),
             ('min_rel_slope_diff', 'Min Relative Slope Difference:', 0.25, float),
             ('min_width_us', 'Min Pulse Width (μs):', 30, float),
             ('max_width_us', 'Max Pulse Width (μs):', 1000, float),
@@ -159,12 +159,14 @@ class ParameterConfigGUI:
         # Right column
         
         filter_params = [
-            ('window_length_extraction_us', 'Waveform Window Length (μs):', 4000, float),
             ('interp_factor', 'Interpolation Factor:', 3, int),
             ('amplitude_ratio_min', 'Min Amplitude Ratio:', 0.2, float),
             ('amplitude_ratio_max', 'Max Amplitude Ratio:', 4.0, float),
             ('peak_fft_freq_min', 'Min FFT Peak Frequency (Hz):', 100, float),
             ('peak_fft_freq_max', 'Max FFT Peak Frequency (Hz):', 10000, float),
+            ('extraction_window_length_us', 'Waveform Window Length (μs):', 4000, float),
+            ('extraction_window_factor', 'Waveform Window Factor:', 7.0, float),
+
         ]
         
         for i, (key, label, default, dtype) in enumerate(filter_params):
@@ -189,6 +191,13 @@ class ParameterConfigGUI:
         ttk.Checkbutton(pulse_frame, text="Return only Head-to-Tail", 
                        variable=self.param_vars['return_diff']).grid(
             row=next_row+1, column=3, columnspan=2, sticky=tk.W, pady=2)
+        
+        # Extraction window mode dropdown
+        ttk.Label(pulse_frame, text="Extraction window:").grid(row=next_row+2, column=3, sticky=tk.W, pady=2)
+        self.param_vars['extraction_window'] = tk.StringVar(value='fixed')
+        length_combo = ttk.Combobox(pulse_frame, textvariable=self.param_vars['extraction_window'], 
+                                    values=['fixed', 'variable'], state='readonly', width=12)
+        length_combo.grid(row=next_row+2, column=4, sticky=tk.W, padx=5)
         
         # ===== EVENT CREATION PARAMETERS =====
         event_frame = ttk.LabelFrame(scrollable_frame, text="Event Creation Parameters", padding="10")
@@ -478,6 +487,29 @@ class ParameterConfigGUI:
         # Convert parameter values to appropriate types
         for key, var in self.param_vars.items():
             self.result['parameters'][key] = var.get()
+
+        # Automatically save config to output folder for record-keeping
+        output_folder = self.path_vars['output_path'].get()
+        filename = os.path.join(output_folder, "config.cfg")
+        config = configparser.ConfigParser()
+        config['Paths'] = {k: v.get() for k, v in self.path_vars.items()}
+        config['MachineLearning'] = {
+            'use_ml_filtering': str(self.ml_vars['use_ml_filtering'].get()),
+            'classifier_path': self.ml_vars['classifier_path'].get(),
+            'fish_probability_threshold': str(self.ml_vars['fish_probability_threshold'].get())
+        }
+        config['Parameters'] = {}
+        for key, var in self.param_vars.items():
+            if isinstance(var, tk.BooleanVar):
+                config['Parameters'][key] = str(var.get())
+            else:
+                config['Parameters'][key] = str(var.get())
+        try:
+            with open(filename, 'w') as configfile:
+                config.write(configfile)
+            print(f"Configuration automatically saved to:\n{filename}")
+        except Exception as e:
+            print(f"Failed to automatically save configuration:\n{e}")
         
         self.parent.quit()
         self.parent.destroy()
