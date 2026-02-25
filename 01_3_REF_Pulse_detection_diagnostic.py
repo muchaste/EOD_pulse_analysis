@@ -78,7 +78,9 @@ class PulseDiagnosticTool:
             'peak_fft_freq_min': 50,
             'peak_fft_freq_max': 10000,
             'return_diff': True,
-            'length': 2000
+            'length': 2000,
+            'length_extraction': 'fixed',
+            'length_factor': 10
         }
         
         # Time window parameters (0,0 means use full file)
@@ -102,7 +104,7 @@ class PulseDiagnosticTool:
         # Bandpass configuration variables
         self.use_bandpass_filter = tk.BooleanVar(value=False)
         self.bandpass_lowcut = tk.DoubleVar(value=100.0)
-        self.bandpass_highcut = tk.DoubleVar(value=6000.0)
+        self.bandpass_highcut = tk.DoubleVar(value=10000.0)
         self.bandpass_order = tk.IntVar(value=4)
 
         
@@ -191,7 +193,8 @@ class PulseDiagnosticTool:
         
         # Parameter inputs split into two columns
         self.param_vars = {}
-        param_items = list(self.parameters.items())
+        # Exclude length_extraction from automatic generation (will be a dropdown)
+        param_items = [(k, v) for k, v in self.parameters.items() if k != 'length_extraction']
         mid_point = (len(param_items) + 1) // 2
         
         # Left column parameters
@@ -217,6 +220,20 @@ class PulseDiagnosticTool:
             entry.pack(side=tk.RIGHT)
             entry.bind('<Return>', lambda e: self.detect_pulses())
             self.param_vars[param] = var
+        
+        # Add length_extraction as a dropdown at the bottom of right column
+        length_extr_frame = ttk.Frame(right_param_frame)
+        length_extr_frame.pack(fill=tk.X, pady=1)
+        ttk.Label(length_extr_frame, text="length_extraction", width=18).pack(side=tk.LEFT)
+        self.length_extraction_var = tk.StringVar(value=self.parameters['length_extraction'])
+        length_extr_dropdown = ttk.Combobox(
+            length_extr_frame, 
+            textvariable=self.length_extraction_var, 
+            values=['fixed', 'variable'],
+            state='readonly',
+            width=6
+        )
+        length_extr_dropdown.pack(side=tk.RIGHT)
         
         # Control buttons and settings
         button_frame = ttk.Frame(parent)
@@ -443,137 +460,137 @@ class PulseDiagnosticTool:
             print(f"Selected NI source data: {file_path}")
             print("Click 'Load Data' to load from NI source")
     
-    def load_ni_source_data_old(self):
-        """OLD VERSION - Load data from NI source (.bin file with .txt logfile)"""
-        file_path = filedialog.askopenfilename(
-            title="Select NI Log File",
-            filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
-        )
+    # def load_ni_source_data_old(self):
+    #     """OLD VERSION - Load data from NI source (.bin file with .txt logfile)"""
+    #     file_path = filedialog.askopenfilename(
+    #         title="Select NI Log File",
+    #         filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
+    #     )
         
-        if file_path:
-            try:
-                # Extract filename from path
-                self.file_name = os.path.basename(file_path).replace('log_', '').replace('.txt', '')
+    #     if file_path:
+    #         try:
+    #             # Extract filename from path
+    #             self.file_name = os.path.basename(file_path).replace('log_', '').replace('.txt', '')
                 
-                # Parse log file
-                with open(file_path, 'r') as file:
-                    log_data = {line.split(": ")[0]: line.split(": ")[1].strip() for line in file.readlines()}
+    #             # Parse log file
+    #             with open(file_path, 'r') as file:
+    #                 log_data = {line.split(": ")[0]: line.split(": ")[1].strip() for line in file.readlines()}
 
-                # Get base filepath for data files
-                base_filepath = file_path.split('log_')[0] + file_path.split('log_')[-1].split('.')[0]
-                feather_filepath = base_filepath + '.feather'
-                parquet_filepath = base_filepath + '.parquet'
-                bin_filepath = base_filepath + '.bin'
+    #             # Get base filepath for data files
+    #             base_filepath = file_path.split('log_')[0] + file_path.split('log_')[-1].split('.')[0]
+    #             feather_filepath = base_filepath + '.feather'
+    #             parquet_filepath = base_filepath + '.parquet'
+    #             bin_filepath = base_filepath + '.bin'
 
-                # Extract parameters
-                if "Sample_Rate" in log_data:
-                    sample_rate = int(log_data["Sample_Rate"])
-                elif "Sample Rate" in log_data:
-                    sample_rate = int(log_data["Sample Rate"])
+    #             # Extract parameters
+    #             if "Sample_Rate" in log_data:
+    #                 sample_rate = int(log_data["Sample_Rate"])
+    #             elif "Sample Rate" in log_data:
+    #                 sample_rate = int(log_data["Sample Rate"])
 
-                # Get time window from GUI
-                start_time = float(self.start_time_var.get()) if self.start_time_var.get().strip() else 0.0
-                end_time = float(self.end_time_var.get()) if self.end_time_var.get().strip() else 0.0
+    #             # Get time window from GUI
+    #             start_time = float(self.start_time_var.get()) if self.start_time_var.get().strip() else 0.0
+    #             end_time = float(self.end_time_var.get()) if self.end_time_var.get().strip() else 0.0
                 
-                start_sample = int(start_time * sample_rate)
-                end_sample = None if end_time == 0 else int(end_time * sample_rate)
+    #             start_sample = int(start_time * sample_rate)
+    #             end_sample = None if end_time == 0 else int(end_time * sample_rate)
 
-                # Determine number of channels from log
-                if "N_Input_Channels" in log_data:
-                    n_channels = int(log_data["N_Input_Channels"])
-                elif "Input_Channels" in log_data:
-                    n_channels = len(log_data["Input_Channels"].split(","))
-                elif "Number of Input Channels" in log_data:
-                    n_channels = int(log_data["Number of Input Channels"])
-                else:
-                    n_channels = 1  # fallback
+    #             # Determine number of channels from log
+    #             if "N_Input_Channels" in log_data:
+    #                 n_channels = int(log_data["N_Input_Channels"])
+    #             elif "Input_Channels" in log_data:
+    #                 n_channels = len(log_data["Input_Channels"].split(","))
+    #             elif "Number of Input Channels" in log_data:
+    #                 n_channels = int(log_data["Number of Input Channels"])
+    #             else:
+    #                 n_channels = 1  # fallback
 
-                # # For NI source, only accept single-channel differential data
-                # if n_channels > 1:
-                #     messagebox.showerror("Error", f"NI source with {n_channels} channels not supported.\nOnly single-channel differential data is supported for NI source.")
-                #     return
+    #             # # For NI source, only accept single-channel differential data
+    #             # if n_channels > 1:
+    #             #     messagebox.showerror("Error", f"NI source with {n_channels} channels not supported.\nOnly single-channel differential data is supported for NI source.")
+    #             #     return
 
-                n_cols = n_channels + 1  # time_ms + channels
+    #             n_cols = n_channels + 1  # time_ms + channels
 
-                # Load data from available file format
-                data = None
-                if os.path.exists(bin_filepath):
-                    # Load from .bin file
-                    if end_sample is not None:
-                        n_samples = end_sample - start_sample
-                        offset = start_sample * n_cols * 8  # float64 = 8 bytes
-                        with open(bin_filepath, 'rb') as f:
-                            f.seek(offset)
-                            raw_data = np.fromfile(f, dtype='f8', count=n_samples * n_cols)
-                    else:
-                        offset = start_sample * n_cols * 8
-                        with open(bin_filepath, 'rb') as f:
-                            f.seek(offset)
-                            raw_data = np.fromfile(f, dtype='f8')
-                    reshaped = raw_data.reshape(-1, n_cols)
-                    columns = ['time_ms'] + [f'ch{i+1}' for i in range(n_channels)]
-                    data = pd.DataFrame(reshaped, columns=columns)
+    #             # Load data from available file format
+    #             data = None
+    #             if os.path.exists(bin_filepath):
+    #                 # Load from .bin file
+    #                 if end_sample is not None:
+    #                     n_samples = end_sample - start_sample
+    #                     offset = start_sample * n_cols * 8  # float64 = 8 bytes
+    #                     with open(bin_filepath, 'rb') as f:
+    #                         f.seek(offset)
+    #                         raw_data = np.fromfile(f, dtype='f8', count=n_samples * n_cols)
+    #                 else:
+    #                     offset = start_sample * n_cols * 8
+    #                     with open(bin_filepath, 'rb') as f:
+    #                         f.seek(offset)
+    #                         raw_data = np.fromfile(f, dtype='f8')
+    #                 reshaped = raw_data.reshape(-1, n_cols)
+    #                 columns = ['time_ms'] + [f'ch{i+1}' for i in range(n_channels)]
+    #                 data = pd.DataFrame(reshaped, columns=columns)
 
-                elif os.path.exists(feather_filepath):
-                    try:
-                        import pyarrow.feather as feather
-                        table = feather.read_table(feather_filepath)
-                        if end_sample is None:
-                            table = table.slice(start_sample)
-                        else:
-                            table = table.slice(start_sample, end_sample - start_sample)
-                        data = table.to_pandas()
-                    except ImportError:
-                        raise ImportError("pyarrow not available for .feather file reading")
+    #             elif os.path.exists(feather_filepath):
+    #                 try:
+    #                     import pyarrow.feather as feather
+    #                     table = feather.read_table(feather_filepath)
+    #                     if end_sample is None:
+    #                         table = table.slice(start_sample)
+    #                     else:
+    #                         table = table.slice(start_sample, end_sample - start_sample)
+    #                     data = table.to_pandas()
+    #                 except ImportError:
+    #                     raise ImportError("pyarrow not available for .feather file reading")
 
-                elif os.path.exists(parquet_filepath):
-                    try:
-                        import pyarrow.parquet as pq
-                        table = pq.read_table(parquet_filepath)
-                        if end_sample is None:
-                            table = table.slice(start_sample)
-                        else:
-                            table = table.slice(start_sample, end_sample - start_sample)
-                        data = table.to_pandas()
-                    except ImportError:
-                        raise ImportError("pyarrow not available for .parquet file reading")
+    #             elif os.path.exists(parquet_filepath):
+    #                 try:
+    #                     import pyarrow.parquet as pq
+    #                     table = pq.read_table(parquet_filepath)
+    #                     if end_sample is None:
+    #                         table = table.slice(start_sample)
+    #                     else:
+    #                         table = table.slice(start_sample, end_sample - start_sample)
+    #                     data = table.to_pandas()
+    #                 except ImportError:
+    #                     raise ImportError("pyarrow not available for .parquet file reading")
 
-                else:
-                    raise FileNotFoundError("Expected data file (.bin, .feather, or .parquet) not found.")
+    #             else:
+    #                 raise FileNotFoundError("Expected data file (.bin, .feather, or .parquet) not found.")
 
-                # Convert to audio format (remove time column, keep only channels)
-                channel_columns = [col for col in data.columns if col.startswith('ch')]
-                audio_data = data[channel_columns].values
+    #             # Convert to audio format (remove time column, keep only channels)
+    #             channel_columns = [col for col in data.columns if col.startswith('ch')]
+    #             audio_data = data[channel_columns].values
                 
-                # Set data
-                self.raw_data = audio_data
-                self.sample_rate = sample_rate
-                self.calibrated_data = audio_data.copy()  # NI data doesn't need calibration
+    #             # Set data
+    #             self.raw_data = audio_data
+    #             self.sample_rate = sample_rate
+    #             self.calibrated_data = audio_data.copy()  # NI data doesn't need calibration
                 
-                # Store metadata for reloading
-                self.source_file_path = file_path
-                self.source_file_type = 'ni_source'
-                self.calibration_factors = None
-                self.calibration_file_path = None
-                self.full_data = None  # NI source: don't cache, reload on demand
+    #             # Store metadata for reloading
+    #             self.source_file_path = file_path
+    #             self.source_file_type = 'ni_source'
+    #             self.calibration_factors = None
+    #             self.calibration_file_path = None
+    #             self.full_data = None  # NI source: don't cache, reload on demand
                 
-                actual_end = (len(audio_data) / sample_rate) + start_time if end_time == 0 else end_time
-                self.loaded_time_window = {'start_sec': start_time, 'end_sec': actual_end}
+    #             actual_end = (len(audio_data) / sample_rate) + start_time if end_time == 0 else end_time
+    #             self.loaded_time_window = {'start_sec': start_time, 'end_sec': actual_end}
                 
-                # Set data source to single-channel differential (NI source assumption)
-                self.data_source = '1ch_diff'
+    #             # Set data source to single-channel differential (NI source assumption)
+    #             self.data_source = '1ch_diff'
                 
-                self.update_file_info()
-                print(f"Loaded NI source data: {file_path}")
-                print(f"Shape: {self.calibrated_data.shape}, Sample rate: {self.sample_rate}")
-                print(f"Channels: {n_channels}, Time window: {start_time}-{end_time}s")
+    #             self.update_file_info()
+    #             print(f"Loaded NI source data: {file_path}")
+    #             print(f"Shape: {self.calibrated_data.shape}, Sample rate: {self.sample_rate}")
+    #             print(f"Channels: {n_channels}, Time window: {start_time}-{end_time}s")
                 
-                # Plot the data immediately
-                self.data()
+    #             # Plot the data immediately
+    #             self.data()
                 
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to load NI source data:\n{str(e)}")
-                print(f"Full error: {e}")
+    #         except Exception as e:
+    #             messagebox.showerror("Error", f"Failed to load NI source data:\n{str(e)}")
+    #             print(f"Full error: {e}")
     
     def load_data(self):
         """Unified data loading function - loads data based on selected file type and time window"""
@@ -1095,10 +1112,13 @@ class PulseDiagnosticTool:
                 
                 if param in ['save_filtered_out', 'return_diff']:
                     self.parameters[param] = value_str.lower() in ['true', '1', 'yes', 'on']
-                elif param in ['interp_factor', 'min_width_us', 'max_width_us', 'peak_fft_freq_min', 'peak_fft_freq_max', 'length']:
+                elif param in ['interp_factor', 'min_width_us', 'max_width_us', 'peak_fft_freq_min', 'peak_fft_freq_max', 'length', 'length_factor']:
                     self.parameters[param] = int(float(value_str))
                 else:
                     self.parameters[param] = float(value_str)
+            
+            # Update length_extraction from dropdown
+            self.parameters['length_extraction'] = self.length_extraction_var.get()
                     
         except ValueError as e:
             messagebox.showerror("Parameter Error", f"Invalid parameter value: {str(e)}")
@@ -1141,51 +1161,36 @@ class PulseDiagnosticTool:
             if start_sec < 0:
                 start_sec = 0
             
-            # # Apply time windowing if specified
-            # if start_sec > 0 or end_sec > 0:
-            #     total_duration = len(data) / rate
-            #     if end_sec <= 0:
-            #         end_sec = total_duration
-                    
-            #     if start_sec < 0:
-            #         start_sec = 0
-                    
-            #     if start_sec >= end_sec:
-            #         messagebox.showerror("Error", "Start time must be less than end time")
-            #         return
-                    
-            #     if end_sec > total_duration:
-            #         end_sec = total_duration
-            #         messagebox.showwarning("Warning", f"End time adjusted to file duration: {end_sec:.2f}s")
-                
-            #     start_idx = int(start_sec * rate)
-            #     end_idx = int(end_sec * rate)
-            #     data = data[start_idx:end_idx, :]
-                
-            #     print(f"Using time window: {start_sec:.2f}s to {end_sec:.2f}s ({len(data)} samples)")
-            # else:
-            #     start_sec = 0
-            #     end_sec = len(data) / rate
-            #     print(f"Using full recording: {end_sec:.2f}s ({len(data)} samples)")
-            
             print(f"Detecting pulses on {n_channels} channels...")
             
+            # Create differential data for detection (if multi-channel linear)
+            if self.data_source == 'multich_linear' and self.plot_mode.get() == 'differential':
+                data_detect = np.diff(data, axis=1)
+                n_detect_channels = n_channels - 1
+            elif self.data_source == 'multich_linear' and self.plot_mode.get() == 'single_ended':
+                data_detect = data  # Use single-ended data for detection
+                n_detect_channels = n_channels
+            elif self.data_source == '1ch_diff':
+                # Single-channel differential - data is already differential
+                data_detect = data
+                n_detect_channels = 1
+
             # Detect pulses on each channel
             all_peaks = []
             all_troughs = []
             all_widths = []
             
-            for i in range(n_channels):
+            for i in range(n_detect_channels):
                 if self.use_bandpass_filter.get():
                     # Apply bandpass filter before detection
                     ch_data = bandpass_filter(
-                        data[:, i], rate, 
+                        data_detect[:, i], rate, 
                         lowcut=float(self.bandpass_lowcut.get()), 
                         highcut=float(self.bandpass_highcut.get()), 
                         order=int(self.bandpass_order.get())
                     )
                 else:
-                    ch_data = data[:, i]
+                    ch_data = data_detect[:, i]
 
                 ch_peaks, ch_troughs, _, ch_pulse_widths = pulses.detect_pulses(
                     ch_data, 
@@ -1233,10 +1238,15 @@ class PulseDiagnosticTool:
                 (
                     eod_waveforms, eod_amps, eod_widths, eod_chan, is_differential,
                     snippet_p1_idc, snippet_p2_idc, final_p1_idc, final_p2_idc, 
-                    pulse_orientation, amplitude_ratios, fft_peak_freqs, pulse_locations
+                    pulse_orientation, amplitude_ratios, fft_peak_freqs, pulse_locations,
+                    wf_lengths
                 ) = extract_pulse_snippets(
-                    data, peaks, troughs, rate = rate, length = self.parameters['length'], 
-                    source=self.data_source, return_differential=self.parameters['return_diff']
+                    data, peaks, troughs, rate = rate,  
+                    source=self.data_source, return_differential=self.parameters['return_diff'],
+                    interp_factor=self.parameters['interp_factor'],
+                    window_mode=self.parameters['length_extraction'],
+                    window_factor=int(self.parameters['length_factor']),
+                    window_length=self.parameters['length']
                 )
 
                 print(f"    Filtering for differential pulses...{len(unique_pulses)} total, {np.sum(is_differential)} differential")
@@ -1250,11 +1260,13 @@ class PulseDiagnosticTool:
                     eod_waveforms, eod_amps, eod_widths, eod_chan, is_differential,
                     snippet_p1_idc, snippet_p2_idc, 
                     final_p1_idc, final_p2_idc,
-                    pulse_orientation, amplitude_ratios, fft_peak_freqs, pulse_locations
+                    pulse_orientation, amplitude_ratios, fft_peak_freqs, pulse_locations,
+                    wf_lengths
                 ) = remove_duplicates(
                     eod_waveforms, eod_amps, eod_widths, eod_chan, is_differential,
                     snippet_p1_idc, snippet_p2_idc, final_p1_idc, final_p2_idc,
-                    pulse_orientation, amplitude_ratios, fft_peak_freqs, pulse_locations, self.parameters
+                    pulse_orientation, amplitude_ratios, fft_peak_freqs, pulse_locations,
+                    wf_lengths, self.parameters
                 )
 
                 # Filter clipped and low-quality pulses
@@ -1277,26 +1289,27 @@ class PulseDiagnosticTool:
                 # Convert boolean mask to integer indices for indexing
                 non_clipped_indices = np.where(non_clipped_mask)[0]
                 
-                # Convert to numpy arrays if needed for proper indexing
-                eod_waveforms = np.array(eod_waveforms)[non_clipped_indices]
-                eod_amps = np.array(eod_amps)[non_clipped_indices]
-                eod_widths = np.array(eod_widths)[non_clipped_indices]
-                eod_chan = np.array(eod_chan)[non_clipped_indices]
-                is_differential = np.array(is_differential)[non_clipped_indices]
-                amplitude_ratios = np.array(amplitude_ratios)[non_clipped_indices]
-                fft_peak_freqs = np.array(fft_peak_freqs)[non_clipped_indices]
-                final_p1_idc = np.array(final_p1_idc)[non_clipped_indices]
-                final_p2_idc = np.array(final_p2_idc)[non_clipped_indices]
-                snippet_p1_idc = np.array(snippet_p1_idc)[non_clipped_indices]
-                snippet_p2_idc = np.array(snippet_p2_idc)[non_clipped_indices]
-                pulse_orientation = np.array(pulse_orientation)[non_clipped_indices]
-                pulse_locations = np.array(pulse_locations)[non_clipped_indices]
+                # Filter arrays - use list comprehension for waveforms (variable length)
+                eod_waveforms = [eod_waveforms[i] for i in non_clipped_indices]
+                eod_amps = eod_amps[non_clipped_indices]
+                eod_widths = eod_widths[non_clipped_indices]
+                eod_chan = eod_chan[non_clipped_indices]
+                is_differential = is_differential[non_clipped_indices]
+                amplitude_ratios = amplitude_ratios[non_clipped_indices]
+                fft_peak_freqs = fft_peak_freqs[non_clipped_indices]
+                final_p1_idc = final_p1_idc[non_clipped_indices]
+                final_p2_idc = final_p2_idc[non_clipped_indices]
+                snippet_p1_idc = snippet_p1_idc[non_clipped_indices]
+                snippet_p2_idc = snippet_p2_idc[non_clipped_indices]
+                pulse_orientation = pulse_orientation[non_clipped_indices]
+                pulse_locations = pulse_locations[non_clipped_indices]
 
                 # Select top x% by amplitude
                 n_top = max(1, int(len(eod_amps) * top_pct / 100.0))
                 top_indices = np.argsort(eod_amps)[-n_top:]
 
-                eod_waveforms = eod_waveforms[top_indices]
+                # Filter again - use list comprehension for waveforms (variable length)
+                eod_waveforms = [eod_waveforms[i] for i in top_indices]
                 eod_amps = eod_amps[top_indices]
                 eod_widths = eod_widths[top_indices]
                 eod_chan = eod_chan[top_indices]
@@ -1305,9 +1318,9 @@ class PulseDiagnosticTool:
                 fft_peak_freqs = fft_peak_freqs[top_indices]
                 final_p1_idc = final_p1_idc[top_indices]
                 final_p2_idc = final_p2_idc[top_indices]
-                snippet_p1_idc = np.array(snippet_p1_idc)[top_indices]
-                snippet_p2_idc = np.array(snippet_p2_idc)[top_indices]
-                pulse_orientation = np.array(pulse_orientation)[top_indices]
+                snippet_p1_idc = snippet_p1_idc[top_indices]
+                snippet_p2_idc = snippet_p2_idc[top_indices]
+                pulse_orientation = pulse_orientation[top_indices]
                 pulse_locations = pulse_locations[top_indices]
 
                 print(f"Analyzing {len(eod_waveforms)} pulses (top {top_pct}% below clip threshold {clip_thresh})")
@@ -1352,7 +1365,7 @@ class PulseDiagnosticTool:
                 
                 # Split data into kept and filtered_out sets
                 kept_data = {
-                    'eod_waveforms': eod_waveforms[keep_indices],
+                    'eod_waveforms': [eod_waveforms[i] for i in keep_indices],
                     'eod_amps': eod_amps[keep_indices], 
                     'eod_widths': eod_widths[keep_indices],
                     'amplitude_ratios': amplitude_ratios[keep_indices],
@@ -1804,7 +1817,11 @@ Current Parameters:
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         
         # Normalize waveforms for overlay plot with normalize_waveforms function
-        normalized_waveforms = np.array(normalize_waveforms(waveforms, snippet_p1_idc, snippet_p2_idc))
+        # Use crop_and_interpolate=True to ensure fixed-length output for variable-length extraction
+        normalized_waveforms = np.array(normalize_waveforms(
+            waveforms, snippet_p1_idc, snippet_p2_idc, 
+            crop_and_interpolate=True, target_length=150
+        ))
         
         # Time axis for waveforms (centered around 0)
         n_samples = normalized_waveforms.shape[1]
