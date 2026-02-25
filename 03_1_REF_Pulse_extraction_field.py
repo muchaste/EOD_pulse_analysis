@@ -668,7 +668,7 @@ for n, filepath in enumerate(file_set['filename']):
                 
                 # Calculate IPIs for this event
                 event_sorted = event_eods.sort_values('timestamp_dt')
-                time_diffs = event_sorted['timestamp_dt'].diff().dt.total_seconds().dropna()
+                # time_diffs = event_sorted['timestamp_dt'].diff().dt.total_seconds().dropna()
                 
                 summary = {
                     'event_id': event_id,
@@ -680,8 +680,9 @@ for n, filepath in enumerate(file_set['filename']):
                     'n_eods': len(event_eods),
                     'n_channels': event_eods['eod_channel'].nunique(),
                     'channels_used': ','.join(map(str, sorted(event_eods['eod_channel'].unique()))),
-                    'mean_ipi_seconds': time_diffs.mean() if len(time_diffs) > 0 else 0,
-                    'median_ipi_seconds': time_diffs.median() if len(time_diffs) > 0 else 0,
+                    'mean_ipi_seconds': event_eods['channel_ipi_seconds'].mean(),
+                    'ipi_cv': event_eods['channel_ipi_seconds'].std() / event_eods['channel_ipi_seconds'].mean() if event_eods['channel_ipi_seconds'].mean() > 0 else 0,
+                    'median_ipi_seconds': event_eods['channel_ipi_seconds'].median(),
                     'mean_amplitude': event_eods['eod_amplitude'].mean(),
                     'max_amplitude': event_eods['eod_amplitude'].max(),
                     'mean_width_ms': event_eods['eod_width_us'].mean() / 1000 if 'eod_width_us' in event_eods.columns else 0,
