@@ -30,7 +30,7 @@ output_path = filedialog.askdirectory(title = "Select Folder to Store Analysis R
 # list all .wav files in the folder
 # file_list = glob.glob(folder_path + "/*.wav")
 # file_list = file_list[::7]
-logger_id = file_list[0].split('/')[-1].split('_')[0]
+logger_id = file_list[0].split('/')[-1].split('-')[0]
 print("Logger ID: %s"%(logger_id))
 
 # The correction factors from all files should be stored with an index and name of the file they belong to
