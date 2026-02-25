@@ -27,7 +27,8 @@ from pulse_functions import (
     remove_duplicates,
     filter_waveforms,
     filter_waveforms_with_classifier,
-    save_fixed_length_waveforms,
+    save_waveforms,
+    # save_fixed_length_waveforms,
     create_channel_events,
     merge_channel_events,
     filter_events,
@@ -278,19 +279,31 @@ for n, filepath in enumerate(file_set['filename']):
             (
                 eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
                 snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc, 
-                pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations
+                pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations,
+                wf_lengths
             ) = extract_pulse_snippets(
-                data, unique_peaks, unique_troughs, rate = rate, length = parameters['window_length_extraction_us'],
-                source = 'multich_linear', return_differential = parameters['return_diff'], use_pca=False, pca_interp_points = 300
+                data, unique_peaks, unique_troughs, rate = rate,
+                source = 'multich_linear', return_differential = parameters['return_diff'], 
+                interp_factor=parameters['interp_factor'],
+                use_pca=False,
+                window_mode = parameters['extraction_window'],
+                window_factor = parameters['extraction_window_factor'],
+                window_length = parameters['extraction_window_length_us']
             )
         elif parameters['waveform_extraction'] == 'PCA':
             (
                 eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
                 snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc, 
-                pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations
+                pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations,
+                wf_lengths
             ) = extract_pulse_snippets(
-                data, unique_peaks, unique_troughs, rate = rate, length = parameters['window_length_extraction_us'],
-                source = 'multich_linear', return_differential = parameters['return_diff'], use_pca=True, pca_interp_points = 300
+                data, unique_peaks, unique_troughs, rate = rate,
+                source = 'multich_linear', return_differential = parameters['return_diff'], 
+                interp_factor=parameters['interp_factor'],
+                use_pca=True, pca_interp_points = 300,
+                window_mode = parameters['extraction_window'],
+                window_factor = parameters['extraction_window_factor'],
+                window_length = parameters['extraction_window_length_us']
             )
 
         if len(eod_snippets) == 0:
@@ -302,11 +315,11 @@ for n, filepath in enumerate(file_set['filename']):
             eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
             snippet_p1_idc, snippet_p2_idc, 
             raw_p1_idc, raw_p2_idc,
-            pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations
+            pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations, wf_lengths
         ) = remove_duplicates(
             eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
             snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc,
-            pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations, parameters
+            pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations, wf_lengths, parameters
         )
         
         if len(eod_snippets) == 0:
@@ -427,8 +440,8 @@ for n, filepath in enumerate(file_set['filename']):
             if len(keep_indices) > 0:
                 try:
                     waveform_base = os.path.join(output_path, f'{fname[:-4]}_eod_waveforms')
-                    waveform_metadata = save_fixed_length_waveforms(
-                        filtered_eod_waveforms, waveform_base
+                    waveform_metadata = save_waveforms(
+                        filtered_eod_waveforms, waveform_base, length=parameters['extraction_window']
                     )
                     
                 except Exception as e:
@@ -542,7 +555,7 @@ for n, filepath in enumerate(file_set['filename']):
                     # Save filtered-out waveforms
                     if len(filteredout_eod_waveforms) > 0:
                         filteredout_waveform_base = os.path.join(output_path, f'{fname[:-4]}_eod_waveforms_filteredout')
-                        save_fixed_length_waveforms(filteredout_eod_waveforms, filteredout_waveform_base)
+                        save_waveforms(filteredout_eod_waveforms, filteredout_waveform_base, length=parameters['extraction_window'])
 
                 except Exception as e:
                     print(f"    Warning: QC file creation failed: {e}")
@@ -690,7 +703,7 @@ for n, filepath in enumerate(file_set['filename']):
                 event_eod_waveforms = [filtered_eod_waveforms[i] for i in event_eod_indices]
                 if len(event_eod_waveforms) > 0:
                     event_waveform_base = os.path.join(output_path, f'{fname[:-4]}_event_{event_id}_waveforms')
-                    save_fixed_length_waveforms(event_eod_waveforms, event_waveform_base)
+                    save_waveforms(event_eod_waveforms, event_waveform_base, length=parameters['extraction_window'])
                     print(f"      Saved event waveforms: {event_waveform_base}_waveforms")
 
                 # Save audio segment for this event
