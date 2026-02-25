@@ -105,9 +105,10 @@ def unify_across_channels(peaks, troughs, pulse_widths):
 
     return unique_midpoints, unique_peaks, unique_troughs, unique_widths
 
-def extract_pulse_snippets(data, peaks, troughs, rate, length,
-                           source, return_differential=True, use_pca=False,
-                           pca_component=0, pca_interp_points=100):
+def extract_pulse_snippets(data, peaks, troughs, rate, 
+                           source, return_differential=True, interp_factor=1,
+                           use_pca=False, pca_component=0, pca_interp_points=100,
+                           window_mode="fixed", window_factor=7, window_length = 4000):
     """
     Extract and analyze EOD snippets with variable widths based on detected pulse widths.
     For 2-D multi-channel data (finds polarity flips and extracts differential signals OR
@@ -124,14 +125,14 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
         Trough indices of unique pulses
     rate : int
         Sampling rate    
-    length : int
-        Length (in microseconds) of waveform snippets to extract around each pulse midpoint
     source : str
         Source of data:
         - '1ch_diff' : single-channel differential data (control recordings)
         - 'multich_linear' : multi-channel data with linear electrode arrangement (field recordings)
     return_differential : bool
         Whether to keep only differential pulses (default True, ignored if use_pca=True)
+    interp_factor : int
+        Interpolation factor for waveform extraction (default 1, no interpolation)
     use_pca : bool
         If True, use PCA-based extraction with spatial interpolation instead of differential.
         This method reduces noise by projecting multi-channel data onto principal components
@@ -144,6 +145,17 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
         Number of interpolation points for 1D spatial interpolation along electrode array.
         Default 100 provides high spatial resolution for locating signal maxima.
         Only used when use_pca=True.
+    window_mode : str, optional
+        Method for determining snippet length:
+        - 'fixed' : Use fixed length specified by 'window_length' parameter (default)
+        - 'variable' : Calculate length as peak-to-peak distance × window_factor
+    window_factor : int, optional
+        Multiplicative factor for variable-length extraction (default 7).
+        Snippet length = (peak-to-trough distance) × window_factor.
+        Only used when window_mode='variable'.
+    window_length : int, optional
+        Length (in microseconds) of waveform snippets to extract around each pulse midpoint.
+        Only used when window_mode='fixed'.
     
     Returns
     -------
@@ -183,6 +195,8 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
         For PCA: Based on cubic spline interpolation of spatial amplitude profile.
         For differential: Based on amplitude-weighted average between channel pairs.
         For single-channel: Always 0.0.
+    waveform_lengths : 1-D array
+        Actual length (in samples) of each extracted waveform snippet.
     """
 
     if source == '1ch_diff':
@@ -254,6 +268,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
     fft_peak_freqs = []
     pca_variance_explained = []  # Track PCA quality
     pulse_locations = []  # Track interpolated peak locations (for both PCA and differential)
+    waveform_lengths = []  # Track actual waveform lengths
     re_extract = False
     
     for i in range(n_pulses_diff):
@@ -262,7 +277,17 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
 
         # Determine center and length for snippet extraction
         center_idx = (peak_idx + trough_idx) // 2
-        wf_length = int(length * rate / 1e6)
+        
+        # Calculate wf_length based on extraction method
+        if window_mode == "fixed":
+            wf_length = int(window_length * rate / 1e6)
+        elif window_mode == "variable":
+            # Variable length: multiply peak-to-trough distance by window_factor
+            peak_to_trough_distance = abs(peak_idx - trough_idx)
+            wf_length = int(peak_to_trough_distance * window_factor)
+        else:
+            raise ValueError(f"Invalid window_mode: {window_mode}. Use 'fixed' or 'variable'.")
+        
         start_idx = max(0, center_idx - wf_length // 2)
         end_idx = min(data.shape[0], center_idx + wf_length // 2)
 
@@ -313,67 +338,78 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
             amplitude_ratios.append(0.0)
             eod_widths.append(0)
             fft_peak_freqs.append(0.0)
+            waveform_lengths.append(0)
 
             continue
 
-        # # Re-detect peaks/troughs but constrain search area
-        # search_window = len(snippet) # // 2  # Search within 50% of snippet length
-        # center_pos = len(snippet) // 2 - 1 # IMPORTANT - the -1 adjusts for the first index being 0 -.- this took wayyyy too long to figure out!
+        # Re-detect peaks/troughs but constrain search area
+        search_window = len(snippet) # // 2  # Search within 50% of snippet length
+        center_pos = len(snippet) // 2 - 1 # IMPORTANT - the -1 adjusts for the first index being 0 -.- this took wayyyy too long to figure out!
         
-        # # Find peaks in constrained region around center
-        # search_start = max(0, center_pos - (search_window//2))
-        # search_end = min(len(snippet), center_pos + (search_window//2))
-        # search_region = snippet[search_start:search_end]
-        # # ARGMIN/ARGMAX ARE RELATIVELY DUMB BUT THEY ARE MUCH FASTER THAN FIND_PEAKS, AND WE ONLY NEED TO FIND THE MOST EXTREME PEAK/TROUGH IN THIS REGION
-        # # POSSIBLE ISSUE: BASELINE DRIFT
-        # snippet_peak_idx = np.argmax(search_region) + search_start
-        # snippet_trough_idx = np.argmin(search_region) + search_start
+        # Find peaks in constrained region around center
+        search_start = max(0, center_pos - (search_window//2))
+        search_end = min(len(snippet), center_pos + (search_window//2))
+        search_region = snippet[search_start:search_end]
+        # ARGMIN/ARGMAX ARE RELATIVELY DUMB BUT THEY ARE MUCH FASTER THAN FIND_PEAKS, AND WE ONLY NEED TO FIND THE MOST EXTREME PEAK/TROUGH IN THIS REGION
+        # POSSIBLE ISSUE: BASELINE DRIFT
+        snippet_peak_idx = np.argmax(search_region) + search_start
+        snippet_trough_idx = np.argmin(search_region) + search_start
 
-        # Alternative approach using find_peaks around the peak and trough indices (very small search window, very low threshold)
-        search_window = 10
-        # Find peaks around the original peak index
-        peak_search_start = max(0, (peak_idx - start_idx) - search_window)
-        peak_search_end = min(len(snippet), (peak_idx - start_idx) + search_window)
-        peak_search_region = snippet[peak_search_start:peak_search_end]
-        peaks_in_region, _ = find_peaks(peak_search_region, height=np.max(peak_search_region)*0.5)
-        if len(peaks_in_region) == 1:
-            snippet_peak_idx = peaks_in_region[0] + peak_search_start
-        elif len(peaks_in_region) > 1:
-            snippet_peak_idx = peaks_in_region[np.argmax(peak_search_region[peaks_in_region])] + peak_search_start
-        elif len(peaks_in_region) == 0:
-            snippet_peak_idx = peak_idx - start_idx  # Fallback to original index if no peak found
+        # # Alternative approach using find_peaks around the peak and trough indices (very small search window, very low threshold)
+        # search_window = 10
+        # # Find peaks around the original peak index
+        # peak_search_start = max(0, (peak_idx - start_idx) - search_window)
+        # peak_search_end = min(len(snippet), (peak_idx - start_idx) + search_window)
+        # peak_search_region = snippet[peak_search_start:peak_search_end]
+        # peaks_in_region, _ = find_peaks(peak_search_region, height=np.max(peak_search_region)*0.5)
+        # if len(peaks_in_region) == 1:
+        #     snippet_peak_idx = peaks_in_region[0] + peak_search_start
+        # elif len(peaks_in_region) > 1:
+        #     snippet_peak_idx = peaks_in_region[np.argmax(peak_search_region[peaks_in_region])] + peak_search_start
+        # elif len(peaks_in_region) == 0:
+        #     snippet_peak_idx = peak_idx - start_idx  # Fallback to original index if no peak found
 
-        # Find troughs around the original trough index
-        trough_search_start = max(0, (trough_idx - start_idx) - search_window)
-        trough_search_end = min(len(snippet), (trough_idx - start_idx) + search_window)
-        trough_search_region = snippet[trough_search_start:trough_search_end]
-        troughs_in_region, _ = find_peaks(-trough_search_region, height=-np.min(trough_search_region)*0.5)
-        if len(troughs_in_region) == 1:
-            snippet_trough_idx = troughs_in_region[0] + trough_search_start
-        elif len(troughs_in_region) > 1:
-            snippet_trough_idx = troughs_in_region[np.argmin(trough_search_region[troughs_in_region])] + trough_search_start
-        elif len(troughs_in_region) == 0:
-            snippet_trough_idx = trough_idx - start_idx  # Fallback to original index if no trough found
+        # # Find troughs around the original trough index
+        # trough_search_start = max(0, (trough_idx - start_idx) - search_window)
+        # trough_search_end = min(len(snippet), (trough_idx - start_idx) + search_window)
+        # trough_search_region = snippet[trough_search_start:trough_search_end]
+        # troughs_in_region, _ = find_peaks(-trough_search_region, height=-np.min(trough_search_region)*0.5)
+        # if len(troughs_in_region) == 1:
+        #     snippet_trough_idx = troughs_in_region[0] + trough_search_start
+        # elif len(troughs_in_region) > 1:
+        #     snippet_trough_idx = troughs_in_region[np.argmin(trough_search_region[troughs_in_region])] + trough_search_start
+        # elif len(troughs_in_region) == 0:
+        #     snippet_trough_idx = trough_idx - start_idx  # Fallback to original index if no trough found
 
         # Update snippet indices based on re-detected peaks/troughs
-        # NEW: if the peak/trough has shifted too much (>10 samples), we will skip this pulse as it may be a sign of a noisy extraction or a different pulse than originally detected. This is a more conservative approach to ensure we are analyzing the correct pulse.
         if snippet_peak_idx != peak_idx - start_idx: # in this case, the peak has shifted
-            if abs(snippet_peak_idx - (peak_idx - start_idx)) > 10:
-                # print(f"    Warning: Peak index shifted by {abs(snippet_peak_idx - (peak_idx - start_idx))} samples for pulse {i}. Skipping this pulse.")
-                continue
-            else:
-                peak_diff = snippet_peak_idx - (peak_idx - start_idx)
-                filtered_peak_idc[i] += peak_diff
-                re_extract = True    
+            peak_diff = snippet_peak_idx - (peak_idx - start_idx)
+            filtered_peak_idc[i] += peak_diff
+            re_extract = True    
 
         if snippet_trough_idx != trough_idx - start_idx: # in this case, the trough has shifted
-            if abs(snippet_trough_idx - (trough_idx - start_idx)) > 10:
-                # print(f"    Warning: Trough index shifted by {abs(snippet_trough_idx - (trough_idx - start_idx))} samples for pulse {i}. Skipping this pulse.")
-                continue
-            else:
-                trough_diff = snippet_trough_idx - (trough_idx - start_idx)
-                filtered_trough_idc[i] += trough_diff
-                re_extract = True
+            trough_diff = snippet_trough_idx - (trough_idx - start_idx)
+            filtered_trough_idc[i] += trough_diff
+            re_extract = True
+
+        # # NEW: if the peak/trough has shifted too much (>10 samples), we will skip this pulse as it may be a sign of a noisy extraction or a different pulse than originally detected. This is a more conservative approach to ensure we are analyzing the correct pulse.
+        # if snippet_peak_idx != peak_idx - start_idx: # in this case, the peak has shifted
+        #     if abs(snippet_peak_idx - (peak_idx - start_idx)) > 10:
+        #         # print(f"    Warning: Peak index shifted by {abs(snippet_peak_idx - (peak_idx - start_idx))} samples for pulse {i}. Skipping this pulse.")
+        #         continue
+        #     else:
+        #         peak_diff = snippet_peak_idx - (peak_idx - start_idx)
+        #         filtered_peak_idc[i] += peak_diff
+        #         re_extract = True    
+
+        # if snippet_trough_idx != trough_idx - start_idx: # in this case, the trough has shifted
+        #     if abs(snippet_trough_idx - (trough_idx - start_idx)) > 10:
+        #         # print(f"    Warning: Trough index shifted by {abs(snippet_trough_idx - (trough_idx - start_idx))} samples for pulse {i}. Skipping this pulse.")
+        #         continue
+        #     else:
+        #         trough_diff = snippet_trough_idx - (trough_idx - start_idx)
+        #         filtered_trough_idc[i] += trough_diff
+        #         re_extract = True
 
         if re_extract:
             # Re-extract snippet with updated peak/trough indices
@@ -382,6 +418,15 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
 
             # Determine center and length for snippet extraction
             center_idx = (peak_idx + trough_idx) // 2
+            
+            # Recalculate wf_length based on extraction method
+            if window_mode == "fixed":
+                wf_length = int(window_length * rate / 1e6)
+            elif window_mode == "variable":
+                # Variable length: multiply peak-to-trough distance by window_factor
+                peak_to_trough_distance = abs(peak_idx - trough_idx)
+                wf_length = int(peak_to_trough_distance * window_factor)
+            
             start_idx = max(0, center_idx - wf_length // 2)
             end_idx = min(data.shape[0], center_idx + wf_length // 2)
 
@@ -400,6 +445,11 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
                     filtered_eod_chans[i] = peak_ch  # Update channel assignment
                 except Exception as e:
                     print(f"    Warning: PCA re-extraction failed for pulse {i}: {e}")
+                    # Remove entries added during initial extraction to prevent misalignment
+                    if pca_variance_explained:
+                        pca_variance_explained.pop()
+                    if pulse_locations:
+                        pulse_locations.pop()
                     continue
             elif source == '1ch_diff':
                 snippet = data[start_idx:end_idx].flatten()
@@ -419,8 +469,23 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
 
             re_extract = False
 
+        # Interpolate waveform if specified
+        if interp_factor > 1:
+            original_indices = np.arange(len(snippet))
+            interp_indices = np.linspace(0, len(snippet) - 1, len(snippet) * interp_factor)
+            interp_func = interp1d(original_indices, snippet, kind='cubic')
+            snippet = interp_func(interp_indices)
+
+            # Update peak/trough indices after interpolation
+            # snippet_peak_idx = int(snippet_peak_idx * interp_factor)
+            # snippet_trough_idx = int(snippet_trough_idx * interp_factor)
+            # Slower but the idc might shift due to interpolation, so we will re-detect the peak and trough in the interpolated snippet instead of just scaling the indices
+            # The re-detection above remains valid as it might correct the idc values for the raw data
+            snippet_peak_idx = np.argmax(snippet)
+            snippet_trough_idx = np.argmin(snippet)
+
         # Calculate width between peak and trough
-        eod_width = abs(snippet_peak_idx - snippet_trough_idx) * 1e6 // rate
+        eod_width = abs(snippet_peak_idx - snippet_trough_idx) * 1e6 // (rate * interp_factor)
 
         # Calculate peak-to-trough amplitude
         eod_amp = abs(snippet[snippet_peak_idx] - snippet[snippet_trough_idx])
@@ -450,7 +515,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
         # Calculate FFT peak frequency for the processed waveform
         if len(snippet) > 0:
             try:
-                fft_peak_snippet = calc_fft_peak(snippet, rate, zero_padding_factor=100)
+                fft_peak_snippet = calc_fft_peak(snippet, (rate*interp_factor), zero_padding_factor=100)
             except:
                 # If FFT calculation fails, set to 0
                 fft_peak_snippet = 0.0
@@ -464,6 +529,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
         amplitude_ratios.append(amplitude_ratio)
         eod_widths.append(eod_width)
         fft_peak_freqs.append(fft_peak_snippet)
+        waveform_lengths.append(len(snippet))
 
     # Filter out any empty waveforms
     if len(eod_waveforms) == 0:
@@ -473,7 +539,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
         else:
             print("    No valid differential waveforms found.")
         return ([], np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), np.array([]),
-                np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), np.array([]))
+                np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), np.array([]))
     else:
         # Convert lists to arrays before returning
         eod_amps = np.array(eod_amps)
@@ -502,12 +568,16 @@ def extract_pulse_snippets(data, peaks, troughs, rate, length,
             peak_locations_array = np.array(pulse_locations)
         else:
             peak_locations_array = np.array([])  # Empty fallback
+        
+        # Convert waveform_lengths to array
+        waveform_lengths_array = np.array(waveform_lengths)
 
     # Return variable-length waveforms as list (no zero-padding)
     return (eod_waveforms, eod_amps, eod_widths, eod_chan, 
             is_differential_filtered, snippet_p1_idc, snippet_p2_idc,
             final_p1_idc, final_p2_idc, 
-            pulse_orientations, amplitude_ratios, fft_peak_freqs, peak_locations_array)
+            pulse_orientations, amplitude_ratios, fft_peak_freqs, peak_locations_array,
+            waveform_lengths_array)
     
 
 def _select_differential_channel_pointwise(data, n_channels, peaks, troughs):
@@ -946,7 +1016,8 @@ def remove_exact_duplicates(arrays_dict, parameters):
 
 def remove_duplicates(eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
                         snippet_peak_idc, snippet_trough_idc, raw_peak_idc, raw_trough_idc,
-                        pulse_orientation, amp_ratios, fft_peak_freqs, pulse_locations, parameters):
+                        pulse_orientation, amp_ratios, fft_peak_freqs, pulse_locations, 
+                        waveform_lengths, parameters):
     """
     Complete duplicate removal pipeline for EOD detection results.
     
@@ -976,7 +1047,7 @@ def remove_duplicates(eod_snippets, eod_amps, eod_widths, eod_chan, is_different
         'final_midpoint_idc': (raw_peak_idc + raw_trough_idc) // 2,
         'original_pulse_orientation': pulse_orientation,
         'amplitude_ratios': amp_ratios,
-        'waveform_lengths': np.array([len(wf) for wf in eod_snippets]),
+        'waveform_lengths': waveform_lengths,
         'fft_peak_freqs': fft_peak_freqs,
         'pulse_locations': pulse_locations
     }
@@ -1007,7 +1078,8 @@ def remove_duplicates(eod_snippets, eod_amps, eod_widths, eod_chan, is_different
         arrays_dict['original_pulse_orientation'],
         arrays_dict['amplitude_ratios'],
         arrays_dict['fft_peak_freqs'],
-        arrays_dict['pulse_locations']
+        arrays_dict['pulse_locations'],
+        arrays_dict['waveform_lengths']
     )
 
 
@@ -1336,6 +1408,135 @@ def filter_waveforms_with_classifier(eod_waveforms, eod_widths, amplitude_ratios
     return return_vars
 
 
+def save_waveforms(waveforms_list, output_path, format="csv", length="fixed"):
+    """
+    Save waveforms in specified format (unified function for fixed or variable length).
+    
+    Parameters
+    ----------
+    waveforms_list : list of 1D arrays
+        List of waveforms (all same length for fixed, potentially different lengths for variable)
+    output_path : str
+        Base path for output files (without extension)
+    format : str, optional
+        Output format: 'csv' (default, human-readable) or 'npz' (compressed binary)
+    length : str, optional
+        Length type: 'fixed' (default) or 'variable'
+    
+    Returns
+    -------
+    metadata : dict
+        Basic metadata about the saved waveforms
+    """
+    if format not in ["csv", "npz"]:
+        raise ValueError(f"Unsupported format: {format}. Use 'csv' or 'npz'.")
+    
+    if length not in ["fixed", "variable"]:
+        raise ValueError(f"Unsupported length type: {length}. Use 'fixed' or 'variable'.")
+    
+    if length == "fixed":
+        if not waveforms_list:
+            # Save empty file
+            if format == "csv":
+                pd.DataFrame().to_csv(f"{output_path}.csv", index=False)
+            else:  # npz
+                np.savez_compressed(f"{output_path}.npz", waveforms=np.array([]))
+            
+            metadata = {
+                'n_waveforms': 0,
+                'waveform_length': 0,
+                'total_samples': 0,
+                'shape': '(0, 0)' if format == "csv" else (0, 0),
+                'dtype': 'float64'
+            }
+        else:
+            # Stack waveforms into 2D array (n_waveforms, waveform_length)
+            waveforms_array = np.stack(waveforms_list, axis=0)
+            
+            if format == "csv":
+                # Save as CSV (each row is a waveform, each column is a time point)
+                waveforms_df = pd.DataFrame(waveforms_array)
+                waveforms_df.to_csv(f"{output_path}.csv", index=False)
+            else:  # npz
+                # Save as compressed npz
+                np.savez_compressed(f"{output_path}.npz", waveforms=waveforms_array)
+            
+            metadata = {
+                'n_waveforms': len(waveforms_list),
+                'waveform_length': len(waveforms_list[0]),
+                'total_samples': waveforms_array.size,
+                'shape': str(waveforms_array.shape) if format == "csv" else waveforms_array.shape,
+                'dtype': str(waveforms_array.dtype)
+            }
+        
+        # Save minimal metadata
+        if format == "csv":
+            metadata_df = pd.DataFrame([metadata])
+            metadata_df.to_csv(f"{output_path}_metadata.csv", index=False)
+        else:  # npz -> json
+            with open(f"{output_path}_metadata.json", 'w') as f:
+                json.dump(metadata, f, separators=(',', ':'))
+    
+    elif length == "variable":
+        # Variable-length only supports npz format
+        if format == "csv":
+            print("Warning: Variable-length waveforms can only be saved in 'npz' format. Using 'npz'.")
+
+        # Filter out empty waveforms and track original indices
+        non_empty_waveforms = []
+        non_empty_indices = []
+        lengths = []
+        
+        for i, wf in enumerate(waveforms_list):
+            if len(wf) > 0:
+                non_empty_waveforms.append(wf)
+                non_empty_indices.append(i)
+                lengths.append(len(wf))
+            else:
+                lengths.append(0)
+        
+        if non_empty_waveforms:
+            # Calculate start indices for non-empty waveforms
+            start_indices = np.cumsum([0] + lengths[:-1] if lengths else [0])
+            
+            # Concatenate all non-empty waveforms
+            concatenated = np.concatenate(non_empty_waveforms)
+            
+            # Use float32 instead of float64 for space savings (if precision allows)
+            if concatenated.dtype == np.float64:
+                # Check if we can safely convert to float32
+                max_val = np.max(np.abs(concatenated))
+                if max_val < 1e6:  # Safe range for float32
+                    concatenated = concatenated.astype(np.float32)
+            
+            # Save concatenated data with compression
+            np.savez_compressed(output_path + '_concatenated.npz', data=concatenated)
+        else:
+            # Handle case with no valid waveforms
+            np.savez_compressed(output_path + '_concatenated.npz', data=np.array([], dtype=np.float32))
+            start_indices = np.array([])
+        
+        metadata = {
+            'lengths': lengths,
+            'start_indices': start_indices.tolist() if len(start_indices) > 0 else [],
+            'non_empty_indices': non_empty_indices,
+            'total_waveforms': len(waveforms_list),
+            'total_samples': len(concatenated) if non_empty_waveforms else 0,
+            'dtype': str(concatenated.dtype) if non_empty_waveforms else 'float32',
+            'space_savings': {
+                'original_padded_size_estimate': len(waveforms_list) * max(lengths) if lengths else 0,
+                'actual_size': len(concatenated) if non_empty_waveforms else 0,
+                'compression_ratio': (len(waveforms_list) * max(lengths)) / len(concatenated) if non_empty_waveforms and lengths else 1.0
+            }
+        }
+        
+        # Save metadata with compact JSON
+        with open(output_path + '_metadata.json', 'w') as f:
+            json.dump(metadata, f, separators=(',', ':'))  # Compact format
+        
+    return metadata
+
+
 def save_fixed_length_waveforms(waveforms_list, output_path, format="csv"):
     """
     Save fixed-length waveforms in specified format.
@@ -1401,6 +1602,165 @@ def save_fixed_length_waveforms(waveforms_list, output_path, format="csv"):
     
     return metadata
 
+def save_variable_length_waveforms(waveforms_list, output_path):
+    """
+    Save variable-length waveforms efficiently without zero-padding.
+    Optimized to minimize disk space and I/O operations.
+    
+    Parameters
+    ----------
+    waveforms_list : list of 1D arrays
+        List of waveforms with potentially different lengths
+    output_path : str
+        Path to save the waveforms
+    
+    Returns
+    -------
+    metadata : dict
+        Information about the saved waveforms for reconstruction
+    """
+    # Filter out empty waveforms and track original indices
+    non_empty_waveforms = []
+    non_empty_indices = []
+    lengths = []
+    
+    for i, wf in enumerate(waveforms_list):
+        if len(wf) > 0:
+            non_empty_waveforms.append(wf)
+            non_empty_indices.append(i)
+            lengths.append(len(wf))
+        else:
+            lengths.append(0)
+    
+    if non_empty_waveforms:
+        # Calculate start indices for non-empty waveforms
+        start_indices = np.cumsum([0] + lengths[:-1] if lengths else [0])
+        
+        # Concatenate all non-empty waveforms
+        concatenated = np.concatenate(non_empty_waveforms)
+        
+        # Use float32 instead of float64 for space savings (if precision allows)
+        if concatenated.dtype == np.float64:
+            # Check if we can safely convert to float32
+            max_val = np.max(np.abs(concatenated))
+            if max_val < 1e6:  # Safe range for float32
+                concatenated = concatenated.astype(np.float32)
+        
+        # Save concatenated data with compression
+        np.savez_compressed(output_path + '_concatenated.npz', data=concatenated)
+    else:
+        # Handle case with no valid waveforms
+        np.savez_compressed(output_path + '_concatenated.npz', data=np.array([], dtype=np.float32))
+        start_indices = np.array([])
+    
+    metadata = {
+        'lengths': lengths,
+        'start_indices': start_indices.tolist() if len(start_indices) > 0 else [],
+        'non_empty_indices': non_empty_indices,
+        'total_waveforms': len(waveforms_list),
+        'total_samples': len(concatenated) if non_empty_waveforms else 0,
+        'dtype': str(concatenated.dtype) if non_empty_waveforms else 'float32',
+        'space_savings': {
+            'original_padded_size_estimate': len(waveforms_list) * max(lengths) if lengths else 0,
+            'actual_size': len(concatenated) if non_empty_waveforms else 0,
+            'compression_ratio': (len(waveforms_list) * max(lengths)) / len(concatenated) if non_empty_waveforms and lengths else 1.0
+        }
+    }
+    
+    # Save metadata with compact JSON
+    with open(output_path + '_metadata.json', 'w') as f:
+        json.dump(metadata, f, separators=(',', ':'))  # Compact format
+    
+    return metadata
+
+def load_waveforms(base_path, format="csv", length="fixed"):
+    """
+    Load fixed-length waveforms from specified format.
+    
+    Parameters
+    ----------
+    base_path : str
+        Base path (without extension)
+    format : str, optional
+        Input format: 'csv' (default, human-readable) or 'npz' (compressed binary)
+    length : str, optional
+        Length type: 'fixed' (default) or 'variable'
+    
+    Returns
+    -------
+    waveforms_list : list of 1D arrays
+        List of waveforms
+    """
+    if format not in ["csv", "npz"]:
+        raise ValueError(f"Unsupported format: {format}. Use 'csv' or 'npz'.")
+    
+    try:
+        if length == "fixed":
+            if format == "csv":
+                # Load from CSV file
+                waveforms_df = pd.read_csv(f"{base_path}.csv")
+                
+                if waveforms_df.empty:
+                    return []
+                
+                # Convert to numpy array
+                waveforms_array = waveforms_df.values
+            else:  # npz
+                # Load from npz file
+                data = np.load(f"{base_path}.npz")
+                waveforms_array = data['waveforms']
+                
+                if waveforms_array.size == 0:
+                    return []
+            
+            # Convert back to list of 1D arrays
+            waveforms_list = [waveforms_array[i] for i in range(waveforms_array.shape[0])]
+        
+        elif length == "variable":
+            if format == "csv":
+                print(f"Warning: Variable-length waveforms cannot be loaded from CSV format")
+                return []
+            else:  # npz
+                waveform_file = np.load(f"{base_path}.npz")
+                concatenated = waveform_file['data']
+
+                with open(base_path + '_metadata.json', 'r') as f:
+                    metadata = json.load(f)
+                
+                # Reconstruct individual waveforms
+                waveforms_list = []
+                lengths = metadata['lengths']
+                
+                # Handle case where some waveforms were empty
+                if 'non_empty_indices' in metadata:
+                    concatenated_idx = 0
+                    for i in range(metadata['total_waveforms']):
+                        if lengths[i] == 0:
+                            waveforms_list.append(np.array([]))
+                        else:
+                            waveform_length = lengths[i]
+                            waveform = concatenated[concatenated_idx:concatenated_idx + waveform_length]
+                            waveforms_list.append(waveform)
+                            concatenated_idx += waveform_length
+                else:
+                    # Original format - all waveforms were non-empty
+                    start_indices = metadata['start_indices']
+                    for i in range(metadata['total_waveforms']):
+                        start_idx = start_indices[i]
+                        waveform_length = lengths[i]
+                        waveform = concatenated[start_idx:start_idx + waveform_length]
+                        waveforms_list.append(waveform)
+                
+        return waveforms_list
+        
+    except FileNotFoundError:
+        file_ext = ".csv" if format == "csv" else ".npz"
+        print(f"Warning: File {base_path}{file_ext} not found")
+        return []
+    except Exception as e:
+        print(f"Error loading waveforms: {e}")
+        return []
+
 
 def load_fixed_length_waveforms(base_path, format="csv"):
     """
@@ -1441,7 +1801,7 @@ def load_fixed_length_waveforms(base_path, format="csv"):
         
         # Convert back to list of 1D arrays
         waveforms_list = [waveforms_array[i] for i in range(waveforms_array.shape[0])]
-        
+
         return waveforms_list
         
     except FileNotFoundError:
@@ -1452,6 +1812,66 @@ def load_fixed_length_waveforms(base_path, format="csv"):
         print(f"Error loading waveforms: {e}")
         return []
 
+def load_variable_length_waveforms(base_path, format="csv"):
+    """
+    Load variable-length waveforms from efficient storage format.
+    Optimized for memory efficiency and fast loading.
+    
+    Parameters
+    ----------
+    base_path : str
+        Base path (without extensions) for the saved files
+    format : str, optional
+        Input format: 'csv' (default, human-readable) or 'npz' (compressed binary)
+    
+    Returns
+    -------
+    waveforms_list : list of 1D arrays
+        List of reconstructed waveforms
+    """
+    if format not in ["csv", "npz"]:
+        raise ValueError(f"Unsupported format: {format}. Use 'csv' or 'npz'.")
+
+    try:
+        # Load concatenated data and metadata
+        try:
+            data_file = np.load(base_path + '_concatenated.npz')
+            concatenated = data_file['data']
+        except:
+            print(f"Warning: Could not load {base_path}_concatenated.npz")
+            return []
+        
+        with open(base_path + '_metadata.json', 'r') as f:
+            metadata = json.load(f)
+        
+        # Reconstruct individual waveforms
+        waveforms_list = []
+        lengths = metadata['lengths']
+        
+        # Handle case where some waveforms were empty
+        if 'non_empty_indices' in metadata:
+            concatenated_idx = 0
+            for i in range(metadata['total_waveforms']):
+                if lengths[i] == 0:
+                    waveforms_list.append(np.array([]))
+                else:
+                    length = lengths[i]
+                    waveform = concatenated[concatenated_idx:concatenated_idx + length]
+                    waveforms_list.append(waveform)
+                    concatenated_idx += length
+        else:
+            # Original format - all waveforms were non-empty
+            start_indices = metadata['start_indices']
+            for i in range(metadata['total_waveforms']):
+                start_idx = start_indices[i]
+                length = lengths[i]
+                waveform = concatenated[start_idx:start_idx + length]
+                waveforms_list.append(waveform)
+        
+        return waveforms_list
+    except Exception as e:
+        print(f"Error loading waveforms from {base_path}: {e}")
+        return []
 
 ############################### EVENT EXTRACTION ######################################
 def create_channel_events(eod_table, max_ipi_seconds, verbose=False):
@@ -1527,6 +1947,7 @@ def create_channel_events(eod_table, max_ipi_seconds, verbose=False):
             event_eods['channel_start_time'] = event_eods['timestamp_dt'].min()
             event_eods['channel_end_time'] = event_eods['timestamp_dt'].max()
             event_eods['channel_n_eods'] = len(event_eods)
+            event_eods['channel_ipi_seconds'] = event_eods['timestamp_dt'].diff().dt.total_seconds().fillna(0).tolist()
             
             channel_events_list.append(event_eods)
             channel_event_counter += 1
@@ -1573,6 +1994,7 @@ def merge_channel_events(channel_events, max_merge_gap_seconds, verbose=False):
                         'channel_n_eods': 'first'
                     })
                     .reset_index())
+    max_channel = event_summaries['channel'].max()
 
     print(f"    Processing {len(event_summaries)} channel events for merging...")
     
@@ -1632,10 +2054,10 @@ def merge_channel_events(channel_events, max_merge_gap_seconds, verbose=False):
                     ch_ends = [event_summaries.loc[event_summaries['channel_event_id'] == eid, 'channel_end_time'].values[0] for eid in ch_event_ids]
                     channel_time_bounds[ch] = (min(ch_starts), max(ch_ends))
             
-            # For each channel with events in the merged group, check its spatial neighbors
+            # For each channel with events in the merged group, check its spatial neighbors (including same channel)
             for ch, (ch_start, ch_end) in channel_time_bounds.items():
-                for neighbor_ch in [ch-1, ch+1]:
-                    if neighbor_ch < 0 or neighbor_ch > 6:
+                for neighbor_ch in [ch-1, ch, ch+1]:
+                    if neighbor_ch < 0 or neighbor_ch > max_channel:
                         continue
                         
                     # Find unprocessed events on neighbor channel
