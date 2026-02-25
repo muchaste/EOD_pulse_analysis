@@ -22,11 +22,54 @@ import json
 
 # Import consolidated EOD functions
 from pulse_functions import (
-    save_fixed_length_waveforms,
+    #save_fixed_length_waveforms,
+    save_waveforms,
     extract_pulse_snippets,
     filter_waveforms,
     normalize_waveforms
 )
+
+# Import parameter configuration GUI
+from parameter_gui import ParameterConfigGUI
+
+
+print("Starting Parameter Configuration GUI...")
+
+root = tk.Tk()
+config_gui = ParameterConfigGUI(root)
+root.mainloop()
+
+# Check if user cancelled
+if config_gui.result is None:
+    print("Configuration cancelled by user")
+    exit()
+
+# Extract configuration
+config = config_gui.result
+input_path = config['paths']['input_path']
+cal_file = config['paths']['cal_file']
+output_path = config['paths']['output_path']
+
+use_ml_filtering = config['ml_settings']['use_ml_filtering']
+classifier_path = config['ml_settings']['classifier_path'] if use_ml_filtering else None
+fish_probability_threshold = config['ml_settings']['fish_probability_threshold']
+
+parameters = config['parameters']
+
+print("\n" + "="*60)
+print("CONFIGURATION SUMMARY")
+print("="*60)
+print(f"Input folder: {input_path}")
+print(f"Calibration file: {cal_file}")
+print(f"Output folder: {output_path}")
+print(f"ML filtering: {'Enabled' if use_ml_filtering else 'Disabled'}")
+if use_ml_filtering:
+    print(f"  Classifier: {classifier_path}")
+    print(f"  Threshold: {fish_probability_threshold}")
+print("\nAnalysis Parameters:")
+for key, value in parameters.items():
+    print(f"  {key}: {value}")
+print("="*60 + "\n")
 
 # Set directories
 root = tk.Tk()
@@ -78,59 +121,60 @@ if not wav_files:
 data, rate = aio.load_audio(wav_files[0])
 data = data[:,0]  # Use only the first channel
 
-# Option to import parameters from diagnostic tool
-import_params = messagebox.askyesno("Import Parameters", 
-                                   "Do you want to import parameters from a diagnostic tool JSON file?")
+# # Option to import parameters from diagnostic tool
+# import_params = messagebox.askyesno("Import Parameters", 
+#                                    "Do you want to import parameters from a diagnostic tool JSON file?")
 
-if import_params:
-    param_file = filedialog.askopenfilename(
-        title="Select Parameter File", 
-        filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
-    )
-    try:
-        with open(param_file, 'r') as f:
-            imported_params = json.load(f)
-        print(f"Imported parameters from: {param_file}")
+# if import_params:
+#     param_file = filedialog.askopenfilename(
+#         title="Select Parameter File", 
+#         filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+#     )
+#     try:
+#         with open(param_file, 'r') as f:
+#             imported_params = json.load(f)
+#         print(f"Imported parameters from: {param_file}")
         
-        # Use imported parameters
-        parameters = imported_params
+#         # Use imported parameters
+#         parameters = imported_params
         
-    except Exception as e:
-        messagebox.showerror("Import Error", f"Failed to import parameters:\n{str(e)}")
-        print(f"Parameter import failed: {e}")
-        # Fall back to default parameters
-        parameters = {'thresh':0.1,  # Reduced threshold for pulse detection to catch low-amplitude fish
-                    'min_rel_slope_diff':0.25,
-                    'min_width_us':30,  # Minimum pulse width in microseconds
-                    'max_width_us':1000,  # Maximum pulse width in microseconds
-                    'width_fac_detection':7.0,
-                    'interp_factor':1,  # Interpolation factor for waveform extraction
-                    'amplitude_ratio_min':0.2,  # Minimum peak-to-peak amplitude ratio
-                    'amplitude_ratio_max':4,     # Maximum peak-to-peak amplitude ratio
-                    'save_filtered_out':True, # Option to save filtered-out pulses for quality control
-                    'peak_fft_freq_min':50,
-                    'peak_fft_freq_max':10000,
-                    'clip_threshold':1.4,  # Threshold for clipping detection (1.6 is conservative, adjust as needed)
-                    'top_amplitude_percent':50,  # Only keep top x% highest amplitude EODs
-                    'return_diff': True
-                    }
-else:
-    # Default control recording parameters
-    parameters = {'thresh':0.1,  # Reduced threshold for pulse detection to catch low-amplitude fish
-                'min_rel_slope_diff':0.25,
-                'min_width_us':30,  # Minimum pulse width in microseconds
-                'max_width_us':1000,  # Maximum pulse width in microseconds
-                'width_fac_detection':7.0,
-                'interp_factor':1,  # Interpolation factor for waveform extraction
-                'amplitude_ratio_min':0.2,  # Minimum peak-to-peak amplitude ratio
-                'amplitude_ratio_max':4,     # Maximum peak-to-peak amplitude ratio
-                'save_filtered_out':True, # Option to save filtered-out pulses for quality control
-                'peak_fft_freq_min':50,
-                'peak_fft_freq_max':10000,
-                'clip_threshold':1.4,  # Threshold for clipping detection (1.6 is conservative, adjust as needed)
-                'top_amplitude_percent':50,  # Only keep top x% highest amplitude EODs
-                'return_diff': True
-                }
+#     except Exception as e:
+#         messagebox.showerror("Import Error", f"Failed to import parameters:\n{str(e)}")
+#         print(f"Parameter import failed: {e}")
+#         # Fall back to default parameters
+#         parameters = {'thresh':0.1,  # Reduced threshold for pulse detection to catch low-amplitude fish
+#                     'min_rel_slope_diff':0.25,
+#                     'min_width_us':30,  # Minimum pulse width in microseconds
+#                     'max_width_us':1000,  # Maximum pulse width in microseconds
+#                     'width_fac_detection':7.0,
+#                     'interp_factor':1,  # Interpolation factor for waveform extraction
+#                     'amplitude_ratio_min':0.2,  # Minimum peak-to-peak amplitude ratio
+#                     'amplitude_ratio_max':4,     # Maximum peak-to-peak amplitude ratio
+#                     'save_filtered_out':True, # Option to save filtered-out pulses for quality control
+#                     'peak_fft_freq_min':50,
+#                     'peak_fft_freq_max':10000,
+#                     'clip_threshold':1.4,  # Threshold for clipping detection (1.6 is conservative, adjust as needed)
+#                     'top_amplitude_percent':50,  # Only keep top x% highest amplitude EODs
+#                     'return_diff': True
+#                     }
+# else:
+#     # Default control recording parameters
+#     parameters = {'thresh':0.1,  # Reduced threshold for pulse detection to catch low-amplitude fish
+#                 'min_rel_slope_diff':0.25,
+#                 'min_width_us':30,  # Minimum pulse width in microseconds
+#                 'max_width_us':1000,  # Maximum pulse width in microseconds
+#                 'width_fac_detection':7.0,
+#                 'interp_factor':1,  # Interpolation factor for waveform extraction
+#                 'amplitude_ratio_min':0.2,  # Minimum peak-to-peak amplitude ratio
+#                 'amplitude_ratio_max':4,     # Maximum peak-to-peak amplitude ratio
+#                 'save_filtered_out':True, # Option to save filtered-out pulses for quality control
+#                 'peak_fft_freq_min':50,
+#                 'peak_fft_freq_max':10000,
+#                 'clip_threshold':1.4,  # Threshold for clipping detection (1.6 is conservative, adjust as needed)
+#                 'top_amplitude_percent':50,  # Only keep top x% highest amplitude EODs
+#                 'return_diff': True
+#                 }
+
 
 # Plot raw data
 plt.figure(figsize=(20, 6))
@@ -143,20 +187,20 @@ plt.ylabel('Voltage')
 plt.show(block=False)
 
 
-print(parameters)
-print("change parameters? (1/0)")
-change_params = int(input())
-while change_params:
-    print("input parameter name")
-    ch_par = input()
-    print("input parameter value")
-    ch_par_value = float(input())
-    parameters[ch_par] = ch_par_value
-    print(parameters)
-    print("done? (1/0)")
-    done = int(input())
-    if done:
-        change_params = 0
+# print(parameters)
+# print("change parameters? (1/0)")
+# change_params = int(input())
+# while change_params:
+#     print("input parameter name")
+#     ch_par = input()
+#     print("input parameter value")
+#     ch_par_value = float(input())
+#     parameters[ch_par] = ch_par_value
+#     print(parameters)
+#     print("done? (1/0)")
+#     done = int(input())
+#     if done:
+#         change_params = 0
 
 # Convert to DataFrame for saving
 parameters_df = pd.DataFrame({k: [v] for k, v in parameters.items()})
@@ -245,9 +289,19 @@ for n, individual in enumerate(individual_info):
             snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc, 
             pulse_orientations, amp_ratios, fft_peak_freqs, peak_locations
         ) = extract_pulse_snippets(
-            data, peaks, troughs, rate = rate, length = 2000,
-            source = '1ch_diff', return_differential = parameters_df['return_diff'][0]
-        )
+                data, peaks, troughs, rate = rate,
+                source = 'multi1ch_diffch_linear', return_differential = parameters['return_diff'], 
+                interp_factor=parameters['interp_factor'],
+                use_pca=False,
+                window_mode = parameters['extraction_window'],
+                window_factor = parameters['extraction_window_factor'],
+                window_length = parameters['extraction_window_length_us']
+            )
+        
+        # extract_pulse_snippets(
+        #     data, peaks, troughs, rate = rate, length = 2000,
+        #     source = '1ch_diff', return_differential = parameters_df['return_diff'][0]
+        # )
 
         # Use basic threshold filtering
         keep_indices, filtered_features, filteredout_features = filter_waveforms(
@@ -371,17 +425,19 @@ for n, individual in enumerate(individual_info):
         # Store waveform data with metadata
         if len(filtered_eod_waveforms) > 0:
             # Save original waveforms
-            waveform_metadata = save_fixed_length_waveforms(
+            waveform_metadata = save_waveforms(
                 filtered_eod_waveforms, 
-                f'{output_path}\\{individual_id}_eod_waveforms'
+                f'{output_path}\\{individual_id}_eod_waveforms',
+                length=parameters['extraction_window']
             )
             
             # Save normalized waveforms (if normalization was successful)
             if 'normalized_waveforms' in locals() and len(normalized_waveforms) > 0:
                 try:
-                    normalized_waveform_metadata = save_fixed_length_waveforms(
+                    normalized_waveform_metadata = save_waveforms(
                         normalized_waveforms, 
-                        f'{output_path}\\{individual_id}_eod_waveforms_normalized'
+                        f'{output_path}\\{individual_id}_eod_waveforms_normalized',
+                        length=parameters['extraction_window']
                     )
                     print(f"    Saved {len(normalized_waveforms)} normalized waveforms for {individual_id}")
                 except Exception as e:
@@ -403,9 +459,10 @@ for n, individual in enumerate(individual_info):
         
         # Save clipped waveforms separately
         if len(clipped_eod_waveforms) > 0:
-            clipped_waveform_metadata = save_fixed_length_waveforms(
+            clipped_waveform_metadata = save_waveforms(
                 clipped_eod_waveforms, 
-                f'{output_path}\\{individual_id}_clipped_eod_waveforms'
+                f'{output_path}\\{individual_id}_clipped_eod_waveforms',
+                length=parameters['extraction_window']
             )
             
             # Add to master clipped waveform collection
@@ -684,9 +741,10 @@ if all_eod_tables:
             all_combined_waveforms.extend(wf_data['waveforms'])
         
         if all_combined_waveforms:
-            master_waveform_metadata = save_fixed_length_waveforms(
+            master_waveform_metadata = save_waveforms(
                 all_combined_waveforms, 
-                f'{output_path}\\master_eod_waveforms'
+                f'{output_path}\\master_eod_waveforms',
+                length=parameters['extraction_window']
             )
             print(f"Master waveforms saved: master_eod_waveforms_concatenated.npz ({len(all_combined_waveforms)} waveforms)")
 
@@ -703,9 +761,10 @@ if all_clipped_tables:
             all_combined_clipped_waveforms.extend(wf_data['waveforms'])
         
         if all_combined_clipped_waveforms:
-            master_clipped_waveform_metadata = save_fixed_length_waveforms(
+            master_clipped_waveform_metadata = save_waveforms(
                 all_combined_clipped_waveforms, 
-                f'{output_path}\\master_clipped_eod_waveforms'
+                f'{output_path}\\master_clipped_eod_waveforms',
+                length=parameters['extraction_window']
             )
             print(f"Master clipped waveforms saved: master_clipped_eod_waveforms_concatenated.npz ({len(all_combined_clipped_waveforms)} waveforms)")
 
