@@ -14,6 +14,7 @@ from pathlib import Path
 from scipy.signal import find_peaks, correlate, windows, find_peaks, butter, filtfilt
 from scipy.interpolate import interp1d
 from scipy import stats
+from scipy.optimize import curve_fit
 import glob
 from thunderfish import pulses
 import matplotlib.cm as cm
@@ -269,6 +270,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
     pca_variance_explained = []  # Track PCA quality
     pulse_locations = []  # Track interpolated peak locations (for both PCA and differential)
     waveform_lengths = []  # Track actual waveform lengths
+    eod_chans_out = []  # Track channel assignments in lockstep with all other output lists
     re_extract = False
     
     for i in range(n_pulses_diff):
@@ -444,6 +446,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
                     pulse_locations[-1] = peak_loc  # Update the last entry
                     filtered_eod_chans[i] = peak_ch  # Update channel assignment
                 except Exception as e:
+                    re_extract = False  # Prevent infinite loop
                     print(f"    Warning: PCA re-extraction failed for pulse {i}: {e}")
                     # Remove entries added during initial extraction to prevent misalignment
                     if pca_variance_explained:
@@ -530,6 +533,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
         eod_widths.append(eod_width)
         fft_peak_freqs.append(fft_peak_snippet)
         waveform_lengths.append(len(snippet))
+        eod_chans_out.append(filtered_eod_chans[i])
 
     # Filter out any empty waveforms
     if len(eod_waveforms) == 0:
@@ -544,7 +548,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
         # Convert lists to arrays before returning
         eod_amps = np.array(eod_amps)
         eod_widths = np.array(eod_widths)
-        eod_chan = np.array(filtered_eod_chans)  # Use filtered channel list
+        eod_chan = np.array(eod_chans_out)
         
         # Set is_differential based on extraction method
         if use_pca:
@@ -730,7 +734,76 @@ def _estimate_differential_pulse_location(data, peak_idx, trough_idx, channel_id
         # Fallback to midpoint if any error occurs
         return channel_idx + 0.5
 
+def _estimate_gaussian_pulse_location(data, ref_p1_idx, ref_p2_idx, n_channels):
+    """
+    Estimate pulse location along a linear electrode array by fitting a Gaussian
+    to the per-channel absolute P1-P2 amplitude profile.
 
+    For each channel, a windowed search around the reference P1/P2 indices finds
+    the local extrema, giving a signed P1-P2 amplitude. A Gaussian is fitted to
+    the absolute values; the peak position x0 is the location estimate.
+    Falls back to an amplitude-weighted centroid if the fit fails or goes out of bounds.
+
+    Parameters
+    ----------
+    data : 2-D array
+        Multi-channel recording (samples x channels).
+    ref_p1_idx : int
+        Reference P1 sample index in the full recording (from best differential channel).
+    ref_p2_idx : int
+        Reference P2 sample index in the full recording (from best differential channel).
+    n_channels : int
+        Number of recording channels.
+
+    Returns
+    -------
+    location : float
+        Estimated fish location in electrode units [0, n_channels-1].
+    ch_amps : 1-D array, shape (n_channels,)
+        Signed P1-P2 amplitude at each channel (positive = P1 > P2, i.e., HP orientation).
+    fit_success : bool
+        True if Gaussian fit converged and x0 is within array bounds.
+    """
+    half_window = max(2, abs(ref_p2_idx - ref_p1_idx) // 2)
+    n_samples = data.shape[0]
+    ch_amps = np.zeros(n_channels)
+
+    for ch in range(n_channels):
+        p1_lo = max(0, ref_p1_idx - half_window)
+        p1_hi = min(n_samples, ref_p1_idx + half_window)
+        local_p1 = p1_lo + np.argmax(data[p1_lo:p1_hi, ch])
+
+        p2_lo = max(0, ref_p2_idx - half_window)
+        p2_hi = min(n_samples, ref_p2_idx + half_window)
+        local_p2 = p2_lo + np.argmin(data[p2_lo:p2_hi, ch])
+
+        # signed: positive if head-positive orientation (P1 is peak, P2 is trough)
+        ch_amps[ch] = data[local_p1, ch] - data[local_p2, ch]
+
+    abs_amps = np.abs(ch_amps)
+    electrode_positions = np.arange(n_channels, dtype=float)
+    peak_ch = int(np.argmax(abs_amps))
+
+    def gaussian(x, x0, sigma, A):
+        return A * np.exp(-0.5 * ((x - x0) / sigma) ** 2)
+
+    try:
+        p0 = [float(peak_ch), 1.5, float(abs_amps[peak_ch])]
+        bounds = ([-0.5, 0.3, 0.0], [n_channels - 0.5, float(n_channels), np.inf])
+        popt, _ = curve_fit(gaussian, electrode_positions, abs_amps,
+                            p0=p0, bounds=bounds, maxfev=500)
+        x0 = float(popt[0])
+        if -0.5 <= x0 <= n_channels - 0.5:
+            return x0, ch_amps, True
+        else:
+            total = abs_amps.sum()
+            weighted_loc = float(np.dot(electrode_positions, abs_amps) / total) if total > 0 else float(peak_ch)
+            return weighted_loc, ch_amps, False
+    except (RuntimeError, ValueError):
+        total = abs_amps.sum()
+        weighted_loc = float(np.dot(electrode_positions, abs_amps) / total) if total > 0 else float(peak_ch)
+        return weighted_loc, ch_amps, False
+    
 def _extract_pca_waveform(snippet_multichannel, pca_component=0, interp_points=300, 
                          apply_common_average=True):
     """
@@ -1707,7 +1780,7 @@ def load_waveforms(base_path, format="csv", length="fixed"):
                 waveforms_array = waveforms_df.values
             else:  # npz
                 # Load from npz file
-                data = np.load(f"{base_path}.npz")
+                data = np.load(f"{base_path}_concatenated.npz")
                 waveforms_array = data['waveforms']
                 
                 if waveforms_array.size == 0:
@@ -1721,7 +1794,7 @@ def load_waveforms(base_path, format="csv", length="fixed"):
                 print(f"Warning: Variable-length waveforms cannot be loaded from CSV format")
                 return []
             else:  # npz
-                waveform_file = np.load(f"{base_path}.npz")
+                waveform_file = np.load(f"{base_path}_concatenated.npz")
                 concatenated = waveform_file['data']
 
                 with open(base_path + '_metadata.json', 'r') as f:
@@ -2622,6 +2695,8 @@ def normalize_waveforms(eod_snippets, snippet_p1_idc, snippet_p2_idc,
             if p1_idx < 0 or p1_idx >= len(snippet) or p2_idx < 0 or p2_idx >= len(snippet):
                 print(f"Warning: Invalid P1/P2 indices for snippet {i}, skipping")
                 rejected_indices.append(i)
+                snippet = np.zeros(target_length)
+                normalized_snippets.append(snippet)
                 continue
             
             # Get original amplitudes
