@@ -415,6 +415,7 @@ for n, filepath in enumerate(file_set['filename']):
             'snippet_p1_idx': snippet_p1_idc,
             'snippet_p2_idx': snippet_p2_idc,
             'snippet_midpoint_idx': snippet_midpoint_idc,
+            'wf_length': wf_lengths,
             'eod_amplitude': eod_amps,
             'eod_width_us': eod_widths,
             'eod_amplitude_ratio': amp_ratios,
