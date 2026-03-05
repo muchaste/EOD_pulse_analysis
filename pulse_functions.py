@@ -54,7 +54,7 @@ def bandpass_filter(data, rate, lowcut, highcut, order=4):
 
     return filtered_data
 
-def unify_across_channels(peaks, troughs, pulse_widths):
+def unify_across_channels(peaks, troughs, pulse_widths, proximity_threshold=3):
     """
     Unify pulse detections across multiple channels, removing duplicates.
 
@@ -66,6 +66,8 @@ def unify_across_channels(peaks, troughs, pulse_widths):
         Trough indices for each channel
     pulse_widths : list of arrays
         Pulse widths for each channel
+    proximity_threshold : int
+        Minimum distance between pulses to consider them unique
         
     Returns:
     --------
@@ -88,7 +90,7 @@ def unify_across_channels(peaks, troughs, pulse_widths):
         last_mp = all_pulses[0][0]
         unique_pulses.append(all_pulses[0])
         for pulse in all_pulses[1:]:
-            if pulse[0] - last_mp > 3:
+            if pulse[0] - last_mp > proximity_threshold:
                 unique_pulses.append(pulse)
                 last_mp = pulse[0]
 
@@ -109,7 +111,8 @@ def unify_across_channels(peaks, troughs, pulse_widths):
 def extract_pulse_snippets(data, peaks, troughs, rate, 
                            source, return_differential=True, interp_factor=1,
                            use_pca=False, pca_component=0, pca_interp_points=100,
-                           window_mode="fixed", window_factor=7, window_length = 4000):
+                           window_mode="fixed", window_factor=7, window_length = 4000,
+                           search_window=5):
     """
     Extract and analyze EOD snippets with variable widths based on detected pulse widths.
     For 2-D multi-channel data (finds polarity flips and extracts differential signals OR
@@ -199,7 +202,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
     waveform_lengths : 1-D array
         Actual length (in samples) of each extracted waveform snippet.
     """
-
+    
     if source == '1ch_diff':
         return_differential = True
         print("    Single-channel differential data source detected...")
@@ -227,7 +230,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
         elif n_channels > 1:
             print(f"    Extracting differential waveforms from {n_channels}-channel data...")
             # Find differential channel with polarity flip
-            eod_chans, is_differential, _, _ = _select_differential_channel_pointwise(
+            eod_chans, is_differential, _, cor_coefs = _select_differential_channel_pointwise(
                 data, n_channels, peaks, troughs)
             n_pulses = len(eod_chans)
         else:
@@ -248,6 +251,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
     filtered_peak_idc = peaks[keep_mask]
     filtered_trough_idc = troughs[keep_mask]
     filtered_eod_chans = eod_chans[keep_mask]
+    filtered_is_differential = is_differential[keep_mask]
     n_pulses_diff = len(filtered_peak_idc)
 
     if return_differential and not use_pca:
@@ -267,210 +271,135 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
     amplitude_ratios = []
     eod_widths = []
     fft_peak_freqs = []
-    pca_variance_explained = []  # Track PCA quality
     pulse_locations = []  # Track interpolated peak locations (for both PCA and differential)
     waveform_lengths = []  # Track actual waveform lengths
     eod_chans_out = []  # Track channel assignments in lockstep with all other output lists
-    re_extract = False
-    
+    is_differential_out = []  # Track differential status in lockstep with all other output lists
     for i in range(n_pulses_diff):
-        peak_idx = filtered_peak_idc[i].copy()
-        trough_idx = filtered_trough_idc[i].copy()
+        skip_pulse = False
+        location_appended = False
+        snippet_peak_idx = None
+        snippet_trough_idx = None
 
-        # Determine center and length for snippet extraction
-        center_idx = (peak_idx + trough_idx) // 2
-        
-        # Calculate wf_length based on extraction method
-        if window_mode == "fixed":
-            wf_length = int(window_length * rate / 1e6)
-        elif window_mode == "variable":
-            # Variable length: multiply peak-to-trough distance by window_factor
-            peak_to_trough_distance = abs(peak_idx - trough_idx)
-            wf_length = int(peak_to_trough_distance * window_factor)
-        else:
-            raise ValueError(f"Invalid window_mode: {window_mode}. Use 'fixed' or 'variable'.")
-        
-        start_idx = max(0, center_idx - wf_length // 2)
-        end_idx = min(data.shape[0], center_idx + wf_length // 2)
-
-        # Extract snippet based on extraction method
-        if use_pca and source == 'multich_linear':
-            # PCA extraction: get all channels
-            snippet_multichannel = data[start_idx:end_idx, :]
-            
-            # Apply PCA-based extraction with spatial interpolation
-            try:
-                snippet, spatial_amps, var_explained, peak_ch, peak_loc = _extract_pca_waveform(
-                    snippet_multichannel, 
-                    pca_component=pca_component,
-                    interp_points=pca_interp_points,
-                    apply_common_average=True
-                )
-                pca_variance_explained.append(var_explained)
-                pulse_locations.append(peak_loc)
-                # Update the channel assignment to the electrode with strongest signal
-                filtered_eod_chans[i] = peak_ch
-            except Exception as e:
-                # If PCA fails, skip this pulse
-                print(f"    Warning: PCA extraction failed for pulse {i}: {e}")
-                continue
-                
-        elif source == '1ch_diff':
-            # Single channel differential
-            snippet = data[start_idx:end_idx].flatten()
-            # Single channel has no spatial information
-            pulse_locations.append(0.0)
-        elif source == 'multich_linear':
-            # Standard differential extraction between adjacent channels
-            snippet = np.diff(data[start_idx:end_idx, filtered_eod_chans[i]:filtered_eod_chans[i]+2]).flatten()
-            # Estimate interpolated location for differential
-            diff_location = _estimate_differential_pulse_location(
-                data, peak_idx, trough_idx, filtered_eod_chans[i], n_channels
-            )
-            pulse_locations.append(diff_location)
-
-        if snippet.shape[0] == 0:
-            # If snippet extraction failed, append default values
-            eod_waveforms.append(np.array([]))
-            # start_idc.append(0)
-            snippet_p1_idc.append(0)
-            snippet_p2_idc.append(0)
-            eod_amps.append(0.0)
-            pulse_orientations.append('HP')
-            amplitude_ratios.append(0.0)
-            eod_widths.append(0)
-            fft_peak_freqs.append(0.0)
-            waveform_lengths.append(0)
-
-            continue
-
-        # Re-detect peaks/troughs but constrain search area
-        search_window = len(snippet) # // 2  # Search within 50% of snippet length
-        center_pos = len(snippet) // 2 - 1 # IMPORTANT - the -1 adjusts for the first index being 0 -.- this took wayyyy too long to figure out!
-        
-        # Find peaks in constrained region around center
-        search_start = max(0, center_pos - (search_window//2))
-        search_end = min(len(snippet), center_pos + (search_window//2))
-        search_region = snippet[search_start:search_end]
-        # ARGMIN/ARGMAX ARE RELATIVELY DUMB BUT THEY ARE MUCH FASTER THAN FIND_PEAKS, AND WE ONLY NEED TO FIND THE MOST EXTREME PEAK/TROUGH IN THIS REGION
-        # POSSIBLE ISSUE: BASELINE DRIFT
-        snippet_peak_idx = np.argmax(search_region) + search_start
-        snippet_trough_idx = np.argmin(search_region) + search_start
-
-        # # Alternative approach using find_peaks around the peak and trough indices (very small search window, very low threshold)
-        # search_window = 10
-        # # Find peaks around the original peak index
-        # peak_search_start = max(0, (peak_idx - start_idx) - search_window)
-        # peak_search_end = min(len(snippet), (peak_idx - start_idx) + search_window)
-        # peak_search_region = snippet[peak_search_start:peak_search_end]
-        # peaks_in_region, _ = find_peaks(peak_search_region, height=np.max(peak_search_region)*0.5)
-        # if len(peaks_in_region) == 1:
-        #     snippet_peak_idx = peaks_in_region[0] + peak_search_start
-        # elif len(peaks_in_region) > 1:
-        #     snippet_peak_idx = peaks_in_region[np.argmax(peak_search_region[peaks_in_region])] + peak_search_start
-        # elif len(peaks_in_region) == 0:
-        #     snippet_peak_idx = peak_idx - start_idx  # Fallback to original index if no peak found
-
-        # # Find troughs around the original trough index
-        # trough_search_start = max(0, (trough_idx - start_idx) - search_window)
-        # trough_search_end = min(len(snippet), (trough_idx - start_idx) + search_window)
-        # trough_search_region = snippet[trough_search_start:trough_search_end]
-        # troughs_in_region, _ = find_peaks(-trough_search_region, height=-np.min(trough_search_region)*0.5)
-        # if len(troughs_in_region) == 1:
-        #     snippet_trough_idx = troughs_in_region[0] + trough_search_start
-        # elif len(troughs_in_region) > 1:
-        #     snippet_trough_idx = troughs_in_region[np.argmin(trough_search_region[troughs_in_region])] + trough_search_start
-        # elif len(troughs_in_region) == 0:
-        #     snippet_trough_idx = trough_idx - start_idx  # Fallback to original index if no trough found
-
-        # Update snippet indices based on re-detected peaks/troughs
-        if snippet_peak_idx != peak_idx - start_idx: # in this case, the peak has shifted
-            peak_diff = snippet_peak_idx - (peak_idx - start_idx)
-            filtered_peak_idc[i] += peak_diff
-            re_extract = True    
-
-        if snippet_trough_idx != trough_idx - start_idx: # in this case, the trough has shifted
-            trough_diff = snippet_trough_idx - (trough_idx - start_idx)
-            filtered_trough_idc[i] += trough_diff
-            re_extract = True
-
-        # # NEW: if the peak/trough has shifted too much (>10 samples), we will skip this pulse as it may be a sign of a noisy extraction or a different pulse than originally detected. This is a more conservative approach to ensure we are analyzing the correct pulse.
-        # if snippet_peak_idx != peak_idx - start_idx: # in this case, the peak has shifted
-        #     if abs(snippet_peak_idx - (peak_idx - start_idx)) > 10:
-        #         # print(f"    Warning: Peak index shifted by {abs(snippet_peak_idx - (peak_idx - start_idx))} samples for pulse {i}. Skipping this pulse.")
-        #         continue
-        #     else:
-        #         peak_diff = snippet_peak_idx - (peak_idx - start_idx)
-        #         filtered_peak_idc[i] += peak_diff
-        #         re_extract = True    
-
-        # if snippet_trough_idx != trough_idx - start_idx: # in this case, the trough has shifted
-        #     if abs(snippet_trough_idx - (trough_idx - start_idx)) > 10:
-        #         # print(f"    Warning: Trough index shifted by {abs(snippet_trough_idx - (trough_idx - start_idx))} samples for pulse {i}. Skipping this pulse.")
-        #         continue
-        #     else:
-        #         trough_diff = snippet_trough_idx - (trough_idx - start_idx)
-        #         filtered_trough_idc[i] += trough_diff
-        #         re_extract = True
-
-        if re_extract:
-            # Re-extract snippet with updated peak/trough indices
+        # For-loop for iterative re-extraction if peak/trough shift is detected after first attempt
+        for attempt in range(2):
             peak_idx = filtered_peak_idc[i].copy()
             trough_idx = filtered_trough_idc[i].copy()
-
-            # Determine center and length for snippet extraction
             center_idx = (peak_idx + trough_idx) // 2
-            
-            # Recalculate wf_length based on extraction method
+
             if window_mode == "fixed":
                 wf_length = int(window_length * rate / 1e6)
             elif window_mode == "variable":
-                # Variable length: multiply peak-to-trough distance by window_factor
-                peak_to_trough_distance = abs(peak_idx - trough_idx)
-                wf_length = int(peak_to_trough_distance * window_factor)
-            
+                wf_length = int(abs(peak_idx - trough_idx) * window_factor)
+            else:
+                raise ValueError(f"Invalid window_mode: {window_mode}. Use 'fixed' or 'variable'.")
+
             start_idx = max(0, center_idx - wf_length // 2)
             end_idx = min(data.shape[0], center_idx + wf_length // 2)
 
-            # Extract snippet based on method
             if use_pca and source == 'multich_linear':
                 snippet_multichannel = data[start_idx:end_idx, :]
                 try:
-                    snippet, spatial_amps, var_explained, peak_ch, peak_loc = _extract_pca_waveform(
-                        snippet_multichannel, 
+                    snippet, _, _, peak_ch, peak_loc = _extract_pca_waveform(
+                        snippet_multichannel,
                         pca_component=pca_component,
                         interp_points=pca_interp_points,
                         apply_common_average=True
                     )
-                    pca_variance_explained[-1] = var_explained  # Update the last entry
-                    pulse_locations[-1] = peak_loc  # Update the last entry
-                    filtered_eod_chans[i] = peak_ch  # Update channel assignment
+                    if attempt == 0:
+                        pulse_locations.append(peak_loc)
+                        location_appended = True
+                    else:
+                        pulse_locations[-1] = peak_loc
+                    filtered_eod_chans[i] = peak_ch
                 except Exception as e:
-                    re_extract = False  # Prevent infinite loop
-                    print(f"    Warning: PCA re-extraction failed for pulse {i}: {e}")
-                    # Remove entries added during initial extraction to prevent misalignment
-                    if pca_variance_explained:
-                        pca_variance_explained.pop()
-                    if pulse_locations:
+                    print(f"    Warning: PCA extraction failed for pulse {i}: {e}")
+                    if location_appended:
                         pulse_locations.pop()
-                    continue
+                    skip_pulse = True
+                    break
             elif source == '1ch_diff':
                 snippet = data[start_idx:end_idx].flatten()
-                # Update location (single channel)
-                pulse_locations[-1] = 0.0
+                if attempt == 0:
+                    pulse_locations.append(0.0)
+                    location_appended = True
             elif source == 'multich_linear':
                 snippet = np.diff(data[start_idx:end_idx, filtered_eod_chans[i]:filtered_eod_chans[i]+2]).flatten()
-                # Update interpolated location for differential
                 diff_location = _estimate_differential_pulse_location(
                     data, peak_idx, trough_idx, filtered_eod_chans[i], n_channels
                 )
-                pulse_locations[-1] = diff_location
+                if attempt == 0:
+                    pulse_locations.append(diff_location)
+                    location_appended = True
+                else:
+                    pulse_locations[-1] = diff_location
 
-            # Update snippet-relative peak/trough indices after re-extraction
-            snippet_peak_idx = peak_idx - start_idx
-            snippet_trough_idx = trough_idx - start_idx
+            if snippet.shape[0] == 0:
+                eod_waveforms.append(np.array([]))
+                snippet_p1_idc.append(0)
+                snippet_p2_idc.append(0)
+                final_p1_idc.append(0)
+                final_p2_idc.append(0)
+                eod_amps.append(0.0)
+                pulse_orientations.append('HP')
+                amplitude_ratios.append(0.0)
+                eod_widths.append(0)
+                fft_peak_freqs.append(0.0)
+                waveform_lengths.append(0)
+                eod_chans_out.append(filtered_eod_chans[i])
+                is_differential_out.append(filtered_is_differential[i] if not use_pca else 2)
+                skip_pulse = True
+                break
 
-            re_extract = False
+            if attempt == 1:
+                # after re-extraction use translated indices directly; no further re-detection
+                snippet_peak_idx = peak_idx - start_idx
+                snippet_trough_idx = trough_idx - start_idx
+                break
+
+            # Verify that snippet_peak_idx is the actual maximum and snippet_trough_idx the actual
+            # minimum. The differential extraction can invert polarity relative to the raw detection,
+            # so the translated raw indices may point to the wrong extremum.
+            if snippet[peak_idx - start_idx] < snippet[trough_idx - start_idx]:
+                peak_idx, trough_idx = trough_idx, peak_idx
+                filtered_peak_idc[i], filtered_trough_idc[i] = filtered_trough_idc[i], filtered_peak_idc[i]
+
+            # Re-detect peak/trough within narrow window around expected position
+            peak_search_start = max(0, (peak_idx - start_idx) - search_window)
+            peak_search_end = min(len(snippet), (peak_idx - start_idx) + search_window)
+            peak_search_region = snippet[peak_search_start:peak_search_end]
+            peaks_in_region, _ = find_peaks(peak_search_region, height=np.max(peak_search_region) * 0.5)
+            if len(peaks_in_region) == 1:
+                snippet_peak_idx = peaks_in_region[0] + peak_search_start
+            elif len(peaks_in_region) > 1:
+                snippet_peak_idx = peaks_in_region[np.argmax(peak_search_region[peaks_in_region])] + peak_search_start
+            else:
+                snippet_peak_idx = peak_idx - start_idx
+
+            trough_search_start = max(0, (trough_idx - start_idx) - search_window)
+            trough_search_end = min(len(snippet), (trough_idx - start_idx) + search_window)
+            trough_search_region = snippet[trough_search_start:trough_search_end]
+            troughs_in_region, _ = find_peaks(-trough_search_region, height=-np.min(trough_search_region) * 0.5)
+            if len(troughs_in_region) == 1:
+                snippet_trough_idx = troughs_in_region[0] + trough_search_start
+            elif len(troughs_in_region) > 1:
+                snippet_trough_idx = troughs_in_region[np.argmin(trough_search_region[troughs_in_region])] + trough_search_start
+            else:
+                snippet_trough_idx = trough_idx - start_idx
+
+            peak_shifted = snippet_peak_idx != (peak_idx - start_idx)
+            trough_shifted = snippet_trough_idx != (trough_idx - start_idx)
+            if peak_shifted:
+                # print("peak shifted")
+                filtered_peak_idc[i] += snippet_peak_idx - (peak_idx - start_idx)
+            if trough_shifted:
+                # print("trough shifted")
+                filtered_trough_idc[i] += snippet_trough_idx - (trough_idx - start_idx)
+            if not peak_shifted and not trough_shifted:
+                break  # no correction needed; use current snippet and indices
+
+        if skip_pulse:
+            continue
 
         # Interpolate waveform if specified
         if interp_factor > 1:
@@ -479,20 +408,36 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
             interp_func = interp1d(original_indices, snippet, kind='cubic')
             snippet = interp_func(interp_indices)
 
-            # Update peak/trough indices after interpolation
-            # snippet_peak_idx = int(snippet_peak_idx * interp_factor)
-            # snippet_trough_idx = int(snippet_trough_idx * interp_factor)
-            # Slower but the idc might shift due to interpolation, so we will re-detect the peak and trough in the interpolated snippet instead of just scaling the indices
-            # The re-detection above remains valid as it might correct the idc values for the raw data
-            snippet_peak_idx = np.argmax(snippet)
-            snippet_trough_idx = np.argmin(snippet)
+            # Re-detect peak/trough in interpolated snippet to account for any shifts due to interpolation
+            search_window_interp = search_window * interp_factor
+            peak_search_start_interp = max(0, (snippet_peak_idx * interp_factor) - search_window_interp)
+            peak_search_end_interp = min(len(snippet), (snippet_peak_idx * interp_factor) + search_window_interp)
+            peak_search_region_interp = snippet[peak_search_start_interp:peak_search_end_interp]
+            peaks_in_region_interp, _ = find_peaks(peak_search_region_interp, height=np.max(peak_search_region_interp) * 0.5)
+            if len(peaks_in_region_interp) == 1:
+                snippet_peak_idx = peaks_in_region_interp[0] + peak_search_start_interp
+            elif len(peaks_in_region_interp) > 1:
+                snippet_peak_idx = peaks_in_region_interp[np.argmax(peak_search_region_interp[peaks_in_region_interp])] + peak_search_start_interp
+            else:
+                snippet_peak_idx = int(snippet_peak_idx * interp_factor)
+
+            trough_search_start_interp = max(0, (snippet_trough_idx * interp_factor) - search_window_interp)
+            trough_search_end_interp = min(len(snippet), (snippet_trough_idx * interp_factor) + search_window_interp)
+            trough_search_region_interp = snippet[trough_search_start_interp:trough_search_end_interp]
+            troughs_in_region_interp, _ = find_peaks(-trough_search_region_interp, height=-np.min(trough_search_region_interp) * 0.5)
+            if len(troughs_in_region_interp) == 1:
+                snippet_trough_idx = troughs_in_region_interp[0] + trough_search_start_interp
+            elif len(troughs_in_region_interp) > 1:
+                snippet_trough_idx = troughs_in_region_interp[np.argmin(trough_search_region_interp[troughs_in_region_interp])] + trough_search_start_interp
+            else:
+                snippet_trough_idx = int(snippet_trough_idx * interp_factor)
 
         # Calculate width between peak and trough
         eod_width = abs(snippet_peak_idx - snippet_trough_idx) * 1e6 // (rate * interp_factor)
 
         # Calculate peak-to-trough amplitude
         eod_amp = abs(snippet[snippet_peak_idx] - snippet[snippet_trough_idx])
-    
+
         # Determine pulse orientation based on peak and trough indices
         if snippet_trough_idx < snippet_peak_idx:
             pulse_orientation = 'HN'  # Head-negative (trough before peak)
@@ -534,6 +479,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
         fft_peak_freqs.append(fft_peak_snippet)
         waveform_lengths.append(len(snippet))
         eod_chans_out.append(filtered_eod_chans[i])
+        is_differential_out.append(filtered_is_differential[i] if not use_pca else 2)
 
     # Filter out any empty waveforms
     if len(eod_waveforms) == 0:
@@ -549,15 +495,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
         eod_amps = np.array(eod_amps)
         eod_widths = np.array(eod_widths)
         eod_chan = np.array(eod_chans_out)
-        
-        # Set is_differential based on extraction method
-        if use_pca:
-            is_differential_filtered = np.full(len(eod_waveforms), 2, dtype=int)  # 2 = PCA method
-            if pca_variance_explained:
-                mean_var_explained = np.mean(pca_variance_explained)
-                print(f"    PCA extraction complete: mean variance explained = {mean_var_explained:.3f}")
-        else:
-            is_differential_filtered = np.array([1] * len(eod_waveforms))  # All remaining are differential
+        is_differential_filtered = np.array(is_differential_out)
         
         snippet_p1_idc = np.array(snippet_p1_idc)
         snippet_p2_idc = np.array(snippet_p2_idc)
