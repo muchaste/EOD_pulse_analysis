@@ -265,7 +265,7 @@ for n, filepath in enumerate(file_set['filename']):
 
     # Unify pulses across channels
     unique_midpoints, unique_peaks, unique_troughs, unique_widths = unify_across_channels(
-        peaks, troughs, pulse_widths)
+        peaks, troughs, pulse_widths, proximity_threshold=parameters['duplicate_samples'])
 
     print(f"  Found {len(unique_midpoints)} unique pulses")
     del peaks, troughs, pulse_widths
