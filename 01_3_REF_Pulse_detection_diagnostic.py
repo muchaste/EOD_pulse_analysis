@@ -1210,7 +1210,7 @@ class PulseDiagnosticTool:
             if self.data_source == 'multich_linear':
                 # Unify pulses across channels
                 unique_midpoints, unique_peaks, unique_troughs, unique_widths = unify_across_channels(
-                    all_peaks, all_troughs, all_widths)
+                    all_peaks, all_troughs, all_widths, proximity_threshold=self.parameters['duplicate_samples'])
                 
                 print(f"    Detected {len(unique_midpoints)} unified pulses across channels")
                 # Create unique pulses list
