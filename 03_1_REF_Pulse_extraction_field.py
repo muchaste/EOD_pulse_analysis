@@ -180,6 +180,7 @@ parameters_df.to_csv('%s\\analysis_parameters.csv' % output_path, index=False)
 print(f"Analysis parameters saved to: {output_path}\\analysis_parameters.csv")
 plt.close()
 gc.collect()
+del data
 
 #%%
 # Initialize cross-file continuation variables
@@ -193,7 +194,23 @@ for n, filepath in enumerate(file_set['filename']):
     print(f"Processing {n+1}/{len(file_set)}: {fname}")
     
     gc.collect()
-    
+
+    # Release large arrays left from any previous iteration that exited early
+    for _cleanup_var in [
+        'data_diff', 'detection_signal',
+        'unique_midpoints', 'unique_peaks', 'unique_troughs', 'unique_widths',
+        'eod_snippets', 'eod_amps', 'eod_widths', 'eod_chan', 'is_differential',
+        'snippet_p1_idc', 'snippet_p2_idc', 'raw_p1_idc', 'raw_p2_idc',
+        'pulse_orientations', 'amp_ratios', 'fft_peak_freqs', 'pulse_locations', 'wf_lengths',
+        'raw_midpoint_idc', 'snippet_midpoint_idc', 'eod_timestamps',
+        'complete_eod_table', 'eod_table', 'filteredout_eod_table',
+        'filtered_eod_waveforms', 'final_events', 'events_at_end',
+        'filteredout_eod_chan', 'filteredout_final_p1_idc', 'filteredout_final_p2_idc',
+    ]:
+        if _cleanup_var in globals():
+            del globals()[_cleanup_var]
+    gc.collect()
+
     # Load file
     data, rate = aio.load_audio(filepath)
     n_channels = data.shape[1]
@@ -288,7 +305,8 @@ for n, filepath in enumerate(file_set['filename']):
                 use_pca=False,
                 window_mode = parameters['extraction_window'],
                 window_factor = parameters['extraction_window_factor'],
-                window_length = parameters['extraction_window_length_us']
+                window_length = parameters['extraction_window_length_us'],
+                search_window = parameters['search_window']
             )
         elif parameters['waveform_extraction'] == 'PCA':
             (
@@ -303,7 +321,8 @@ for n, filepath in enumerate(file_set['filename']):
                 use_pca=True, pca_interp_points = 300,
                 window_mode = parameters['extraction_window'],
                 window_factor = parameters['extraction_window_factor'],
-                window_length = parameters['extraction_window_length_us']
+                window_length = parameters['extraction_window_length_us'],
+                search_window = parameters['search_window']
             )
 
         if len(eod_snippets) == 0:
@@ -362,14 +381,13 @@ for n, filepath in enumerate(file_set['filename']):
             continue
 
         print(f"    Filtered {len(eod_snippets) - len(keep_indices)} out of {len(eod_snippets)} pulses")
-
+        del filtered_features, filteredout_features
 
         # Get indices of filtered-out pulses for QC
         all_indices = np.arange(len(eod_snippets))
         filtered_out_indices = np.setdiff1d(all_indices, keep_indices)
         
         # Create results table
-        eod_timestamps = []
         raw_midpoint_idc = (raw_p1_idc + raw_p2_idc) // 2
         snippet_midpoint_idc = (snippet_p1_idc + snippet_p2_idc) // 2
 
@@ -377,31 +395,20 @@ for n, filepath in enumerate(file_set['filename']):
         if retained_data is not None:
             # We have prepended data - need to determine which EODs came from which file
             retained_length = len(retained_data)
-            original_file_timestamps = []
-            original_filenames = []
             previous_fname = os.path.basename(file_set['filename'][n-1])
-            n_from_previous = 0
-            n_from_current = 0
-            for i in range(len(raw_midpoint_idc)):
-                if raw_midpoint_idc[i] < retained_length:
-                    # This EOD is from the retained (previous) file
-                    original_file_timestamps.append(file_set['timestamp'][n-1])
-                    original_filenames.append(previous_fname)
-                    n_from_previous += 1
-                else:
-                    # This EOD is from the current file
-                    original_file_timestamps.append(file_set['timestamp'][n])
-                    original_filenames.append(fname)
-                    n_from_current += 1
+            is_from_prev = raw_midpoint_idc < retained_length
+            n_from_previous = int(is_from_prev.sum())
+            n_from_current = len(raw_midpoint_idc) - n_from_previous
+            original_file_timestamps = [file_set['timestamp'][n-1] if p else file_set['timestamp'][n] for p in is_from_prev]
+            original_filenames = [previous_fname if p else fname for p in is_from_prev]
             print(f"    EOD distribution: {n_from_previous} from previous file, {n_from_current} from current file")
         else:
             # No prepended data - all EODs are from current file
             original_file_timestamps = [file_set['timestamp'][n]] * len(raw_midpoint_idc)
             original_filenames = [fname] * len(raw_midpoint_idc)
 
-        for i in range(len(raw_midpoint_idc)):            
-            eod_timestamps.append(file_start_time + dt.timedelta(seconds=raw_midpoint_idc[i]/rate))
-        
+        eod_timestamps = [file_start_time + dt.timedelta(seconds=t) for t in raw_midpoint_idc / rate]
+
         complete_eod_table = pd.DataFrame({
             'timestamp': eod_timestamps,
             'file_timestamp': original_file_timestamps,
@@ -441,7 +448,7 @@ for n, filepath in enumerate(file_set['filename']):
             if len(keep_indices) > 0:
                 try:
                     waveform_base = os.path.join(output_path, f'{fname[:-4]}_eod_waveforms')
-                    waveform_metadata = save_waveforms(
+                    save_waveforms(
                         filtered_eod_waveforms, waveform_base, length=parameters['extraction_window']
                     )
                     
@@ -478,7 +485,10 @@ for n, filepath in enumerate(file_set['filename']):
                         plot_title = f'{fname} - Differential EOD Detections - Red=P1, Blue=P2, Grey=Filtered Out (n={len(eod_idc)} kept, {len(filtered_out_indices)} filtered)'
                     
                     offset = np.max(eod_table['eod_amplitude']) * 1.5
-                    
+                    if len(filtered_out_indices) > 0:
+                        filteredout_eod_chan = filteredout_eod_table['eod_channel']
+                        filteredout_final_p1_idc = filteredout_eod_table['p1_idx']
+                        filteredout_final_p2_idc = filteredout_eod_table['p2_idx']
                     plt.figure(figsize=(20, 8))
                     for ch in range(n_plot_channels):
                         if parameters['waveform_extraction'] == 'PCA':
@@ -520,10 +530,6 @@ for n, filepath in enumerate(file_set['filename']):
                         
                         # Plot filtered-out pulses in grey
                         if len(filtered_out_indices) > 0:
-                            filteredout_eod_chan = filteredout_eod_table['eod_channel']
-                            filteredout_final_p1_idc = filteredout_eod_table['p1_idx']
-                            filteredout_final_p2_idc = filteredout_eod_table['p2_idx']
-                            
                             filteredout_ch_idc = np.where(filteredout_eod_chan == ch)[0]
                             if len(filteredout_ch_idc) > 0:
                                 plt.plot(filteredout_final_p1_idc.iloc[filteredout_ch_idc], 
@@ -666,11 +672,7 @@ for n, filepath in enumerate(file_set['filename']):
                 # Calculate summary statistics
                 duration = (event_eods['timestamp_dt'].max() - 
                             event_eods['timestamp_dt'].min()).total_seconds()
-                
-                # Calculate IPIs for this event
-                event_sorted = event_eods.sort_values('timestamp_dt')
-                # time_diffs = event_sorted['timestamp_dt'].diff().dt.total_seconds().dropna()
-                
+
                 summary = {
                     'event_id': event_id,
                     'eod_start_time': event_eods['timestamp_dt'].min(),
@@ -695,10 +697,7 @@ for n, filepath in enumerate(file_set['filename']):
                 print("      Created event summary")
 
                 event_start_time = summary['event_start_time']
-                event_start_time_str = event_start_time.strftime('%Y%m%dT%H%M%S')
                 event_end_time = summary['event_end_time']
-                event_end_time_str = event_end_time.strftime('%Y%m%dT%H%M%S')
-                event_duration = (event_end_time - event_start_time).total_seconds()
 
                 # Save waveforms for this event
                 event_eod_indices = event_eods['original_index'].values
@@ -742,11 +741,12 @@ for n, filepath in enumerate(file_set['filename']):
                         output_path=output_path,
                         extraction_method=parameters['waveform_extraction']
                     )
+                del event_eods, event_eod_waveforms, event_data
+
+            del final_events, events_at_end
 
     # Clear memory
-    del data
-    if 'eod_snippets' in locals():
-        del eod_snippets, eod_amps, eod_widths
+    del data, data_diff
     gc.collect()
             
 # Save event summaries across all files
