@@ -186,7 +186,6 @@ del data
 # Initialize cross-file continuation variables
 retained_data = None
 retained_data_start_time = None
-retained_events_at_end = None
 
 # Process each file
 for n, filepath in enumerate(file_set['filename']):
@@ -227,9 +226,10 @@ for n, filepath in enumerate(file_set['filename']):
         print(f"    Concatenating {len(retained_data)} samples from previous file")
         # Concatenate retained data to current file
         original_data_length = len(data)
-        data = np.concatenate([retained_data, data], axis=0)
-        # Adjust file start time to account for prepended data
         retained_duration = len(retained_data) / rate
+        data = np.concatenate([retained_data, data], axis=0)
+        retained_data = None  # free immediately — no longer needed
+        # Adjust file start time to account for prepended data
         file_start_time = retained_data_start_time
         print(f"    Extended file: {original_data_length/rate:.1f}s + {retained_duration:.2f}s = {len(data)/rate:.1f}s total")
         print(f"    Adjusted file_start_time to: {file_start_time}")
@@ -628,19 +628,26 @@ for n, filepath in enumerate(file_set['filename']):
                 # Store data and timing info for next iteration
                 retained_data = data[retain_start_idx:, :].copy()
                 retained_data_start_time = retain_start_time
-                retained_events_at_end = events_at_end.copy()
                 
                 print(f"    Retaining {len(retained_data)} samples ({len(retained_data)/rate:.2f}s) starting from {retain_start_time}")
             else:
                 # Clear retention variables
                 retained_data = None
                 retained_data_start_time = None
-                retained_events_at_end = None
                 if len(events_at_end) > 0:
                     print(f"    Found {len(events_at_end['merged_event_id'].unique())} event(s) reaching file end (last file - not retaining)")
 
-            # Process events that don't reach file end normally
-            events_to_filter = merged_events[~merged_events['reaches_file_end']].copy()
+            # Process events that don't reach file end normally.
+            # Also exclude events whose end time falls inside the retained region to
+            # avoid double-processing them in the next file iteration.
+            if retained_data is not None:
+                safe_end_mask = (
+                    ~merged_events['reaches_file_end'] &
+                    (merged_events['event_end_time'] <= retain_start_time)
+                )
+            else:
+                safe_end_mask = ~merged_events['reaches_file_end']
+            events_to_filter = merged_events[safe_end_mask].copy()
             print(f"    Events to process normally: {len(events_to_filter['merged_event_id'].unique())}")
 
             # Post-merge filter: remove events based on size AND amplitude criteria
