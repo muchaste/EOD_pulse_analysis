@@ -275,11 +275,15 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
     waveform_lengths = []  # Track actual waveform lengths
     eod_chans_out = []  # Track channel assignments in lockstep with all other output lists
     is_differential_out = []  # Track differential status in lockstep with all other output lists
+    snippet_p3_idc = []
+    final_p3_idc = []
     for i in range(n_pulses_diff):
         skip_pulse = False
         location_appended = False
         snippet_peak_idx = None
         snippet_trough_idx = None
+        snippet_p3_idx = -1  # Initialize as -1 to indicate not found
+        abs_p3_idx = -1     # P3 position in raw data coordinates; -1 = not found
 
         # For-loop for iterative re-extraction if peak/trough shift is detected after first attempt
         for attempt in range(2):
@@ -333,6 +337,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
                     location_appended = True
                 else:
                     pulse_locations[-1] = diff_location
+            # NOTE: LOCATION MIGHT HAVE TO BE UPDATED IF P1 IS FALSELY DETECTED?
 
             if snippet.shape[0] == 0:
                 eod_waveforms.append(np.array([]))
@@ -387,6 +392,63 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
             else:
                 snippet_trough_idx = trough_idx - start_idx
 
+            # Search for missed third phase in triphasic pulses.
+            amp_thr_tri = min(abs(snippet[snippet_peak_idx]), abs(snippet[snippet_trough_idx])) * 0.5
+            # # Case A1: P3 was detected as the peak (pulse appears HN but is actually HP triphasic).
+            # # detect_pulses returned (P3, P2); since P3 is temporally after P2, snippet_peak_idx > snippet_trough_idx.
+            # # Search before P2 for the missed P1.
+            # if snippet_peak_idx > snippet_trough_idx:
+            #     before_region = snippet[:snippet_trough_idx]
+            #     if len(before_region) > 0:
+            #         p1_candidates, _ = find_peaks(before_region, height=amp_thr_tri)
+            #         if len(p1_candidates) > 0:
+            #             p1_new = int(p1_candidates[-1])  # rightmost candidate, closest to P2
+            #             snippet_p3_idx = snippet_peak_idx  # old detected peak was P3
+            #             snippet_peak_idx = p1_new
+            #             filtered_peak_idc[i] = start_idx + p1_new
+
+            # Case A: Trough detected before peak -- HP triphasic where P3_peak was wrongly
+            # returned by detect_pulses instead of P1_peak.
+            # A1: search before P2 (trough) for missed P1 (positive peak).
+            # A2 (only if A1 misses): search after P3 (peak) for a trailing negative trough.
+            if snippet_trough_idx < snippet_peak_idx:
+                p1_found = False
+                before_region = snippet[:snippet_trough_idx]
+                if len(before_region) > 0:
+                    p1_candidates, _ = find_peaks(before_region, height=amp_thr_tri)
+                    if len(p1_candidates) > 0:
+                        p1_new = int(p1_candidates[-1])  # rightmost candidate, closest to P2
+                        abs_p3_idx = start_idx + snippet_peak_idx  # old peak (P3) in raw coords
+                        snippet_peak_idx = p1_new
+                        p1_found = True
+                if not p1_found:
+                    after_region = snippet[snippet_peak_idx:]
+                    if len(after_region) > 0:
+                        p3_candidates, _ = find_peaks(-after_region, height=amp_thr_tri)
+                        if len(p3_candidates) > 0:
+                            abs_p3_idx = start_idx + snippet_peak_idx + int(p3_candidates[0])
+
+            # Case B: Peak detected before trough -- HN triphasic where P3_trough was wrongly
+            # returned by detect_pulses instead of P1_trough.
+            # B1: search before P2 (peak) for missed P1 (negative trough).
+            # B2 (only if B1 misses): search after P3 (trough) for a trailing positive peak.
+            elif snippet_peak_idx < snippet_trough_idx:
+                p1_found = False
+                before_region = snippet[:snippet_peak_idx]
+                if len(before_region) > 0:
+                    p1_candidates, _ = find_peaks(-before_region, height=amp_thr_tri)
+                    if len(p1_candidates) > 0:
+                        p1_new = int(p1_candidates[-1])  # rightmost candidate, closest to P2
+                        abs_p3_idx = start_idx + snippet_trough_idx  # old trough (P3) in raw coords
+                        snippet_trough_idx = p1_new
+                        p1_found = True
+                if not p1_found:
+                    after_region = snippet[snippet_trough_idx:]
+                    if len(after_region) > 0:
+                        p3_candidates, _ = find_peaks(after_region, height=amp_thr_tri)
+                        if len(p3_candidates) > 0:
+                            abs_p3_idx = start_idx + snippet_trough_idx + int(p3_candidates[0])
+
             peak_shifted = snippet_peak_idx != (peak_idx - start_idx)
             trough_shifted = snippet_trough_idx != (trough_idx - start_idx)
             if peak_shifted:
@@ -409,7 +471,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
             snippet = interp_func(interp_indices)
 
             # Re-detect peak/trough in interpolated snippet to account for any shifts due to interpolation
-            search_window_interp = search_window * interp_factor
+            search_window_interp = search_window # * interp_factor
             peak_search_start_interp = max(0, (snippet_peak_idx * interp_factor) - search_window_interp)
             peak_search_end_interp = min(len(snippet), (snippet_peak_idx * interp_factor) + search_window_interp)
             peak_search_region_interp = snippet[peak_search_start_interp:peak_search_end_interp]
@@ -480,6 +542,10 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
         waveform_lengths.append(len(snippet))
         eod_chans_out.append(filtered_eod_chans[i])
         is_differential_out.append(filtered_is_differential[i] if not use_pca else 2)
+        # Convert absolute P3 index to final-snippet-relative using the last attempt's start_idx.
+        snippet_p3_idx = abs_p3_idx - start_idx if abs_p3_idx >= 0 else -1
+        snippet_p3_idc.append(snippet_p3_idx * interp_factor if interp_factor > 1 and snippet_p3_idx >= 0 else snippet_p3_idx)
+        final_p3_idc.append(abs_p3_idx if abs_p3_idx >= 0 else -1)
 
     # Filter out any empty waveforms
     if len(eod_waveforms) == 0:
@@ -489,7 +555,8 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
         else:
             print("    No valid differential waveforms found.")
         return ([], np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), np.array([]),
-                np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), np.array([]))
+                np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), np.array([]),
+                np.array([]), np.array([]))
     else:
         # Convert lists to arrays before returning
         eod_amps = np.array(eod_amps)
@@ -514,12 +581,15 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
         # Convert waveform_lengths to array
         waveform_lengths_array = np.array(waveform_lengths)
 
+        snippet_p3_idc = np.array(snippet_p3_idc)
+        final_p3_idc = np.array(final_p3_idc)
+
     # Return variable-length waveforms as list (no zero-padding)
     return (eod_waveforms, eod_amps, eod_widths, eod_chan, 
             is_differential_filtered, snippet_p1_idc, snippet_p2_idc,
             final_p1_idc, final_p2_idc, 
             pulse_orientations, amplitude_ratios, fft_peak_freqs, peak_locations_array,
-            waveform_lengths_array)
+            waveform_lengths_array, snippet_p3_idc, final_p3_idc)
     
 
 def _select_differential_channel_pointwise(data, n_channels, peaks, troughs):
@@ -1028,7 +1098,7 @@ def remove_exact_duplicates(arrays_dict, parameters):
 def remove_duplicates(eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
                         snippet_peak_idc, snippet_trough_idc, raw_peak_idc, raw_trough_idc,
                         pulse_orientation, amp_ratios, fft_peak_freqs, pulse_locations, 
-                        waveform_lengths, parameters):
+                        waveform_lengths, snippet_p3_idc, final_p3_idc, parameters):
     """
     Complete duplicate removal pipeline for EOD detection results.
     
@@ -1060,7 +1130,9 @@ def remove_duplicates(eod_snippets, eod_amps, eod_widths, eod_chan, is_different
         'amplitude_ratios': amp_ratios,
         'waveform_lengths': waveform_lengths,
         'fft_peak_freqs': fft_peak_freqs,
-        'pulse_locations': pulse_locations
+        'pulse_locations': pulse_locations,
+        'snippet_p3_idc': snippet_p3_idc,
+        'final_p3_idc': final_p3_idc
     }
     
     # Step 1: Remove proximity-based duplicates
@@ -1090,7 +1162,9 @@ def remove_duplicates(eod_snippets, eod_amps, eod_widths, eod_chan, is_different
         arrays_dict['amplitude_ratios'],
         arrays_dict['fft_peak_freqs'],
         arrays_dict['pulse_locations'],
-        arrays_dict['waveform_lengths']
+        arrays_dict['waveform_lengths'],
+        arrays_dict['snippet_p3_idc'],
+        arrays_dict['final_p3_idc']
     )
 
 
