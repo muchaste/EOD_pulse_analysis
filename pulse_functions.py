@@ -112,7 +112,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
                            source, return_differential=True, interp_factor=1,
                            use_pca=False, pca_component=0, pca_interp_points=100,
                            window_mode="fixed", window_factor=7, window_length = 4000,
-                           search_window=5):
+                           search_window=10):
     """
     Extract and analyze EOD snippets with variable widths based on detected pulse widths.
     For 2-D multi-channel data (finds polarity flips and extracts differential signals OR
