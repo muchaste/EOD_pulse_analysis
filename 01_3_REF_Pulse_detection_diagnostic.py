@@ -1240,7 +1240,7 @@ class PulseDiagnosticTool:
                     eod_waveforms, eod_amps, eod_widths, eod_chan, is_differential,
                     snippet_p1_idc, snippet_p2_idc, final_p1_idc, final_p2_idc, 
                     pulse_orientation, amplitude_ratios, fft_peak_freqs, pulse_locations,
-                    wf_lengths
+                    wf_lengths, snippet_p3_idc, final_p3_idc
                 ) = extract_pulse_snippets(
                     data, peaks, troughs, rate = rate,  
                     source=self.data_source, return_differential=self.parameters['return_diff'],
@@ -1263,12 +1263,12 @@ class PulseDiagnosticTool:
                     snippet_p1_idc, snippet_p2_idc, 
                     final_p1_idc, final_p2_idc,
                     pulse_orientation, amplitude_ratios, fft_peak_freqs, pulse_locations,
-                    wf_lengths
+                    wf_lengths, snippet_p3_idc, final_p3_idc
                 ) = remove_duplicates(
                     eod_waveforms, eod_amps, eod_widths, eod_chan, is_differential,
                     snippet_p1_idc, snippet_p2_idc, final_p1_idc, final_p2_idc,
                     pulse_orientation, amplitude_ratios, fft_peak_freqs, pulse_locations,
-                    wf_lengths, self.parameters
+                    wf_lengths, snippet_p3_idc, final_p3_idc, self.parameters
                 )
 
                 # Filter clipped and low-quality pulses

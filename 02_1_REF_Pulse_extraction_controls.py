@@ -288,7 +288,7 @@ for n, individual in enumerate(individual_info):
             eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
             snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc, 
             pulse_orientations, amp_ratios, fft_peak_freqs, peak_locations,
-            wf_lengths
+            wf_lengths, snippet_p3_idc, final_p3_idc
         ) = extract_pulse_snippets(
                 data, peaks, troughs, rate = rate,
                 source = 'multi1ch_diffch_linear', return_differential = parameters['return_diff'], 
@@ -335,7 +335,9 @@ for n, individual in enumerate(individual_info):
             'eod_width_us': eod_widths,
             'eod_amplitude_ratio': amp_ratios,
             'pulse_orientation': pulse_orientations,
-            'fft_freq_max': fft_peak_freqs
+            'fft_freq_max': fft_peak_freqs,
+            'snippet_p3_idx': snippet_p3_idc,
+            'p3_idx': final_p3_idc
             })
 
         # Apply amplitude-based filtering: only keep top X% highest amplitude EODs
