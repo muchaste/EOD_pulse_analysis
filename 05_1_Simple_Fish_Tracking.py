@@ -116,24 +116,25 @@ print("="*70)
 
 waveform_target_length = 150        # samples after normalization and resampling
 min_ipi_s = 0.002                   # 2ms absolute refractory period
-max_track_gap_s = 2                 # fragment times out after this gap in Pass 1
-max_location_jump_per_s = 200.0       # max plausible velocity in electrode units per second (for gating candidates in Pass 1)
+max_track_gap_s = 5                 # fragment times out after this gap in Pass 1
+max_location_jump_per_s = 400.0       # max plausible velocity in electrode units per second (for gating candidates in Pass 1)
 
 # Shape clustering parameters (applied within each width class)
-shape_dbscan_eps = 0.3             # DBSCAN epsilon on L2-normalized waveforms (range [0, 2])
+shape_dbscan_eps = 0.4             # DBSCAN epsilon on L2-normalized waveforms (range [0, 2])
 shape_dbscan_min_samples = 5       # minimum pulses to form a shape cluster
 dbscan_max_direct = 3000           # above this pulse count, subsample before DBSCAN (caps O(n²) memory)
 dbscan_sample_size = 2000          # number of pulses to subsample when width class exceeds dbscan_max_direct
 
-# Pass 1 cost weights — waveform dropped (identity pre-established by shape cluster)
-# location_weight + ipi_weight must sum to 1
+# Pass 1 cost weights and tolerances for candidate scoring; can be tuned based on diagnostic plots
+# weights must sum to 1
 location_weight = 0.2
-ipi_weight = 0.8
+ipi_weight = 0.4
+waveform_weight = 0.4                
 location_tolerance = 20.0           # electrode units; more lenient given location noise
 ipi_tolerance_fraction = 0.4       # min tolerance = 40% of median IPI
 ipi_tolerance_min_s = 0.05         # absolute floor for IPI tolerance
 n_recent_for_ipi = 8               # how many recent IPIs to use for median estimate
-pass1_cost_threshold = 10.0         # normalized cost; raised slightly since waveform no longer contributes
+pass1_new_frag_cost = 2.0          # if best candidate's cost exceeds this, creating a new fragment wins
 debug_pass1 = True                 # print one line per new fragment with rejection reason
 # Pass 2 (fragment stitching) parameters
 pass2_max_gap_s = 2.0              # max time gap between fragment end and start to consider stitching
@@ -142,6 +143,9 @@ pass2_spatial_weight = 0.2
 pass2_cost_threshold = 4.0          # normalized cost threshold for stitching fragments
 pass2_max_iterations = 3           # max stitching passes
 pass2_max_frags = 600              # skip Pass 2 if fragment count exceeds this (prevents O(n²) LAP blow-up)
+pass2_overlap_wf_threshold = 0.4  # max median waveform L2 distance to attempt overlap merge
+pass2_overlap_min_s = 0.1         # minimum actual time overlap required to consider overlap merge
+pass2_overlap_max_iterations = 3  # max overlap-merge passes
 
 # Pruning
 min_track_pulses = 15               # discard tracks shorter than this
@@ -272,7 +276,7 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
 
     min_peak_distance_bins = int(width_min_separation_us / (width_range[1] - width_range[0]))
     peaks_idx, _ = find_peaks(kde_vals, distance=max(1, min_peak_distance_bins),
-                               prominence=0.05 * kde_vals.max())
+                               prominence=0.01 * kde_vals.max())
 
     if len(peaks_idx) > 1:
         peak_positions = width_range[peaks_idx]
@@ -421,26 +425,14 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
                     'last_timestamp': pulse_ts,
                     'last_location': pulse_loc,
                     'width_class': wc,
-                    'shape_class': sc
+                    'shape_class': sc,
+                    'waveform_signature': waveforms_l2[pulse_idx].copy()
                 }
                 eod_data.loc[pulse_idx, 'fragment_id'] = next_fragment_id
                 next_fragment_id += 1
                 continue
 
-            if len(candidate_ids) == 1:
-                # Only one candidate - assign directly without computing cost
-                best_fid = candidate_ids[0]
-                f = fragments[best_fid]
-                dt = (pulse_ts - f['last_timestamp']).total_seconds()
-                f['ipi_history'].append(dt)
-                f['history'].append(pulse_idx)
-                f['last_timestamp'] = pulse_ts
-                f['last_location'] = pulse_loc
-                eod_data.loc[pulse_idx, 'fragment_id'] = best_fid
-                continue
-
-            # Multiple candidates: score by location + IPI
-            # (waveform identity is pre-established by shape cluster)
+            # Score all candidates; new-fragment competes at cost = pass1_new_frag_cost
             best_fid = None
             best_cost = np.inf
             for fid in candidate_ids:
@@ -467,19 +459,23 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
                 else:
                     ipi_cost = 0.0
 
-                cost = location_weight * loc_cost + ipi_weight * ipi_cost
+                # Waveform cost: use rolling signature (median of last 10 assigned pulses)
+                waveform_cost = np.linalg.norm(waveforms_l2[pulse_idx] - f['waveform_signature'])
+
+                cost = location_weight * loc_cost + ipi_weight * ipi_cost + waveform_weight * waveform_cost
 
                 if cost < best_cost:
                     best_cost = cost
                     best_fid = fid
 
-            if best_cost < pass1_cost_threshold:
+            if best_cost < pass1_new_frag_cost:
                 f = fragments[best_fid]
                 dt = (pulse_ts - f['last_timestamp']).total_seconds()
                 f['ipi_history'].append(dt)
                 f['history'].append(pulse_idx)
                 f['last_timestamp'] = pulse_ts
                 f['last_location'] = pulse_loc
+                f['waveform_signature'] = np.median(waveforms_l2[f['history'][-10:]], axis=0)
                 eod_data.loc[pulse_idx, 'fragment_id'] = best_fid
             else:
                 if debug_pass1:
@@ -502,18 +498,21 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
                         med_ipi_d = float('nan')
                         ipi_tol_d = float('nan')
                         ipi_cost_d = 0.0
+                    waveform_cost_d = np.linalg.norm(waveforms_l2[pulse_idx] - f_best['waveform_signature'])
                     print(f'  [NEW frag {next_fragment_id}] t={t_rel:.3f}s loc={pulse_loc:.3f} '
-                          f'wc={wc} sc={sc} | cost_too_high: best_frag={best_fid} '
-                          f'cost={best_cost:.3f} > thr={pass1_cost_threshold} | '
+                          f'wc={wc} sc={sc} | new_frag_wins: best_frag={best_fid} '
+                          f'cost={best_cost:.3f} >= new_frag_cost={pass1_new_frag_cost} | '
                           f'loc_cost={loc_cost_d:.3f} (pred={pred_loc_d:.3f}, actual={pulse_loc:.3f}, tol={location_tolerance}) | '
-                          f'ipi_cost={ipi_cost_d:.3f} (dt={dt_best:.3f}s, med_ipi={med_ipi_d:.3f}s, tol={ipi_tol_d:.3f}s)')
+                          f'ipi_cost={ipi_cost_d:.3f} (dt={dt_best:.3f}s, med_ipi={med_ipi_d:.3f}s, tol={ipi_tol_d:.3f}s) | '
+                          f'waveform_cost={waveform_cost_d:.3f}')
                 fragments[next_fragment_id] = {
                     'history': [pulse_idx],
                     'ipi_history': [],
                     'last_timestamp': pulse_ts,
                     'last_location': pulse_loc,
                     'width_class': wc,
-                    'shape_class': sc
+                    'shape_class': sc,
+                    'waveform_signature': waveforms_l2[pulse_idx].copy()
                 }
                 eod_data.loc[pulse_idx, 'fragment_id'] = next_fragment_id
                 next_fragment_id += 1
@@ -523,12 +522,100 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
     print(f"✓ Pass 1 complete: {n_fragments_pass1} fragments, {n_assigned_pass1}/{len(eod_data)} pulses assigned")
 
     # -------------------------------------------------------------------------
-    # Step 4: Pass 2 - Fragment stitching using LAP
+    # Step 4: Pass 2a - Overlap merge
+    # Fragments whose time ranges genuinely overlap (interleaved pulse trains)
+    # are merged if their median waveforms are similar and merging does not
+    # create any consecutive pulse pair below min_ipi_s.
+    # Greedy acceptance ranked by ascending waveform distance.
+    # -------------------------------------------------------------------------
+    print("\nPass 2a: Overlap merge...")
+
+    for overlap_iter in range(pass2_overlap_max_iterations):
+        frag_ids = list(fragments.keys())
+        n_frags = len(frag_ids)
+        if n_frags < 2:
+            break
+
+        # Median waveform and time-span per fragment
+        frag_start_ts = {fid: eod_data.loc[f['history'][0], 'timestamp'] for fid, f in fragments.items()}
+        frag_end_ts = {fid: eod_data.loc[f['history'][-1], 'timestamp'] for fid, f in fragments.items()}
+        frag_median_wf = {fid: np.median(waveforms_l2[f['history']], axis=0) for fid, f in fragments.items()}
+
+        candidates = []  # list of (wf_dist, fid_A, fid_B) where A < B (arbitrary order key)
+        for i in range(n_frags):
+            for j in range(i + 1, n_frags):
+                fid_a = frag_ids[i]
+                fid_b = frag_ids[j]
+                # Check genuine time overlap: overlap window > pass2_overlap_min_s
+                overlap_start = max(frag_start_ts[fid_a], frag_start_ts[fid_b])
+                overlap_end = min(frag_end_ts[fid_a], frag_end_ts[fid_b])
+                overlap_s = (overlap_end - overlap_start).total_seconds() if overlap_end > overlap_start else 0.0
+                if overlap_s < pass2_overlap_min_s:
+                    continue
+                # Width class must match (different electrode distances = different species)
+                if fragments[fid_a]['width_class'] != fragments[fid_b]['width_class']:
+                    continue
+                # Waveform similarity check
+                wf_dist = np.linalg.norm(frag_median_wf[fid_a] - frag_median_wf[fid_b])
+                if wf_dist >= pass2_overlap_wf_threshold:
+                    continue
+                # IPI validity: merge all pulse indices, sort by timestamp, check no gap < min_ipi_s
+                merged_indices = fragments[fid_a]['history'] + fragments[fid_b]['history']
+                merged_ts = np.array([eod_data.loc[pidx, 'timestamp'].timestamp() for pidx in merged_indices])
+                merged_ts_sorted = np.sort(merged_ts)
+                min_gap = np.min(np.diff(merged_ts_sorted)) if len(merged_ts_sorted) > 1 else 1.0
+                if min_gap < min_ipi_s:
+                    continue
+                candidates.append((wf_dist, fid_a, fid_b))
+
+        if not candidates:
+            print(f"  Overlap iter {overlap_iter + 1}: no candidates, stopping")
+            break
+
+        # Greedy acceptance: sort by wf_dist ascending, consume each fragment at most once
+        candidates.sort(key=lambda x: x[0])
+        consumed = set()
+        n_merged = 0
+        for wf_dist, fid_a, fid_b in candidates:
+            if fid_a in consumed or fid_b in consumed:
+                continue
+            # Merge fid_b into fid_a (keep lower fid as canonical)
+            fid_keep = min(fid_a, fid_b)
+            fid_drop = max(fid_a, fid_b)
+            f_keep = fragments[fid_keep]
+            f_drop = fragments[fid_drop]
+            merged_indices = f_keep['history'] + f_drop['history']
+            merged_ts_raw = [(eod_data.loc[pidx, 'timestamp'], pidx) for pidx in merged_indices]
+            merged_ts_raw.sort(key=lambda x: x[0])
+            sorted_indices = [pidx for _, pidx in merged_ts_raw]
+            sorted_ts = [ts for ts, _ in merged_ts_raw]
+            f_keep['history'] = sorted_indices
+            f_keep['ipi_history'] = [(sorted_ts[k] - sorted_ts[k - 1]).total_seconds() for k in range(1, len(sorted_ts))]
+            f_keep['last_timestamp'] = sorted_ts[-1]
+            f_keep['last_location'] = eod_data.loc[sorted_indices[-1], 'pulse_location']
+            f_keep['waveform_signature'] = np.median(waveforms_l2[sorted_indices[-10:]], axis=0)
+            for pidx in f_drop['history']:
+                eod_data.loc[pidx, 'fragment_id'] = fid_keep
+            del fragments[fid_drop]
+            consumed.add(fid_a)
+            consumed.add(fid_b)
+            n_merged += 1
+            print(f"  [OVERLAP MERGE] fid {fid_drop} -> fid {fid_keep}  wf_dist={wf_dist:.3f}  overlap={overlap_s:.2f}s")
+
+        print(f"  Overlap iter {overlap_iter + 1}: merged {n_merged} pair(s), {len(fragments)} fragments remain")
+        if n_merged == 0:
+            break
+
+    print(f"✓ Pass 2a complete: {len(fragments)} fragments")
+
+    # -------------------------------------------------------------------------
+    # Step 4b: Pass 2b - Sequential fragment stitching using LAP
     # Build a cost matrix of (fragment endings) x (fragment starts).
     # Merge fragment pairs whose assignment cost is below threshold.
     # Iterate until no more merges occur.
+    # shape_class gate removed — waveform cost already captures shape similarity.
     # -------------------------------------------------------------------------
-    print("\nPass 2: Fragment stitching...")
+    print("\nPass 2b: Sequential fragment stitching...")
 
     for stitch_iter in range(pass2_max_iterations):
         frag_ids = list(fragments.keys())
@@ -536,7 +623,7 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
         if n_frags < 2:
             break
         if n_frags > pass2_max_frags:
-            print(f"  Iteration {stitch_iter + 1}: {n_frags} fragments > pass2_max_frags={pass2_max_frags}, skipping Pass 2")
+            print(f"  Iteration {stitch_iter + 1}: {n_frags} fragments > pass2_max_frags={pass2_max_frags}, skipping Pass 2b")
             break
 
         # Precompute per-fragment summary stats
@@ -555,20 +642,19 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
             for j, fid_start in enumerate(frag_ids):
                 if fid_end == fid_start:
                     continue
-                # start must come after end; gap must be within window
+                # start must come strictly after end; gap must be within window
                 gap = (frag_start_ts[fid_start] - frag_end_ts[fid_end]).total_seconds()
                 if gap <= 0 or gap > pass2_max_gap_s:
                     continue
-                # Must be same (width_class, shape_class)
+                # Width class must match (different electrode distances = different species)
                 if fragments[fid_end]['width_class'] != fragments[fid_start]['width_class']:
                     continue
-                if fragments[fid_end]['shape_class'] != fragments[fid_start]['shape_class']:
-                    continue
+                # shape_class gate removed: waveform cost captures shape similarity
                 # Waveform distance
                 wf_cost = np.linalg.norm(frag_end_wf[fid_end] - frag_start_wf[fid_start])
                 # Spatial plausibility: velocity over the gap
                 loc_diff = abs(frag_start_loc[fid_start] - frag_end_loc[fid_end])
-                max_allowed_loc_diff = 3.0 * gap  # generous: 3 electrode units / second
+                max_allowed_loc_diff = max_location_jump_per_s * gap
                 if loc_diff > max_allowed_loc_diff:
                     continue
                 spatial_cost = loc_diff / max(location_tolerance, 0.01)
@@ -587,7 +673,6 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
             break
 
         # Apply merges: append start fragment's history onto end fragment
-        # Consume each fragment at most once (LAP guarantees one-to-one, but verify)
         consumed = set()
         for fid_end, fid_start in merges:
             if fid_end in consumed or fid_start in consumed:
@@ -611,7 +696,7 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
 
         print(f"  Iteration {stitch_iter + 1}: merged {len(merges)} fragment pair(s), {len(fragments)} fragments remain")
 
-    print(f"✓ Pass 2 complete: {len(fragments)} fragments")
+    print(f"✓ Pass 2b complete: {len(fragments)} fragments")
 
     # -------------------------------------------------------------------------
     # Step 5: Prune short/spurious fragments
