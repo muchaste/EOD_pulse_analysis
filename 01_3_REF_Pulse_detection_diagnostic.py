@@ -80,7 +80,8 @@ class PulseDiagnosticTool:
             'return_diff': True,
             'length': 2000,
             'length_extraction': 'fixed',
-            'length_factor': 10
+            'length_factor': 10,
+            'search_window': 10
         }
         
         # Time window parameters (0,0 means use full file)
@@ -1112,7 +1113,7 @@ class PulseDiagnosticTool:
                 
                 if param in ['save_filtered_out', 'return_diff']:
                     self.parameters[param] = value_str.lower() in ['true', '1', 'yes', 'on']
-                elif param in ['interp_factor', 'min_width_us', 'max_width_us', 'peak_fft_freq_min', 'peak_fft_freq_max', 'length', 'length_factor']:
+                elif param in ['interp_factor', 'min_width_us', 'max_width_us', 'peak_fft_freq_min', 'peak_fft_freq_max', 'length', 'length_factor', 'search_window', 'duplicate_samples']:
                     self.parameters[param] = int(float(value_str))
                 else:
                     self.parameters[param] = float(value_str)
@@ -1246,7 +1247,8 @@ class PulseDiagnosticTool:
                     interp_factor=self.parameters['interp_factor'],
                     window_mode=self.parameters['length_extraction'],
                     window_factor=int(self.parameters['length_factor']),
-                    window_length=self.parameters['length']
+                    window_length=self.parameters['length'],
+                    search_window=self.parameters['search_window']
                 )
 
                 print(f"    Filtering for differential pulses...{len(unique_pulses)} total, {np.sum(is_differential)} differential")

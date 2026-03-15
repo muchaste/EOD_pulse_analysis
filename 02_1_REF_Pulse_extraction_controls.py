@@ -287,7 +287,8 @@ for n, individual in enumerate(individual_info):
         (
             eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
             snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc, 
-            pulse_orientations, amp_ratios, fft_peak_freqs, peak_locations
+            pulse_orientations, amp_ratios, fft_peak_freqs, peak_locations,
+            wf_lengths
         ) = extract_pulse_snippets(
                 data, peaks, troughs, rate = rate,
                 source = 'multi1ch_diffch_linear', return_differential = parameters['return_diff'], 
@@ -295,7 +296,8 @@ for n, individual in enumerate(individual_info):
                 use_pca=False,
                 window_mode = parameters['extraction_window'],
                 window_factor = parameters['extraction_window_factor'],
-                window_length = parameters['extraction_window_length_us']
+                window_length = parameters['extraction_window_length_us'],
+                search_window=parameters['search_window']
             )
         
         # extract_pulse_snippets(
