@@ -166,7 +166,7 @@ class ParameterConfigGUI:
             ('peak_fft_freq_max', 'Max FFT Peak Frequency (Hz):', 10000, float),
             ('extraction_window_length_us', 'Waveform Window Length (μs):', 4000, float),
             ('extraction_window_factor', 'Waveform Window Factor:', 7.0, float),
-
+            ('search_window', 'Search Window (samples):', 10, int)
         ]
         
         for i, (key, label, default, dtype) in enumerate(filter_params):
