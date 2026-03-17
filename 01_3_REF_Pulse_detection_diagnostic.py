@@ -90,6 +90,8 @@ class PulseDiagnosticTool:
         # Analysis parameters for control recording style analysis
         self.clip_threshold = tk.DoubleVar(value=20.0)  # Peak-trough amplitude threshold
         self.top_percent = tk.DoubleVar(value=100.0)   # Top x% of pulses to analyze
+        self.crop_factor = tk.DoubleVar(value=10.0)    # Factor for cropping around peaks
+        self.target_samples = tk.IntVar(value=300)     # Target number of samples for interpolation
         
         # Storage for extracted pulse data (for analysis)
         self.current_pulse_data = None
@@ -309,6 +311,14 @@ class PulseDiagnosticTool:
         ttk.Label(analysis_row1, text="Top%:", width=5).pack(side=tk.LEFT, padx=(10,0))
         percent_entry = ttk.Entry(analysis_row1, textvariable=self.top_percent, width=6)
         percent_entry.pack(side=tk.LEFT, padx=2)
+
+        ttk.Label(analysis_row1, text="Crop fact.:", width=5).pack(side=tk.LEFT, padx=(10,0))
+        crop_entry = ttk.Entry(analysis_row1, textvariable=self.crop_factor, width=6)
+        crop_entry.pack(side=tk.LEFT, padx=2)
+
+        ttk.Label(analysis_row1, text="Target samples: ", width=10).pack(side=tk.LEFT, padx=(10,0))
+        target_samples_entry = ttk.Entry(analysis_row1, textvariable=self.target_samples, width=6)
+        target_samples_entry.pack(side=tk.LEFT, padx=2)
 
         # Bandpass filter control
         bp_frame = ttk.LabelFrame(right_controls, text="Bandpass Filter", padding=5)
@@ -1822,7 +1832,8 @@ Current Parameters:
         # Use crop_and_interpolate=True to ensure fixed-length output for variable-length extraction
         normalized_waveforms = np.array(normalize_waveforms(
             waveforms, snippet_p1_idc, snippet_p2_idc, 
-            crop_and_interpolate=True, target_length=150
+            crop_and_interpolate=True, crop_factor=self.crop_factor.get(),
+            target_length=self.target_samples.get()
         ))
         
         # Time axis for waveforms (centered around 0)
