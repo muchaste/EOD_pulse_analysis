@@ -859,7 +859,7 @@ class TrackingParameterConfigGUI:
         current_row += 1
 
         self.param_vars['use_species_matching'] = tk.BooleanVar(value=False)
-        ttk.Checkbutton(species_frame, text="Enable Species Matching (1-NN against control library)",
+        ttk.Checkbutton(species_frame, text="Enable Species Matching (LDA + PCA against control library)",
                         variable=self.param_vars['use_species_matching'],
                         command=self._toggle_species_fields).grid(
             row=0, column=0, columnspan=3, sticky=tk.W)
@@ -872,6 +872,14 @@ class TrackingParameterConfigGUI:
         self._control_btn = ttk.Button(species_frame, text="Browse", state='disabled',
                                        command=lambda: self.browse_folder('control_path'))
         self._control_btn.grid(row=1, column=2)
+
+        self._lda_prob_label = ttk.Label(species_frame, text="Min LDA Probability Threshold (0–1):",
+                                         state='disabled')
+        self._lda_prob_label.grid(row=2, column=0, sticky=tk.W, pady=2)
+        self.param_vars['lda_min_probability'] = tk.DoubleVar(value=0.0)
+        self._lda_prob_entry = ttk.Entry(species_frame, textvariable=self.param_vars['lda_min_probability'],
+                                         width=10, state='disabled')
+        self._lda_prob_entry.grid(row=2, column=1, sticky=tk.W, padx=5)
 
         # Normalization parameters
         norm_frame = ttk.LabelFrame(scrollable_frame, text="Waveform Normalization", padding="10")
@@ -989,6 +997,8 @@ class TrackingParameterConfigGUI:
         state = 'normal' if self.param_vars['use_species_matching'].get() else 'disabled'
         self._control_entry.config(state=state)
         self._control_btn.config(state=state)
+        self._lda_prob_label.config(state=state)
+        self._lda_prob_entry.config(state=state)
 
     def browse_folder(self, var_name):
         folder = filedialog.askdirectory(title=f"Select {var_name.replace('_', ' ').title()}")
