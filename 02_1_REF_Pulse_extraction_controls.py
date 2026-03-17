@@ -30,13 +30,13 @@ from pulse_functions import (
 )
 
 # Import parameter configuration GUI
-from parameter_gui import ParameterConfigGUI
+from parameter_gui import ControlParameterConfigGUI
 
 
 print("Starting Parameter Configuration GUI...")
 
 root = tk.Tk()
-config_gui = ParameterConfigGUI(root)
+config_gui = ControlParameterConfigGUI(root)
 root.mainloop()
 
 # Check if user cancelled
@@ -47,12 +47,7 @@ if config_gui.result is None:
 # Extract configuration
 config = config_gui.result
 input_path = config['paths']['input_path']
-cal_file = config['paths']['cal_file']
 output_path = config['paths']['output_path']
-
-use_ml_filtering = config['ml_settings']['use_ml_filtering']
-classifier_path = config['ml_settings']['classifier_path'] if use_ml_filtering else None
-fish_probability_threshold = config['ml_settings']['fish_probability_threshold']
 
 parameters = config['parameters']
 
@@ -60,22 +55,17 @@ print("\n" + "="*60)
 print("CONFIGURATION SUMMARY")
 print("="*60)
 print(f"Input folder: {input_path}")
-print(f"Calibration file: {cal_file}")
 print(f"Output folder: {output_path}")
-print(f"ML filtering: {'Enabled' if use_ml_filtering else 'Disabled'}")
-if use_ml_filtering:
-    print(f"  Classifier: {classifier_path}")
-    print(f"  Threshold: {fish_probability_threshold}")
 print("\nAnalysis Parameters:")
 for key, value in parameters.items():
     print(f"  {key}: {value}")
 print("="*60 + "\n")
 
 # Set directories
-root = tk.Tk()
-root.withdraw()
-input_path = filedialog.askdirectory(title="Select Folder with Individual Fish Folders")
-output_path = filedialog.askdirectory(title="Select Folder to Store Analysis Results")
+# root = tk.Tk()
+# root.withdraw()
+# input_path = filedialog.askdirectory(title="Select Folder with Individual Fish Folders")
+# output_path = filedialog.askdirectory(title="Select Folder to Store Analysis Results")
 
 # Find individual fish folders
 individual_folders = [d for d in glob.glob(os.path.join(input_path, "*")) if os.path.isdir(d)]
@@ -291,7 +281,8 @@ for n, individual in enumerate(individual_info):
             wf_lengths, snippet_p3_idc, final_p3_idc
         ) = extract_pulse_snippets(
                 data, peaks, troughs, rate = rate,
-                source = 'multi1ch_diffch_linear', return_differential = parameters['return_diff'], 
+                source = parameters['source'], 
+                return_differential = parameters['return_diff'], 
                 interp_factor=parameters['interp_factor'],
                 use_pca=False,
                 window_mode = parameters['extraction_window'],
@@ -536,7 +527,10 @@ for n, individual in enumerate(individual_info):
                     filtered_snippet_p1_idc, 
                     filtered_snippet_p2_idc,
                     method='p1_unity',  # P1 = +1, head-positive orientation
-                    baseline_correction=True
+                    baseline_correction=True,
+                    crop_and_interpolate=True,
+                    target_length=int(parameters['target_length']),
+                    crop_factor=int(parameters['crop_factor'])
                 )
                 
                 print(f"    Successfully normalized {len(normalized_waveforms)} waveforms")
