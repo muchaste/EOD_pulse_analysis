@@ -2,38 +2,6 @@
 # 02_2_REF_Species_Classification.py - UPDATED FOR FIXED-LENGTH WAVEFORMS
 # EOD Species Classification with Enhanced Wavelet Analysis
 
-RECENT UPDATES:
-==============
-✅ FIXED-LENGTH WAVEFORM SUPPORT:
-- Updated to work with new fixed-length waveform storage system (.npz format)
-- Added proper waveform normalization using normalize_waveforms() function
-- Integrated P1/P2 index support for consistent waveform orientation
-- Automatic detection of fixed vs variable-length waveforms
-- Updated CWT implementation to use PyWavelets (replacing deprecated scipy.signal.cwt)
-
-✅ WAVEFORM NORMALIZATION:
-- P1-positive orientation (head-positive) for all waveforms
-- P1 amplitude normalization to unity for consistent scaling
-- Baseline correction for improved feature extraction
-- Normalization comparison plots for quality control
-
-✅ CRITICAL FIXES IMPLEMENTED:
-- 1.1 Fixed data leakage in preprocessing pipeline (scaler fit only on training data)
-- 1.2 Added QDA regularization (reg_param=0.01) to prevent singular covariance matrices  
-- 1.3 Fixed MDA implementation with proper Bayesian framework and class priors
-- 1.4 Added comprehensive sample size validation for all algorithms
-
-✅ PRIORITY 2 - STATISTICAL RIGOR:
-- 2.1 Added assumption testing: normality, multicollinearity, homoscedasticity
-
-🔄 REMAINING TODO (for further enhancement):
-- 2.2 Implement nested cross-validation for unbiased model selection
-- 2.3 Add feature selection for high-dimensional wavelet features  
-- 2.4 Multiple testing correction (Bonferroni) for model comparisons
-- 3.1 Add power analysis for sample size adequacy
-- 3.2 Effect size reporting alongside significance testing
-
-SCIENTIFIC QUALITY STATUS: Publication-ready with critical issues resolved
 """
 
 # =============================================================================
