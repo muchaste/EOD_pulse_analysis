@@ -10,6 +10,7 @@ from scipy.optimize import linear_sum_assignment
 from scipy.stats import gaussian_kde
 from scipy.signal import find_peaks
 from sklearn.cluster import DBSCAN
+from sklearn.decomposition import PCA
 
 # Import EOD functions
 from pulse_functions import (
@@ -17,25 +18,31 @@ from pulse_functions import (
     normalize_waveforms,
     create_tracking_plot
 )
+from parameter_gui import TrackingParameterConfigGUI
 
 print("="*70)
 print("SIMPLE FISH TRACKING")
 print("="*70)
 
+print("\nStarting Parameter Configuration GUI...")
 root = tk.Tk()
-root.withdraw()
+config_gui = TrackingParameterConfigGUI(root)
+root.mainloop()
 
-print("\nSelect INPUT folder containing EOD data...")
-input_folder = filedialog.askdirectory(title="Select Input Folder")
-if not input_folder:
-    raise ValueError("No input folder selected")
+if config_gui.result is None:
+    print("Configuration cancelled by user")
+    exit()
+
+config = config_gui.result
+input_folder = config['paths']['input_path']
+output_folder = config['paths']['output_path']
+control_path = config['paths'].get('control_path', '')
+params = config['parameters']
+
 print(f"✓ Input folder: {input_folder}")
-
-print("\nSelect OUTPUT folder...")
-output_folder = filedialog.askdirectory(title="Select Output Folder")
-if not output_folder:
-    raise ValueError("No output folder selected")
 print(f"✓ Output folder: {output_folder}")
+if params['use_species_matching']:
+    print(f"✓ Control folder: {control_path}")
 
 print("\n" + "="*70)
 print("LOADING DATA FILES")
@@ -111,48 +118,121 @@ print("PROCESSING FILES")
 print("="*70)
 
 # =============================================================================
-# TRACKING PARAMETERS
+# TRACKING PARAMETERS (from GUI)
 # =============================================================================
 
-waveform_target_length = 150        # samples after normalization and resampling
-min_ipi_s = 0.002                   # 2ms absolute refractory period
-max_track_gap_s = 5                 # fragment times out after this gap in Pass 1
-max_location_jump_per_s = 400.0       # max plausible velocity in electrode units per second (for gating candidates in Pass 1)
+waveform_target_length  = int(params['waveform_target_length'])
+crop_factor             = int(params['crop_factor'])
+min_ipi_s               = float(params['min_ipi_s'])
+max_track_gap_s         = float(params['max_track_gap_s'])
+max_location_jump_per_s = float(params['max_location_jump_per_s'])
 
-# Shape clustering parameters (applied within each width class)
-shape_dbscan_eps = 0.4             # DBSCAN epsilon on L2-normalized waveforms (range [0, 2])
-shape_dbscan_min_samples = 5       # minimum pulses to form a shape cluster
-dbscan_max_direct = 3000           # above this pulse count, subsample before DBSCAN (caps O(n²) memory)
-dbscan_sample_size = 2000          # number of pulses to subsample when width class exceeds dbscan_max_direct
+shape_dbscan_eps         = float(params['shape_dbscan_eps'])
+shape_dbscan_min_samples = int(params['shape_dbscan_min_samples'])
+dbscan_max_direct        = 3000
+dbscan_sample_size       = 2000
 
-# Pass 1 cost weights and tolerances for candidate scoring; can be tuned based on diagnostic plots
-# weights must sum to 1
-location_weight = 0.2
-ipi_weight = 0.4
-waveform_weight = 0.4                
-location_tolerance = 20.0           # electrode units; more lenient given location noise
-ipi_tolerance_fraction = 0.4       # min tolerance = 40% of median IPI
-ipi_tolerance_min_s = 0.05         # absolute floor for IPI tolerance
-n_recent_for_ipi = 8               # how many recent IPIs to use for median estimate
-pass1_new_frag_cost = 2.0          # if best candidate's cost exceeds this, creating a new fragment wins
-debug_pass1 = True                 # print one line per new fragment with rejection reason
-# Pass 2 (fragment stitching) parameters
-pass2_max_gap_s = 2.0              # max time gap between fragment end and start to consider stitching
-pass2_waveform_weight = 0.8
-pass2_spatial_weight = 0.2
-pass2_cost_threshold = 4.0          # normalized cost threshold for stitching fragments
-pass2_max_iterations = 3           # max stitching passes
-pass2_max_frags = 600              # skip Pass 2 if fragment count exceeds this (prevents O(n²) LAP blow-up)
-pass2_overlap_wf_threshold = 0.4  # max median waveform L2 distance to attempt overlap merge
-pass2_overlap_min_s = 0.1         # minimum actual time overlap required to consider overlap merge
-pass2_overlap_max_iterations = 3  # max overlap-merge passes
+location_weight       = float(params['location_weight'])
+ipi_weight            = float(params['ipi_weight'])
+waveform_weight       = float(params['waveform_weight'])
+location_tolerance    = float(params['location_tolerance'])
+ipi_tolerance_fraction = float(params['ipi_tolerance_fraction'])
+ipi_tolerance_min_s   = float(params['ipi_tolerance_min_s'])
+n_recent_for_ipi      = int(params['n_recent_for_ipi'])
+pass1_new_frag_cost   = float(params['pass1_new_frag_cost'])
+debug_pass1           = True
 
-# Pruning
-min_track_pulses = 15               # discard tracks shorter than this
-min_track_duration_s = 0.5         # discard tracks shorter than this
+pass2_max_gap_s          = float(params['pass2_max_gap_s'])
+pass2_waveform_weight    = float(params['pass2_waveform_weight'])
+pass2_spatial_weight     = float(params['pass2_spatial_weight'])
+pass2_cost_threshold     = float(params['pass2_cost_threshold'])
+pass2_max_iterations     = int(params['pass2_max_iterations'])
+pass2_max_frags          = 600
+pass2_overlap_wf_threshold  = 0.4
+pass2_overlap_min_s         = 0.1
+pass2_overlap_max_iterations = 3
 
-# Width-based pre-sorting
-width_min_separation_us = 15       # KDE peaks must be at least this far apart to split into classes
+min_track_pulses     = int(params['min_track_pulses'])
+min_track_duration_s = float(params['min_track_duration_s'])
+
+width_min_separation_us = float(params['width_min_separation_us'])
+use_species_matching    = bool(params['use_species_matching'])
+
+# =============================================================================
+# SPECIES MATCHING: Load control reference library
+# =============================================================================
+reference_library = {}
+if use_species_matching:
+    print("\n" + "="*70)
+    print("LOADING CONTROL REFERENCE LIBRARY")
+    print("="*70)
+    ctrl_concat_files = glob.glob(os.path.join(control_path, "*_eod_waveforms_concatenated.npz"))
+    ctrl_fixed_files  = glob.glob(os.path.join(control_path, "*_eod_waveforms.npz"))
+    # Build set of individual ids already covered by concat files to avoid double-loading
+    concat_ids = set(os.path.basename(f).replace("_eod_waveforms_concatenated.npz", "")
+                     for f in ctrl_concat_files)
+    # Merge: variable-length concat files + fixed-length files not already covered
+    ctrl_entries = [(ind_id, 'variable') for ind_id in concat_ids]
+    for f in ctrl_fixed_files:
+        ind_id = os.path.basename(f).replace("_eod_waveforms.npz", "")
+        if ind_id not in concat_ids:
+            ctrl_entries.append((ind_id, 'fixed'))
+
+    if not ctrl_entries:
+        print("\u26a0 No control waveform files found \u2014 species matching disabled")
+        use_species_matching = False
+    else:
+        for ind_id, wf_format in ctrl_entries:
+            table_file = os.path.join(control_path, f"{ind_id}_eod_table.csv")
+            if not os.path.exists(table_file):
+                print(f"  \u26a0 No eod_table for {ind_id}, skipping")
+                continue
+            ctrl_table = pd.read_csv(table_file)
+            if 'snippet_p1_idx' not in ctrl_table.columns or 'snippet_p2_idx' not in ctrl_table.columns:
+                print(f"  \u26a0 Missing p1/p2 idx columns in {ind_id}_eod_table.csv, skipping")
+                continue
+            wf_base = os.path.join(control_path, f"{ind_id}_eod_waveforms")
+            if wf_format == 'variable':
+                ctrl_wf_list = load_waveforms(wf_base, format='npz', length='variable')
+            else:
+                ctrl_wf_arr = np.load(wf_base + '.npz')['waveforms']
+                ctrl_wf_list = [ctrl_wf_arr[i] for i in range(ctrl_wf_arr.shape[0])]
+            if len(ctrl_wf_list) == 0:
+                print(f"  \u26a0 Empty waveforms for {ind_id}, skipping")
+                continue
+            ctrl_p1 = ctrl_table['snippet_p1_idx'].values
+            ctrl_p2 = ctrl_table['snippet_p2_idx'].values
+            if len(ctrl_wf_list) != len(ctrl_p1):
+                print(f"  \u26a0 Waveform/table count mismatch for {ind_id} "
+                      f"({len(ctrl_wf_list)} vs {len(ctrl_p1)}), skipping")
+                continue
+            ctrl_wf_norm = normalize_waveforms(
+                ctrl_wf_list, ctrl_p1, ctrl_p2,
+                method='p1_unity', crop_and_interpolate=True,
+                crop_factor=crop_factor, target_length=waveform_target_length
+            )
+            ctrl_wf_norm = np.array(ctrl_wf_norm)
+            ctrl_norms = np.linalg.norm(ctrl_wf_norm, axis=1, keepdims=True)
+            ctrl_norms[ctrl_norms == 0] = 1.0
+            ctrl_wf_l2 = ctrl_wf_norm / ctrl_norms
+            species_code = ind_id[:2].upper()
+            reference_library[ind_id] = {
+                'mean_wf':      ctrl_wf_l2.mean(axis=0),
+                'species_code': species_code
+            }
+            print(f"  \u2713 {ind_id} ({species_code}): {len(ctrl_wf_l2)} pulses")
+
+        print(f"\n\u2713 Reference library: {len(reference_library)} individual(s)")
+        species_counts = {}
+        for info in reference_library.values():
+            sp = info['species_code']
+            species_counts[sp] = species_counts.get(sp, 0) + 1
+        for sp, cnt in sorted(species_counts.items()):
+            print(f"  {sp}: {cnt} individual(s)")
+        ref_ids   = list(reference_library.keys())
+        ref_matrix = np.array([reference_library[rid]['mean_wf'] for rid in ref_ids])  # (N_ref, waveform_target_length)
+        ref_species = [reference_library[rid]['species_code'] for rid in ref_ids]
+        all_species_codes = sorted(set(ref_species))
 
 # # Pre-sort events by estimated fish count (from event summaries if available)
 # if event_summaries is not None and 'mean_ipi_seconds' in file_sets.columns:
@@ -211,7 +291,7 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
         snippet_p2_idc=eod_data['snippet_p2_idx'].values,
         method='p1_unity',
         crop_and_interpolate=True,
-        crop_factor=4,
+        crop_factor=crop_factor,
         target_length=waveform_target_length
     )
     normalized_waveforms = np.array(normalized_waveforms)  # shape: (n_pulses, waveform_target_length)
@@ -224,47 +304,10 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
     print(f"✓ Normalized, shape: {waveforms_l2.shape}")
 
     # -------------------------------------------------------------------------
-    # Step 1: Diagnostic visualization
+    # Step 1: Compute t_sec and widths (used throughout)
     # -------------------------------------------------------------------------
-    print("\nGenerating diagnostic plot...")
     t_sec = (eod_data['timestamp'] - eod_data['timestamp'].iloc[0]).dt.total_seconds().values
     widths = eod_data['eod_width_us'].values
-
-    fig, axes = plt.subplots(4, 1, figsize=(14, 9), sharex=False)
-    fig.suptitle(file_set['base_name'], fontsize=10)
-
-    sc = axes[0].scatter(t_sec, eod_data['pulse_location'].values, c=widths,
-                         cmap='viridis', s=3, alpha=0.5, rasterized=True)
-    plt.colorbar(sc, ax=axes[0], label='Width (µs)')
-    axes[0].set_ylabel('Location (electrode units)')
-    axes[0].set_xlabel('Time (s)')
-    axes[0].set_title('Pulse location vs time (color = width)')
-
-    axes[1].hist(widths, bins=80, color='steelblue', edgecolor='none')
-    axes[1].set_xlabel('EOD width (µs)')
-    axes[1].set_ylabel('Count')
-    axes[1].set_title('Width distribution')
-
-    axes[2].scatter(t_sec, eod_data['eod_amplitude'].values, s=2, alpha=0.4, c='steelblue', rasterized=True)
-    axes[2].set_xlabel('Time (s)')
-    axes[2].set_ylabel('Amplitude')
-    axes[2].set_title('Amplitude vs time')
-
-    # overlay of normalized waveforms (capped at 2000 random samples for memory/speed)
-    axes[3] = fig.add_subplot(4, 1, 4)
-    diag_plot_n = min(2000, len(waveforms_l2))
-    diag_plot_indices = np.random.choice(len(waveforms_l2), size=diag_plot_n, replace=False)
-    for i in diag_plot_indices:
-        axes[3].plot(waveforms_l2[i], color='steelblue', alpha=0.1, linewidth=0.5, rasterized=True)
-    axes[3].set_title('Normalized Waveforms')
-    axes[3].set_xlabel('Time (resampled samples)')
-    axes[3].set_ylabel('Amplitude (L2-normalized)')
-
-    plt.tight_layout()
-    diag_path = os.path.join(output_folder, f"{file_set['base_name']}_diagnostic.png")
-    plt.savefig(diag_path, dpi=120)
-    plt.close()
-    print(f"✓ Saved diagnostic plot: {os.path.basename(diag_path)}")
 
     # -------------------------------------------------------------------------
     # Step 2a: Width-based pre-sorting into classes
@@ -723,6 +766,39 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
     n_fish = len(fragments)
 
     # -------------------------------------------------------------------------
+    # Species assignment: 1-NN per track vs per-individual control means
+    # -------------------------------------------------------------------------
+    if use_species_matching and len(reference_library) > 0:
+        print("\nAssigning species by 1-NN...")
+        eod_data['species_assigned'] = ''
+        eod_data['nearest_individual'] = ''
+        eod_data['dist_nearest'] = np.nan
+        eod_data['dist_margin'] = np.nan
+        for sp in all_species_codes:
+            eod_data[f'dist_{sp}'] = np.nan
+
+        fish_ids_for_matching = sorted([fid for fid in eod_data['fish_id'].unique() if fid >= 0])
+        for fid in fish_ids_for_matching:
+            fid_mask = eod_data['fish_id'] == fid
+            track_mean_wf = waveforms_l2[fid_mask].mean(axis=0)  # (waveform_target_length,)
+            dists = np.linalg.norm(ref_matrix - track_mean_wf[None, :], axis=1)  # (N_ref,)
+            nn_idx = int(np.argmin(dists))
+            nn_dist = float(dists[nn_idx])
+            sorted_dists = np.sort(dists)
+            margin = float(sorted_dists[1] - sorted_dists[0]) if len(sorted_dists) > 1 else np.nan
+            eod_data.loc[fid_mask, 'species_assigned']   = ref_species[nn_idx]
+            eod_data.loc[fid_mask, 'nearest_individual'] = ref_ids[nn_idx]
+            eod_data.loc[fid_mask, 'dist_nearest']       = nn_dist
+            eod_data.loc[fid_mask, 'dist_margin']        = margin
+            # Per-species minimum distance
+            for sp in all_species_codes:
+                sp_mask = [i for i, s in enumerate(ref_species) if s == sp]
+                if sp_mask:
+                    eod_data.loc[fid_mask, f'dist_{sp}'] = float(dists[sp_mask].min())
+            print(f"  Fish {fid:2d}: {ref_species[nn_idx]} (nearest: {ref_ids[nn_idx]}, "
+                  f"dist={nn_dist:.4f}, margin={margin:.4f})")
+
+    # -------------------------------------------------------------------------
     # Step 6: Summary and validation plot
     # -------------------------------------------------------------------------
     assigned = (eod_data['fish_id'] >= 0).sum()
@@ -745,34 +821,128 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
         print(f"  Fish {fish_id:2d}: {n_p:5d} pulses, {dur:6.1f}s, {mean_rate:5.1f} Hz, "
               f"loc {mean_loc:.2f}, width {mean_width:.0f} µs")
 
-    # Validation plot: fish_id-colored pulse location vs time
-    fig, axes = plt.subplots(2, 1, figsize=(14, 7), sharex=True)
-    fig.suptitle(f"{file_set['base_name']} — tracking result", fontsize=10)
+    # -------------------------------------------------------------------------
+    # Consolidated output figure (3 rows)
+    # -------------------------------------------------------------------------
+    print("\nGenerating consolidated tracking figure...")
+    fish_ids_assigned = sorted([fid for fid in eod_data['fish_id'].unique() if fid >= 0])
+    n_assigned = len(fish_ids_assigned)
+    fish_colors = plt.cm.tab10(np.linspace(0, 1, max(n_assigned, 1)))
+    fish_color_map = {fid: fish_colors[i % len(fish_colors)] for i, fid in enumerate(fish_ids_assigned)}
 
-    colors = plt.cm.tab10(np.linspace(0, 1, max(n_fish, 1)))
+    # Row 3 determines number of columns (at least 1, at most 8 per row, wrap into multiple rows)
+    n_cols_r3 = min(n_assigned, 8) if n_assigned > 0 else 1
+    n_rows_r3 = max(1, int(np.ceil(n_assigned / n_cols_r3))) if n_assigned > 0 else 1
+    total_rows = 3 + n_rows_r3 - 1  # row1 + row2 + n_rows_r3 waveform rows
+    row_height_ratios = [2, 2] + [1.5] * n_rows_r3
+
+    fig = plt.figure(figsize=(max(14, 3 * n_cols_r3), 4 * (total_rows)))
+    fig.suptitle(f"{file_set['base_name']} — tracking result", fontsize=11, y=0.99)
+
+    gs_outer = fig.add_gridspec(total_rows, 1, height_ratios=row_height_ratios, hspace=0.45)
+
+    # --- Row 1: location vs time, colored by fish_id ---
+    ax_loc = fig.add_subplot(gs_outer[0])
     unassigned_mask = eod_data['fish_id'] < 0
     if unassigned_mask.any():
-        axes[0].scatter(t_sec[unassigned_mask], eod_data.loc[unassigned_mask, 'pulse_location'],
-                        c='lightgray', s=3, alpha=0.4, label='unassigned', rasterized=True)
-        axes[1].scatter(t_sec[unassigned_mask], eod_data.loc[unassigned_mask, 'eod_width_us'],
-                        c='lightgray', s=3, alpha=0.4, rasterized=True)
+        ax_loc.scatter(t_sec[unassigned_mask],
+                       eod_data.loc[unassigned_mask, 'pulse_location'],
+                       c='lightgray', s=3, alpha=0.4, label='unassigned', rasterized=True)
+    for fid in fish_ids_assigned:
+        mask = eod_data['fish_id'] == fid
+        ax_loc.scatter(t_sec[mask], eod_data.loc[mask, 'pulse_location'],
+                       color=fish_color_map[fid], s=4, alpha=0.7,
+                       label=f'Fish {fid}', rasterized=True)
+    ax_loc.set_ylabel('Location (electrode units)')
+    ax_loc.set_xlabel('Time (s)')
+    ax_loc.set_title('Pulse location vs time')
+    ax_loc.legend(markerscale=3, loc='upper right', fontsize=7, ncol=max(1, n_assigned // 8))
 
-    for fish_id in range(n_fish):
-        mask = eod_data['fish_id'] == fish_id
-        c = colors[fish_id % len(colors)]
-        axes[0].scatter(t_sec[mask], eod_data.loc[mask, 'pulse_location'],
-                        color=c, s=4, alpha=0.7, label=f'Fish {fish_id}', rasterized=True)
-        axes[1].scatter(t_sec[mask], eod_data.loc[mask, 'eod_width_us'],
-                        color=c, s=4, alpha=0.7, rasterized=True)
+    # --- Row 2: left = PCA, right = width histogram + KDE ---
+    gs_r2 = gs_outer[1].subgridspec(1, 2, wspace=0.35)
+    ax_pca = fig.add_subplot(gs_r2[0])
+    ax_hist = fig.add_subplot(gs_r2[1])
 
-    axes[0].set_ylabel('Location (electrode units)')
-    axes[0].legend(markerscale=3, loc='upper right', fontsize=8)
-    axes[1].set_ylabel('Width (µs)')
-    axes[1].set_xlabel('Time (s)')
-    plt.tight_layout()
+    # PCA on all L2-normalized waveforms
+    pca_model = PCA(n_components=2)
+    pca_coords = pca_model.fit_transform(waveforms_l2)
+    # plot unassigned
+    if unassigned_mask.any():
+        ax_pca.scatter(pca_coords[unassigned_mask, 0], pca_coords[unassigned_mask, 1],
+                       c='lightgray', s=3, alpha=0.3, rasterized=True)
+    for fid in fish_ids_assigned:
+        mask = eod_data['fish_id'] == fid
+        ax_pca.scatter(pca_coords[mask, 0], pca_coords[mask, 1],
+                       color=fish_color_map[fid], s=4, alpha=0.5,
+                       label=f'Fish {fid}', rasterized=True)
+    ax_pca.set_xlabel(f'PC1 ({pca_model.explained_variance_ratio_[0]*100:.1f}%)')
+    ax_pca.set_ylabel(f'PC2 ({pca_model.explained_variance_ratio_[1]*100:.1f}%)')
+    ax_pca.set_title('PCA of waveforms (colored by fish ID)')
+
+    # Width histogram + KDE, colored by width_class
+    width_classes = sorted(eod_data['width_class'].unique())
+    wc_cmap = plt.cm.Set1(np.linspace(0, 0.8, len(width_classes)))
+    wc_color_map = {wc: wc_cmap[i] for i, wc in enumerate(width_classes)}
+    bin_edges = np.linspace(widths.min(), widths.max(), 60)
+    for wc in width_classes:
+        wc_mask = eod_data['width_class'] == wc
+        ax_hist.hist(widths[wc_mask], bins=bin_edges, alpha=0.6,
+                     color=wc_color_map[wc], label=f'Class {wc}', edgecolor='none')
+    # KDE overlay per class
+    w_range = np.linspace(widths.min(), widths.max(), 400)
+    for wc in width_classes:
+        wc_mask = eod_data['width_class'] == wc
+        if wc_mask.sum() > 5:
+            kde_wc = gaussian_kde(widths[wc_mask], bw_method=0.1)
+            kde_scale = wc_mask.sum() * (bin_edges[1] - bin_edges[0])
+            ax_hist.plot(w_range, kde_wc(w_range) * kde_scale,
+                         color=wc_color_map[wc], linewidth=1.5)
+    ax_hist.set_xlabel('EOD width (µs)')
+    ax_hist.set_ylabel('Count')
+    ax_hist.set_title('Pulse width distribution by class')
+    if len(width_classes) > 1:
+        ax_hist.legend(fontsize=7)
+
+    # --- Rows 3+: per-fish waveform overlays ---
+    if n_assigned > 0:
+        shape_classes = sorted(eod_data['shape_class'].unique())
+        sc_cmap = plt.cm.Set2(np.linspace(0, 0.9, max(len(shape_classes), 1)))
+        sc_color_map = {sc_id: sc_cmap[i] for i, sc_id in enumerate(shape_classes)}
+
+        wf_panel_idx = 0
+        for row_offset in range(n_rows_r3):
+            gs_r3 = gs_outer[2 + row_offset].subgridspec(1, n_cols_r3, wspace=0.3)
+            for col_idx in range(n_cols_r3):
+                if wf_panel_idx >= n_assigned:
+                    ax_wf = fig.add_subplot(gs_r3[col_idx])
+                    ax_wf.axis('off')
+                    wf_panel_idx += 1
+                    continue
+                fid = fish_ids_assigned[wf_panel_idx]
+                ax_wf = fig.add_subplot(gs_r3[col_idx])
+                fid_mask = eod_data['fish_id'] == fid
+                fid_wf = waveforms_l2[fid_mask]
+                fid_sc = eod_data.loc[fid_mask, 'shape_class'].values
+                # subsample for overlay
+                n_overlay = min(300, len(fid_wf))
+                overlay_idx = np.random.choice(len(fid_wf), size=n_overlay, replace=False)
+                for oi in overlay_idx:
+                    sc_id = fid_sc[oi]
+                    ax_wf.plot(fid_wf[oi], color=sc_color_map.get(sc_id, 'steelblue'),
+                               alpha=0.08, linewidth=0.5, rasterized=True)
+                mean_wf = fid_wf.mean(axis=0)
+                ax_wf.plot(mean_wf, color=fish_color_map[fid], linewidth=2)
+                if use_species_matching and 'species_assigned' in eod_data.columns:
+                    sp_label = eod_data.loc[fid_mask, 'species_assigned'].iloc[0]
+                    ax_wf.set_title(f'Fish {fid} [{sp_label}] (n={fid_mask.sum()})', fontsize=8)
+                else:
+                    ax_wf.set_title(f'Fish {fid} (n={fid_mask.sum()})', fontsize=8)
+                ax_wf.set_xticks([])
+                ax_wf.tick_params(labelsize=6)
+                wf_panel_idx += 1
 
     result_path = os.path.join(output_folder, f"{file_set['base_name']}_tracked.png")
-    plt.savefig(result_path, dpi=120)
+    plt.savefig(result_path, dpi=120, bbox_inches='tight')
     plt.close()
     print(f"\n✓ Saved tracking plot: {os.path.basename(result_path)}")
 
