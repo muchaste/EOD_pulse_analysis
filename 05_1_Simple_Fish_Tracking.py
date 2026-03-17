@@ -11,6 +11,8 @@ from scipy.stats import gaussian_kde
 from scipy.signal import find_peaks
 from sklearn.cluster import DBSCAN
 from sklearn.decomposition import PCA
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+from sklearn.model_selection import LeaveOneOut
 
 # Import EOD functions
 from pulse_functions import (
@@ -157,11 +159,31 @@ min_track_duration_s = float(params['min_track_duration_s'])
 
 width_min_separation_us = float(params['width_min_separation_us'])
 use_species_matching    = bool(params['use_species_matching'])
+lda_min_probability     = float(params.get('lda_min_probability', 0.0))
+
+# Load interp_factor from analysis_parameters.csv for physics-based KDE bandwidth
+_ap_file = os.path.join(input_folder, "analysis_parameters.csv")
+if os.path.exists(_ap_file):
+    _ap_df = pd.read_csv(_ap_file)
+    if 'interp_factor' in _ap_df.columns:
+        interp_factor = float(_ap_df['interp_factor'].iloc[0])
+    else:
+        interp_factor = 1.0
+        print("\u26a0 'interp_factor' not found in analysis_parameters.csv, defaulting to 1")
+else:
+    interp_factor = 1.0
+    print("\u26a0 analysis_parameters.csv not found, defaulting interp_factor=1")
+# Width quantization step at 96 kHz × interp_factor oversampling
+step_us = 1e6 / (96000.0 * interp_factor)
+print(f"\u2713 Width quantization step: {step_us:.2f} \u00b5s (96 kHz \u00d7 {interp_factor:.0f}\u00d7 interp)")
 
 # =============================================================================
 # SPECIES MATCHING: Load control reference library
 # =============================================================================
 reference_library = {}
+lda = None
+pca_cls = None
+loo_accuracy = None
 if use_species_matching:
     print("\n" + "="*70)
     print("LOADING CONTROL REFERENCE LIBRARY")
@@ -233,6 +255,82 @@ if use_species_matching:
         ref_matrix = np.array([reference_library[rid]['mean_wf'] for rid in ref_ids])  # (N_ref, waveform_target_length)
         ref_species = [reference_library[rid]['species_code'] for rid in ref_ids]
         all_species_codes = sorted(set(ref_species))
+
+        # Fit PCA (dimensionality reduction) + LDA (species discriminant) on control reference
+        # mean waveforms once. This stable classifier is reused for every field event.
+        ref_species_arr = np.array(ref_species)
+        n_pca_cls = max(1, min(len(ref_matrix) - 1, waveform_target_length, 20))
+        if len(all_species_codes) >= 2:
+            pca_cls = PCA(n_components=n_pca_cls)
+            ref_pca_scores = pca_cls.fit_transform(ref_matrix)
+            lda = LinearDiscriminantAnalysis()
+            lda.fit(ref_pca_scores, ref_species_arr)
+            print(f"\u2713 LDA fitted on {len(ref_matrix)} control mean waveforms "
+                  f"({len(all_species_codes)} species, {n_pca_cls} PCA components)")
+            # Leave-one-individual-out CV (each ref_matrix row = one individual mean waveform)
+            sp_counts_loo = {sp: int((ref_species_arr == sp).sum()) for sp in all_species_codes}
+            loo_feasible = all(c >= 2 for c in sp_counts_loo.values())
+            if loo_feasible:
+                loo = LeaveOneOut()
+                loo_correct = 0
+                loo_total = 0
+                loo_sp_correct = {sp: 0 for sp in all_species_codes}
+                loo_sp_total   = {sp: 0 for sp in all_species_codes}
+                for train_idx, test_idx in loo.split(ref_pca_scores):
+                    n_pca_cv = max(1, min(n_pca_cls, len(train_idx) - 1))
+                    pca_cv = PCA(n_components=n_pca_cv)
+                    scores_train = pca_cv.fit_transform(ref_matrix[train_idx])
+                    scores_test = pca_cv.transform(ref_matrix[test_idx])
+                    lda_cv = LinearDiscriminantAnalysis()
+                    lda_cv.fit(scores_train, ref_species_arr[train_idx])
+                    true_sp = ref_species_arr[test_idx][0]
+                    pred_sp = lda_cv.predict(scores_test)[0]
+                    is_correct = int(pred_sp == true_sp)
+                    loo_correct += is_correct
+                    loo_total += 1
+                    loo_sp_correct[true_sp] += is_correct
+                    loo_sp_total[true_sp] += 1
+                loo_accuracy = loo_correct / loo_total
+                print(f"✓ LOO CV accuracy: {loo_accuracy:.1%} ({loo_correct}/{loo_total})")
+                for sp in all_species_codes:
+                    sp_acc = loo_sp_correct[sp] / loo_sp_total[sp] if loo_sp_total[sp] > 0 else float('nan')
+                    print(f"  {sp}: {sp_acc:.1%} ({loo_sp_correct[sp]}/{loo_sp_total[sp]})")
+                loo_per_species = {
+                    sp: {
+                        'accuracy': loo_sp_correct[sp] / loo_sp_total[sp] if loo_sp_total[sp] > 0 else None,
+                        'correct':  loo_sp_correct[sp],
+                        'total':    loo_sp_total[sp],
+                    }
+                    for sp in all_species_codes
+                }
+            else:
+                loo_accuracy = None
+                loo_per_species = {}
+                print("⚠ LOO CV skipped: at least one species has only 1 individual")
+
+            # Save classifier report so each batch run has a record of the model used
+            classifier_report = {
+                'waveform_target_length': waveform_target_length,
+                'crop_factor': crop_factor,
+                'n_pca_components': n_pca_cls,
+                'n_ref_individuals': len(ref_matrix),
+                'species_n_individuals': {
+                    sp: int((ref_species_arr == sp).sum()) for sp in all_species_codes
+                },
+                'loo_accuracy': loo_accuracy,
+                'loo_per_species': loo_per_species,
+                'ref_individuals': ref_ids,
+            }
+            classifier_report_path = os.path.join(output_folder, 'classifier_report.json')
+            with open(classifier_report_path, 'w') as _f:
+                json.dump(classifier_report, _f, indent=2)
+            print(f"✓ Saved classifier report: {os.path.basename(classifier_report_path)}")
+        else:
+            lda = None
+            pca_cls = None
+            loo_accuracy = None
+            print("⚠ Only 1 species in reference library — LDA disabled, using 1-NN fallback")
+            print("\u26a0 Only 1 species in reference library \u2014 LDA disabled, using 1-NN fallback")
 
 # # Pre-sort events by estimated fish count (from event summaries if available)
 # if event_summaries is not None and 'mean_ipi_seconds' in file_sets.columns:
@@ -314,7 +412,10 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
     # -------------------------------------------------------------------------
     print("\nWidth-based pre-sorting...")
     width_range = np.linspace(widths.min(), widths.max(), 1000)
-    kde = gaussian_kde(widths, bw_method=0.1)
+    width_std = np.std(widths)
+    # bandwidth = desired_smoothing_µs / std(widths); smooth over ≥2 quantization steps
+    kde_bw = max(2.0 * step_us, 1.0) / width_std if width_std > 0 else 0.5
+    kde = gaussian_kde(widths, bw_method=kde_bw)
     kde_vals = kde(width_range)
 
     min_peak_distance_bins = int(width_min_separation_us / (width_range[1] - width_range[0]))
@@ -766,37 +867,57 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
     n_fish = len(fragments)
 
     # -------------------------------------------------------------------------
-    # Species assignment: 1-NN per track vs per-individual control means
+    # Species assignment: LDA (PCA -> LDA on control means) or 1-NN fallback
     # -------------------------------------------------------------------------
     if use_species_matching and len(reference_library) > 0:
-        print("\nAssigning species by 1-NN...")
+        print("\nAssigning species...")
         eod_data['species_assigned'] = ''
+        eod_data['species_uncertain'] = False
         eod_data['nearest_individual'] = ''
         eod_data['dist_nearest'] = np.nan
         eod_data['dist_margin'] = np.nan
-        for sp in all_species_codes:
-            eod_data[f'dist_{sp}'] = np.nan
+        if lda is not None:
+            for sp in lda.classes_:
+                eod_data[f'lda_proba_{sp}'] = np.nan
+        else:
+            for sp in all_species_codes:
+                eod_data[f'dist_{sp}'] = np.nan
 
         fish_ids_for_matching = sorted([fid for fid in eod_data['fish_id'].unique() if fid >= 0])
         for fid in fish_ids_for_matching:
             fid_mask = eod_data['fish_id'] == fid
             track_mean_wf = waveforms_l2[fid_mask].mean(axis=0)  # (waveform_target_length,)
+            # L2 distances to each control individual (kept for nearest_individual / dist diagnostics)
             dists = np.linalg.norm(ref_matrix - track_mean_wf[None, :], axis=1)  # (N_ref,)
             nn_idx = int(np.argmin(dists))
             nn_dist = float(dists[nn_idx])
             sorted_dists = np.sort(dists)
             margin = float(sorted_dists[1] - sorted_dists[0]) if len(sorted_dists) > 1 else np.nan
-            eod_data.loc[fid_mask, 'species_assigned']   = ref_species[nn_idx]
             eod_data.loc[fid_mask, 'nearest_individual'] = ref_ids[nn_idx]
             eod_data.loc[fid_mask, 'dist_nearest']       = nn_dist
             eod_data.loc[fid_mask, 'dist_margin']        = margin
-            # Per-species minimum distance
-            for sp in all_species_codes:
-                sp_mask = [i for i, s in enumerate(ref_species) if s == sp]
-                if sp_mask:
-                    eod_data.loc[fid_mask, f'dist_{sp}'] = float(dists[sp_mask].min())
-            print(f"  Fish {fid:2d}: {ref_species[nn_idx]} (nearest: {ref_ids[nn_idx]}, "
-                  f"dist={nn_dist:.4f}, margin={margin:.4f})")
+            if lda is not None:
+                track_pca_s = pca_cls.transform(track_mean_wf[None, :])
+                sp_pred = lda.predict(track_pca_s)[0]
+                sp_proba = lda.predict_proba(track_pca_s)[0]
+                eod_data.loc[fid_mask, 'species_assigned'] = sp_pred
+                for sp, p in zip(lda.classes_, sp_proba):
+                    eod_data.loc[fid_mask, f'lda_proba_{sp}'] = float(p)
+                assigned_proba = float(sp_proba[list(lda.classes_).index(sp_pred)])
+                uncertain = assigned_proba < lda_min_probability
+                eod_data.loc[fid_mask, 'species_uncertain'] = uncertain
+                uncertain_flag = " (!)" if uncertain else ""
+                print(f"  Fish {fid:2d}: {sp_pred}{uncertain_flag} (p={assigned_proba:.3f}, "
+                      f"nearest: {ref_ids[nn_idx]}, dist={nn_dist:.4f}, margin={margin:.4f})")
+            else:
+                # 1-NN fallback when only 1 species in reference library
+                eod_data.loc[fid_mask, 'species_assigned'] = ref_species[nn_idx]
+                for sp in all_species_codes:
+                    sp_mask_idx = [i for i, s in enumerate(ref_species) if s == sp]
+                    if sp_mask_idx:
+                        eod_data.loc[fid_mask, f'dist_{sp}'] = float(dists[sp_mask_idx].min())
+                print(f"  Fish {fid:2d}: {ref_species[nn_idx]} (nearest: {ref_ids[nn_idx]}, "
+                      f"dist={nn_dist:.4f}, margin={margin:.4f})")
 
     # -------------------------------------------------------------------------
     # Step 6: Summary and validation plot
@@ -850,18 +971,24 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
                        c='lightgray', s=3, alpha=0.4, label='unassigned', rasterized=True)
     for fid in fish_ids_assigned:
         mask = eod_data['fish_id'] == fid
+        if use_species_matching and 'species_assigned' in eod_data.columns:
+            _sp = eod_data.loc[mask, 'species_assigned'].iloc[0]
+            _loc_label = f'Fish {fid} [{_sp}]'
+        else:
+            _loc_label = f'Fish {fid}'
         ax_loc.scatter(t_sec[mask], eod_data.loc[mask, 'pulse_location'],
                        color=fish_color_map[fid], s=4, alpha=0.7,
-                       label=f'Fish {fid}', rasterized=True)
+                       label=_loc_label, rasterized=True)
     ax_loc.set_ylabel('Location (electrode units)')
     ax_loc.set_xlabel('Time (s)')
     ax_loc.set_title('Pulse location vs time')
     ax_loc.legend(markerscale=3, loc='upper right', fontsize=7, ncol=max(1, n_assigned // 8))
 
-    # --- Row 2: left = PCA, right = width histogram + KDE ---
-    gs_r2 = gs_outer[1].subgridspec(1, 2, wspace=0.35)
-    ax_pca = fig.add_subplot(gs_r2[0])
-    ax_hist = fig.add_subplot(gs_r2[1])
+    # --- Row 2: three columns: fish-ID PCA | species/control PCA | width histogram ---
+    gs_r2 = gs_outer[1].subgridspec(1, 3, wspace=0.35)
+    ax_pca  = fig.add_subplot(gs_r2[0])
+    ax_pca2 = fig.add_subplot(gs_r2[1])
+    ax_hist = fig.add_subplot(gs_r2[2])
 
     # PCA on all L2-normalized waveforms
     pca_model = PCA(n_components=2)
@@ -879,6 +1006,60 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
     ax_pca.set_ylabel(f'PC2 ({pca_model.explained_variance_ratio_[1]*100:.1f}%)')
     ax_pca.set_title('PCA of waveforms (colored by fish ID)')
 
+    # LDA discriminant space: control individual means + per-track means
+    if use_species_matching and lda is not None and len(reference_library) > 0 and n_assigned > 0:
+        sp_pal = plt.cm.Set3(np.linspace(0, 0.9, max(len(all_species_codes), 1)))
+        sp_color_map_pca = {sp: sp_pal[i] for i, sp in enumerate(all_species_codes)}
+        n_lda_axes = len(lda.classes_) - 1
+        ctrl_lda = lda.transform(ref_pca_scores)  # (N_ref, n_lda_axes)
+        if n_lda_axes >= 2:
+            ctrl_x, ctrl_y = ctrl_lda[:, 0], ctrl_lda[:, 1]
+            x_label, y_label = 'LD1', 'LD2'
+        else:
+            ctrl_x = ctrl_lda[:, 0]
+            ctrl_y = pca_cls.transform(ref_matrix)[:, 0]
+            x_label, y_label = 'LD1', 'PC1'
+        for sp in all_species_codes:
+            sp_ctrl_mask = [i for i, s in enumerate(ref_species) if s == sp]
+            if sp_ctrl_mask:
+                ax_pca2.scatter(ctrl_x[sp_ctrl_mask], ctrl_y[sp_ctrl_mask],
+                                color=sp_color_map_pca[sp], s=40, alpha=0.35,
+                                marker='o', label=f'{sp} (ctrl)', rasterized=True)
+        for fid in fish_ids_assigned:
+            fid_mask_pca = eod_data['fish_id'] == fid
+            track_mean_wf = waveforms_l2[fid_mask_pca].mean(axis=0)
+            track_pca_s = pca_cls.transform(track_mean_wf[None, :])
+            track_lda = lda.transform(track_pca_s)
+            tx = float(track_lda[0, 0])
+            ty = float(track_lda[0, 1]) if n_lda_axes >= 2 else float(track_pca_s[0, 0])
+            sp_assigned = eod_data.loc[fid_mask_pca, 'species_assigned'].iloc[0]
+            proba_col = f'lda_proba_{sp_assigned}'
+            assigned_p = (
+                float(eod_data.loc[fid_mask_pca, proba_col].iloc[0])
+                if proba_col in eod_data.columns else float('nan')
+            )
+            ax_pca2.scatter(tx, ty,
+                            color=sp_color_map_pca.get(sp_assigned, 'black'),
+                            s=150, alpha=0.9, marker='*', edgecolors='k',
+                            linewidths=0.5, zorder=5)
+            ax_pca2.annotate(f'{fid}\n(p={assigned_p:.2f})', (tx, ty),
+                             fontsize=6, ha='center', va='bottom')
+        ax_pca2.set_xlabel(x_label)
+        ax_pca2.set_ylabel(y_label)
+        loo_str = f'{loo_accuracy:.0%}' if loo_accuracy is not None else 'N/A'
+        ax_pca2.set_title(f'LDA space: ctrl + tracks (LOO {loo_str})')
+        ax_pca2.legend(fontsize=6, markerscale=1.5, loc='best')
+    else:
+        ax_pca2.axis('off')
+        if not use_species_matching:
+            _ax2_msg = 'Species matching\ndisabled'
+        elif lda is None:
+            _ax2_msg = 'Only 1 species\nin reference library'
+        else:
+            _ax2_msg = 'No fish assigned'
+        ax_pca2.text(0.5, 0.5, _ax2_msg,
+                     ha='center', va='center', transform=ax_pca2.transAxes, fontsize=9)
+
     # Width histogram + KDE, colored by width_class
     width_classes = sorted(eod_data['width_class'].unique())
     wc_cmap = plt.cm.Set1(np.linspace(0, 0.8, len(width_classes)))
@@ -893,7 +1074,9 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
     for wc in width_classes:
         wc_mask = eod_data['width_class'] == wc
         if wc_mask.sum() > 5:
-            kde_wc = gaussian_kde(widths[wc_mask], bw_method=0.1)
+            wc_std = np.std(widths[wc_mask])
+            wc_kde_bw = max(2.0 * step_us, 1.0) / wc_std if wc_std > 0 else kde_bw
+            kde_wc = gaussian_kde(widths[wc_mask], bw_method=wc_kde_bw)
             kde_scale = wc_mask.sum() * (bin_edges[1] - bin_edges[0])
             ax_hist.plot(w_range, kde_wc(w_range) * kde_scale,
                          color=wc_color_map[wc], linewidth=1.5)
@@ -951,11 +1134,54 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
     eod_data.to_csv(out_csv, index=False)
     print(f"✓ Saved tracked table: {os.path.basename(out_csv)}")
 
+    # Collect per-fish details for summary outputs
+    fish_details = []
+    for fid in sorted(fid_to_fish):
+        fish_id = fid_to_fish[fid]
+        f = fragments[fid]
+        n_p = len(f['history'])
+        dur = (eod_data.loc[f['history'][-1], 'timestamp'] -
+               eod_data.loc[f['history'][0], 'timestamp']).total_seconds()
+        mean_loc = eod_data.loc[f['history'], 'pulse_location'].mean()
+        mean_width_val = eod_data.loc[f['history'], 'eod_width_us'].mean()
+        mean_rate_val = 1.0 / np.median(f['ipi_history']) if f['ipi_history'] else float('nan')
+        fish_rec = {
+            'fish_id':       fish_id,
+            'n_pulses':      n_p,
+            'duration_s':    dur,
+            'mean_rate_hz':  mean_rate_val,
+            'mean_location': mean_loc,
+            'mean_width_us': mean_width_val,
+        }
+        if use_species_matching and 'species_assigned' in eod_data.columns:
+            fid_mask_sum = eod_data['fish_id'] == fish_id
+            fish_rec['species_assigned']   = eod_data.loc[fid_mask_sum, 'species_assigned'].iloc[0]
+            fish_rec['species_uncertain']  = bool(eod_data.loc[fid_mask_sum, 'species_uncertain'].iloc[0])
+            fish_rec['nearest_individual'] = eod_data.loc[fid_mask_sum, 'nearest_individual'].iloc[0]
+            fish_rec['dist_nearest']       = float(eod_data.loc[fid_mask_sum, 'dist_nearest'].iloc[0])
+            fish_rec['dist_margin']        = float(eod_data.loc[fid_mask_sum, 'dist_margin'].iloc[0])
+            if lda is not None:
+                for sp in lda.classes_:
+                    fish_rec[f'lda_proba_{sp}'] = float(
+                        eod_data.loc[fid_mask_sum, f'lda_proba_{sp}'].iloc[0]
+                    )
+                fish_rec['lda_proba_assigned'] = fish_rec[
+                    f'lda_proba_{fish_rec["species_assigned"]}'
+                ]
+            else:
+                for sp in all_species_codes:
+                    fish_rec[f'dist_{sp}'] = float(
+                        eod_data.loc[fid_mask_sum, f'dist_{sp}'].iloc[0]
+                    )
+        fish_details.append(fish_rec)
+
     all_tracked_data.append({
-        'base_name': file_set['base_name'],
-        'n_fish': n_fish,
-        'n_pulses': len(eod_data),
+        'base_name':       file_set['base_name'],
+        'event_id':        file_set['event_id'],
+        'n_fish':          n_fish,
+        'n_pulses':        len(eod_data),
         'assignment_rate': assigned / len(eod_data) if len(eod_data) > 0 else 0.0,
+        'fish_details':    fish_details,
     })
     del eod_data, waveforms_raw, waveforms_l2
 
@@ -963,3 +1189,72 @@ print("\n" + "="*70)
 print("TRACKING COMPLETE")
 print("="*70)
 print(f"Processed {len(all_tracked_data)}/{len(file_sets)} file(s) successfully")
+
+# =============================================================================
+# SUMMARY OUTPUTS
+# =============================================================================
+
+# --- 1: Per-fish summary (one row per fish per file) ---
+fish_summary_rows = []
+for entry in all_tracked_data:
+    for fd in entry['fish_details']:
+        row = {'base_name': entry['base_name'], 'event_id': entry['event_id']}
+        row.update(fd)
+        fish_summary_rows.append(row)
+
+if fish_summary_rows:
+    fish_summary_df = pd.DataFrame(fish_summary_rows)
+    fish_summary_path = os.path.join(output_folder, 'tracked_fish_summary.csv')
+    fish_summary_df.to_csv(fish_summary_path, index=False)
+    print(f"\u2713 Saved per-fish summary: {os.path.basename(fish_summary_path)} "
+          f"({len(fish_summary_df)} rows)")
+
+# --- 2: Per-species summary (one row per species per file, when matching enabled) ---
+if use_species_matching and fish_summary_rows:
+    species_summary_rows = []
+    for entry in all_tracked_data:
+        sp_counts = {}
+        for fd in entry['fish_details']:
+            sp = fd.get('species_assigned', '')
+            sp_counts[sp] = sp_counts.get(sp, 0) + 1
+        for sp, cnt in sp_counts.items():
+            species_summary_rows.append({
+                'base_name': entry['base_name'],
+                'event_id':  entry['event_id'],
+                'species':   sp,
+                'n_fish':    cnt,
+            })
+    if species_summary_rows:
+        species_summary_df = pd.DataFrame(species_summary_rows)
+        species_summary_path = os.path.join(output_folder, 'tracked_species_summary.csv')
+        species_summary_df.to_csv(species_summary_path, index=False)
+        print(f"\u2713 Saved per-species summary: {os.path.basename(species_summary_path)}")
+
+# --- 3: Event summary — tracking results appended to input all_event_summaries ---
+event_rows = []
+for entry in all_tracked_data:
+    row = {
+        'event_id':         entry['event_id'],
+        'n_fish_total':     entry['n_fish'],
+        'n_pulses_tracked': entry['n_pulses'],
+        'assignment_rate':  entry['assignment_rate'],
+    }
+    if (use_species_matching and entry['fish_details']
+            and 'species_assigned' in entry['fish_details'][0]):
+        sp_counts = {}
+        for fd in entry['fish_details']:
+            sp = fd.get('species_assigned', '')
+            sp_counts[sp] = sp_counts.get(sp, 0) + 1
+        for sp in all_species_codes:
+            row[f'n_fish_{sp}'] = sp_counts.get(sp, 0)
+    event_rows.append(row)
+
+event_tracking_df = pd.DataFrame(event_rows)
+if event_summaries is not None:
+    event_out_df = event_summaries.merge(event_tracking_df, on='event_id', how='left')
+else:
+    event_out_df = event_tracking_df
+event_summary_out_path = os.path.join(output_folder, 'tracked_event_summary.csv')
+event_out_df.to_csv(event_summary_out_path, index=False)
+print(f"\u2713 Saved event summary: {os.path.basename(event_summary_out_path)} "
+      f"({len(event_out_df)} rows)")
