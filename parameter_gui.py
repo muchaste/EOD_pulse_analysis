@@ -903,8 +903,12 @@ class TrackingParameterConfigGUI:
 
         cluster_params = [
             ('width_min_separation_us', 'Min Width Peak Separation (µs):', 15, float),
-            ('shape_dbscan_eps', 'DBSCAN Epsilon:', 0.4, float),
-            ('shape_dbscan_min_samples', 'DBSCAN Min Samples:', 5, int),
+            ('shape_dbscan_min_samples', 'DBSCAN Min Samples (floor):', 5, int),
+            ('knn_percentile', 'KNN Percentile for Epsilon:', 80, int),
+            ('min_shape_eps', 'Min Epsilon Floor:', 0.1, float),
+            ('fft_artifact_threshold', 'FFT Artifact Threshold:', 0.75, float),
+            ('dbscan_max_direct', 'DBSCAN Max Direct (subsampling):', 3000, int),
+            ('dbscan_sample_size', 'DBSCAN Sample Size:', 2000, int),
         ]
         for i, (key, label, default, dtype) in enumerate(cluster_params):
             ttk.Label(cluster_frame, text=label).grid(row=i, column=0, sticky=tk.W, pady=2)
