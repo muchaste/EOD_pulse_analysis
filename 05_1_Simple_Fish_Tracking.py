@@ -11,6 +11,7 @@ from scipy.stats import gaussian_kde
 from scipy.signal import find_peaks
 from sklearn.cluster import DBSCAN
 from sklearn.decomposition import PCA
+from sklearn.metrics import pairwise_distances
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.model_selection import LeaveOneOut
 
@@ -129,10 +130,12 @@ min_ipi_s               = float(params['min_ipi_s'])
 max_track_gap_s         = float(params['max_track_gap_s'])
 max_location_jump_per_s = float(params['max_location_jump_per_s'])
 
-shape_dbscan_eps         = float(params['shape_dbscan_eps'])
 shape_dbscan_min_samples = int(params['shape_dbscan_min_samples'])
-dbscan_max_direct        = 3000
-dbscan_sample_size       = 2000
+knn_percentile           = int(params['knn_percentile'])
+min_shape_eps            = float(params['min_shape_eps'])
+fft_artifact_threshold   = float(params['fft_artifact_threshold'])
+dbscan_max_direct        = int(params['dbscan_max_direct'])
+dbscan_sample_size       = int(params['dbscan_sample_size'])
 
 location_weight       = float(params['location_weight'])
 ipi_weight            = float(params['ipi_weight'])
@@ -379,12 +382,25 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
         print(f"⚠ WARNING: Waveform count ({len(waveforms_raw)}) != EOD table count ({len(eod_data)}), skipping")
         continue
 
+    # Slope subtraction: remove linear DC drift across each raw snippet window.
+    # bg_ratio: boundary slope relative to peak amplitude — per-pulse noise quality metric.
+    waveforms_detrended = []
+    bg_ratio_arr = np.zeros(len(waveforms_raw))
+    for i, wf in enumerate(waveforms_raw):
+        slope = np.linspace(float(wf[0]), float(wf[-1]), len(wf))
+        wf_d = wf - slope
+        waveforms_detrended.append(wf_d)
+        peak_amp = np.max(np.abs(wf_d))
+        bg_ratio_arr[i] = abs(float(wf[0]) - float(wf[-1])) / peak_amp if peak_amp > 0 else 0.0
+    del waveforms_raw
+    eod_data['bg_ratio'] = bg_ratio_arr
+
     # -------------------------------------------------------------------------
     # Normalize waveforms: P1 to +1, baseline subtracted, resampled to fixed length
     # -------------------------------------------------------------------------
     print("\nNormalizing waveforms...")
     normalized_waveforms = normalize_waveforms(
-        waveforms_raw,
+        waveforms_detrended,
         snippet_p1_idc=eod_data['snippet_p1_idx'].values,
         snippet_p2_idc=eod_data['snippet_p2_idx'].values,
         method='p1_unity',
@@ -399,7 +415,24 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
     norms[norms == 0] = 1.0
     waveforms_l2 = normalized_waveforms / norms
     del normalized_waveforms, norms
-    print(f"✓ Normalized, shape: {waveforms_l2.shape}")
+    print(f"✓ P1-aligned waveforms, shape: {waveforms_l2.shape}")
+
+    # P2-aligned normalization: center on EOD trough for dual shape clustering.
+    normalized_waveforms_p2 = normalize_waveforms(
+        waveforms_detrended,
+        snippet_p1_idc=eod_data['snippet_p2_idx'].values,
+        snippet_p2_idc=eod_data['snippet_p1_idx'].values,
+        method='p1_unity',
+        crop_and_interpolate=True,
+        crop_factor=crop_factor,
+        target_length=waveform_target_length
+    )
+    normalized_waveforms_p2 = np.array(normalized_waveforms_p2)
+    norms_p2 = np.linalg.norm(normalized_waveforms_p2, axis=1, keepdims=True)
+    norms_p2[norms_p2 == 0] = 1.0
+    waveforms_l2_p2 = normalized_waveforms_p2 / norms_p2
+    del normalized_waveforms_p2, norms_p2, waveforms_detrended
+    print(f"✓ P2-aligned waveforms, shape: {waveforms_l2_p2.shape}")
 
     # -------------------------------------------------------------------------
     # Step 1: Compute t_sec and widths (used throughout)
@@ -438,61 +471,170 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
 
     # -------------------------------------------------------------------------
     # Step 2b: Waveform shape clustering within each width class
-    # DBSCAN on L2-normalized waveforms; noise points (label=-1) get their own
-    # unique shape class so they are still trackable (just not pre-grouped).
+    # Dual P1+P2 alignment with adaptive DBSCAN epsilon.
+    # Phase 3: FFT artifact rejection per width class.
+    # Phase 2: Adaptive epsilon from KNN distances in PCA(5) space.
+    # Phase 4: Independent DBSCAN on P1 and P2 features; greedy merge.
     # -------------------------------------------------------------------------
     print("\nShape clustering within width classes...")
     eod_data['shape_class'] = -1
+    eod_data['shape_source'] = ''
     next_shape_id = 0
+    n_fft_total = waveform_target_length // 2 + 1
+    n_fft_low = max(1, n_fft_total // 5)  # lowest 20% of frequency bins
 
     for wc in range(n_width_classes):
         wc_mask = pulse_width_class == wc
         wc_indices = np.where(wc_mask)[0]
-        wc_waveforms = waveforms_l2[wc_indices]
+        wc_waveforms_p1 = waveforms_l2[wc_indices]
+        wc_waveforms_p2 = waveforms_l2_p2[wc_indices]
+        wc_bg = bg_ratio_arr[wc_indices]
         n_wc = len(wc_indices)
 
+        # [Phase 3] FFT artifact rejection: skip width class if mean waveform is high-frequency dominated.
+        # Real EOD pulses concentrate power in lower frequency bins (1-10 kHz band);
+        # electrical artifacts are high-frequency dominated → low_freq_ratio < 0.75.
+        mean_wf = wc_waveforms_p1.mean(axis=0)
+        mean_wf = mean_wf - np.mean(mean_wf)  # remove DC before FFT (matches pulses.py remove_artefacts)
+        fft_power = np.abs(np.fft.rfft(mean_wf))
+        low_freq_ratio = fft_power[:n_fft_low].sum() / (fft_power.sum() + 1e-12)
+        if low_freq_ratio < fft_artifact_threshold:
+            print(f"  Width class {wc}: SKIPPED (FFT artifact, low-freq ratio={low_freq_ratio:.2f})")
+            for i, pulse_idx in enumerate(wc_indices):
+                eod_data.loc[pulse_idx, 'shape_class'] = next_shape_id + i
+                eod_data.loc[pulse_idx, 'shape_source'] = 'artifact'
+            next_shape_id += len(wc_indices)
+            continue
+
+        # Subsample if width class is too large for pairwise distance computation
         if n_wc > dbscan_max_direct:
-            # Subsample to cap O(n²) DBSCAN memory; assign remaining pulses to nearest centroid
             rng = np.random.default_rng(seed=42)
             sample_pos = rng.choice(n_wc, size=min(dbscan_sample_size, n_wc), replace=False)
-            sample_wf = wc_waveforms[sample_pos]
-            db = DBSCAN(eps=shape_dbscan_eps, min_samples=shape_dbscan_min_samples, metric='euclidean')
-            sample_labels = db.fit_predict(sample_wf)
-            cluster_ids = np.unique(sample_labels[sample_labels >= 0])
-            n_clusters = len(cluster_ids)
-            if n_clusters > 0:
-                centroids = np.array([sample_wf[sample_labels == cid].mean(axis=0) for cid in cluster_ids])
-            else:
-                centroids = np.empty((0, wc_waveforms.shape[1]))
-            # Initialise all labels; propagate subsample labels first
-            db_labels = np.full(n_wc, -1, dtype=int)
-            for sp, sl in zip(sample_pos, sample_labels):
-                db_labels[sp] = sl
-            # Assign non-sampled pulses to nearest centroid by L2 distance
-            unassigned_mask_wc = np.ones(n_wc, dtype=bool)
-            unassigned_mask_wc[sample_pos] = False
-            if n_clusters > 0 and unassigned_mask_wc.any():
-                unassigned_wf = wc_waveforms[unassigned_mask_wc]
-                dists = np.linalg.norm(unassigned_wf[:, None, :] - centroids[None, :, :], axis=2)
-                db_labels[unassigned_mask_wc] = cluster_ids[np.argmin(dists, axis=1)]
-            n_noise = (db_labels == -1).sum()
-            print(f"  Width class {wc}: {n_clusters} shape cluster(s), {n_noise} noise pulses "
-                  f"[subsampled {min(dbscan_sample_size, n_wc)}/{n_wc}]")
         else:
-            db = DBSCAN(eps=shape_dbscan_eps, min_samples=shape_dbscan_min_samples, metric='euclidean')
-            db_labels = db.fit_predict(wc_waveforms)
-            n_clusters = (np.unique(db_labels[db_labels >= 0])).size
-            n_noise = (db_labels == -1).sum()
-            print(f"  Width class {wc}: {n_clusters} shape cluster(s), {n_noise} noise pulses")
+            sample_pos = np.arange(n_wc)
+        n_sample = len(sample_pos)
 
-        # Assign globally unique shape class ids; noise pulses each get a unique id
-        for i, pulse_idx in enumerate(wc_indices):
-            if db_labels[i] >= 0:
-                eod_data.loc[pulse_idx, 'shape_class'] = next_shape_id + db_labels[i]
+        # [Phase 2] Adaptive epsilon: PCA(5) features + KNN 80th percentile.
+        # eps is taken directly from the 80th percentile of k-NN distances in PCA space,
+        # giving a data-driven scale that adapts to actual waveform spread.
+        n_pca_shape = min(5, n_sample - 1, waveform_target_length)
+        min_pts = max(shape_dbscan_min_samples, int(n_sample * 0.01))
+
+        pca_p1 = PCA(n_components=n_pca_shape)
+        feat_p1_sample = pca_p1.fit_transform(wc_waveforms_p1[sample_pos])
+        knn_p1 = np.sort(pairwise_distances(feat_p1_sample), axis=1)
+        knn_col = min(min_pts, knn_p1.shape[1] - 1)
+        eps_p1 = max(float(np.percentile(knn_p1[:, knn_col], knn_percentile)), min_shape_eps)
+
+        pca_p2 = PCA(n_components=n_pca_shape)
+        feat_p2_sample = pca_p2.fit_transform(wc_waveforms_p2[sample_pos])
+        knn_p2 = np.sort(pairwise_distances(feat_p2_sample), axis=1)
+        eps_p2 = max(float(np.percentile(knn_p2[:, knn_col], knn_percentile)), min_shape_eps)
+
+        # [Phase 4] DBSCAN on P1 and P2 PCA features independently
+        db_p1 = DBSCAN(eps=eps_p1, min_samples=min_pts, metric='euclidean')
+        sample_labels_p1 = db_p1.fit_predict(feat_p1_sample)
+        db_p2 = DBSCAN(eps=eps_p2, min_samples=min_pts, metric='euclidean')
+        sample_labels_p2 = db_p2.fit_predict(feat_p2_sample)
+
+        cluster_ids_p1 = np.unique(sample_labels_p1[sample_labels_p1 >= 0])
+        cluster_ids_p2 = np.unique(sample_labels_p2[sample_labels_p2 >= 0])
+
+        # Propagate sample labels to full width class via nearest centroid in PCA space
+        if n_wc > dbscan_max_direct:
+            labels_p1 = np.full(n_wc, -1, dtype=int)
+            labels_p2 = np.full(n_wc, -1, dtype=int)
+            for sp, sl in zip(sample_pos, sample_labels_p1):
+                labels_p1[sp] = sl
+            for sp, sl in zip(sample_pos, sample_labels_p2):
+                labels_p2[sp] = sl
+            unassigned = np.ones(n_wc, dtype=bool)
+            unassigned[sample_pos] = False
+            if len(cluster_ids_p1) > 0 and unassigned.any():
+                centroids_p1 = np.array([feat_p1_sample[sample_labels_p1 == c].mean(axis=0) for c in cluster_ids_p1])
+                feats_unassigned_p1 = pca_p1.transform(wc_waveforms_p1[unassigned])
+                d_p1 = np.linalg.norm(feats_unassigned_p1[:, None, :] - centroids_p1[None, :, :], axis=2)
+                labels_p1[unassigned] = cluster_ids_p1[np.argmin(d_p1, axis=1)]
+            if len(cluster_ids_p2) > 0 and unassigned.any():
+                centroids_p2 = np.array([feat_p2_sample[sample_labels_p2 == c].mean(axis=0) for c in cluster_ids_p2])
+                feats_unassigned_p2 = pca_p2.transform(wc_waveforms_p2[unassigned])
+                d_p2 = np.linalg.norm(feats_unassigned_p2[:, None, :] - centroids_p2[None, :, :], axis=2)
+                labels_p2[unassigned] = cluster_ids_p2[np.argmin(d_p2, axis=1)]
+        else:
+            labels_p1 = sample_labels_p1
+            labels_p2 = sample_labels_p2
+
+        # [Phase 4] Greedy merge: largest cluster wins between P1 and P2 sets.
+        # Picking a cluster from one set marks all overlapping clusters in the other as consumed.
+        final_labels = np.full(n_wc, -1, dtype=int)
+        source_labels = np.full(n_wc, '', dtype=object)
+        done_p1 = set()
+        done_p2 = set()
+        size_p1 = {c: int((labels_p1 == c).sum()) for c in cluster_ids_p1}
+        size_p2 = {c: int((labels_p2 == c).sum()) for c in cluster_ids_p2}
+        next_merged_id = 0
+
+        while True:
+            avail_p1 = {c: size_p1[c] for c in cluster_ids_p1 if c not in done_p1}
+            avail_p2 = {c: size_p2[c] for c in cluster_ids_p2 if c not in done_p2}
+            if not avail_p1 and not avail_p2:
+                break
+            best_c1 = max(avail_p1, key=avail_p1.get) if avail_p1 else None
+            best_c2 = max(avail_p2, key=avail_p2.get) if avail_p2 else None
+            s1 = avail_p1[best_c1] if best_c1 is not None else 0
+            s2 = avail_p2[best_c2] if best_c2 is not None else 0
+            if s1 >= s2:
+                chosen = (labels_p1 == best_c1)
+                final_labels[chosen] = next_merged_id
+                source_labels[chosen] = 'p1'
+                for c2 in np.unique(labels_p2[chosen]):
+                    if c2 >= 0:
+                        done_p2.add(c2)
+                done_p1.add(best_c1)
             else:
-                eod_data.loc[pulse_idx, 'shape_class'] = next_shape_id + n_clusters + i
+                chosen = (labels_p2 == best_c2)
+                final_labels[chosen] = next_merged_id
+                source_labels[chosen] = 'p2'
+                for c1 in np.unique(labels_p1[chosen]):
+                    if c1 >= 0:
+                        done_p1.add(c1)
+                done_p2.add(best_c2)
+            next_merged_id += 1
 
-        next_shape_id += n_clusters + len(wc_indices)
+        n_clusters = next_merged_id
+
+        # Assign DBSCAN noise points to nearest cluster centroid (waveform space).
+        # Prevents each noise point becoming a singleton shape class that explodes fragment count.
+        # shape_source='noise' is preserved as a diagnostic label.
+        if n_clusters > 0:
+            noise_mask = (final_labels == -1)
+            n_noise_forced = int(noise_mask.sum())
+            if n_noise_forced > 0:
+                merged_centroids = np.array(
+                    [wc_waveforms_p1[final_labels == c].mean(axis=0) for c in range(n_clusters)]
+                )
+                d_noise = np.linalg.norm(
+                    wc_waveforms_p1[noise_mask][:, None, :] - merged_centroids[None, :, :], axis=2
+                )
+                final_labels[noise_mask] = np.argmin(d_noise, axis=1)
+                source_labels[noise_mask] = 'noise'
+        else:
+            # All pulses were noise → single shared class
+            final_labels[:] = 0
+            source_labels[:] = 'noise'
+            n_clusters = 1
+            n_noise_forced = n_wc
+
+        print(f"  Width class {wc}: {n_clusters} shape cluster(s) "
+              f"(P1 eps={eps_p1:.3f}, P2 eps={eps_p2:.3f}), {n_noise_forced} noise\u2192assigned "
+              f"[{'subsampled' if n_wc > dbscan_max_direct else 'direct'} {n_sample}/{n_wc}]")
+
+        # Assign globally unique shape class IDs
+        for i, pulse_idx in enumerate(wc_indices):
+            eod_data.loc[pulse_idx, 'shape_class'] = next_shape_id + final_labels[i]
+            eod_data.loc[pulse_idx, 'shape_source'] = source_labels[i]
+
+        next_shape_id += n_clusters
 
     # Build list of (width_class, shape_class) groups for Pass 1
     shape_groups = (
@@ -1183,7 +1325,7 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
         'assignment_rate': assigned / len(eod_data) if len(eod_data) > 0 else 0.0,
         'fish_details':    fish_details,
     })
-    del eod_data, waveforms_raw, waveforms_l2
+    del eod_data, waveforms_l2, waveforms_l2_p2
 
 print("\n" + "="*70)
 print("TRACKING COMPLETE")
