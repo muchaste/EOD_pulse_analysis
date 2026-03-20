@@ -1096,8 +1096,8 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
     # Row 3 determines number of columns (at least 1, at most 8 per row, wrap into multiple rows)
     n_cols_r3 = min(n_assigned, 8) if n_assigned > 0 else 1
     n_rows_r3 = max(1, int(np.ceil(n_assigned / n_cols_r3))) if n_assigned > 0 else 1
-    total_rows = 3 + n_rows_r3 - 1  # row1 + row2 + n_rows_r3 waveform rows
-    row_height_ratios = [2, 2] + [1.5] * n_rows_r3
+    total_rows = 4 + n_rows_r3 - 1  # row1 + row2 (fish timeline) + row3 (PCA/hist) + waveform rows
+    row_height_ratios = [2, 1.5, 2] + [1.5] * n_rows_r3
 
     fig = plt.figure(figsize=(max(14, 3 * n_cols_r3), 4 * (total_rows)))
     fig.suptitle(f"{file_set['base_name']} — tracking result", fontsize=11, y=0.99)
@@ -1126,8 +1126,51 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
     ax_loc.set_title('Pulse location vs time')
     ax_loc.legend(markerscale=3, loc='upper right', fontsize=7, ncol=max(1, n_assigned // 8))
 
-    # --- Row 2: three columns: fish-ID PCA | species/control PCA | width histogram ---
-    gs_r2 = gs_outer[1].subgridspec(1, 3, wspace=0.35)
+    # --- Row 2: fish number vs time, line + dot markers, colored by species ---
+    ax_fish = fig.add_subplot(gs_outer[1])
+    if n_assigned > 0:
+        if use_species_matching and 'species_assigned' in eod_data.columns:
+            sp_list_fish = sorted(eod_data.loc[eod_data['fish_id'] >= 0, 'species_assigned'].unique())
+            sp_pal_fish = plt.cm.Set1(np.linspace(0, 0.8, max(len(sp_list_fish), 1)))
+            sp_color_fish = {sp: sp_pal_fish[i] for i, sp in enumerate(sp_list_fish)}
+        else:
+            sp_list_fish = []
+            sp_color_fish = {}
+        legend_handles_fish = {}
+        for fish_num, fid in enumerate(fish_ids_assigned, start=1):
+            fid_mask = eod_data['fish_id'] == fid
+            t_fish = t_sec[fid_mask]
+            sort_order = np.argsort(t_fish)
+            t_sorted = t_fish[sort_order]
+            y_vals = np.full(len(t_sorted), fish_num)
+            if use_species_matching and 'species_assigned' in eod_data.columns:
+                sp = eod_data.loc[fid_mask, 'species_assigned'].iloc[0]
+                color = sp_color_fish.get(sp, 'steelblue')
+            else:
+                sp = f'Fish {fid}'
+                color = fish_color_map[fid]
+            line, = ax_fish.plot(t_sorted, y_vals, '-o', color=color,
+                                 markersize=2, linewidth=0.8, alpha=0.8, rasterized=True)
+            if sp not in legend_handles_fish:
+                legend_handles_fish[sp] = line
+        ax_fish.set_yticks(range(1, len(fish_ids_assigned) + 1))
+        ax_fish.set_yticklabels([f'Fish {fid}' for fid in fish_ids_assigned], fontsize=7)
+        ax_fish.set_xlabel('Time (s)')
+        ax_fish.set_title('Fish tracks over time')
+        ax_fish.set_xlim(ax_loc.get_xlim())
+        if legend_handles_fish:
+            ax_fish.legend(
+                handles=list(legend_handles_fish.values()),
+                labels=list(legend_handles_fish.keys()),
+                fontsize=7, loc='upper right', ncol=max(1, len(legend_handles_fish) // 4)
+            )
+    else:
+        ax_fish.axis('off')
+        ax_fish.text(0.5, 0.5, 'No fish assigned', ha='center', va='center',
+                     transform=ax_fish.transAxes, fontsize=9)
+
+    # --- Row 3: three columns: fish-ID PCA | species/control PCA | width histogram ---
+    gs_r2 = gs_outer[2].subgridspec(1, 3, wspace=0.35)
     ax_pca  = fig.add_subplot(gs_r2[0])
     ax_pca2 = fig.add_subplot(gs_r2[1])
     ax_hist = fig.add_subplot(gs_r2[2])
@@ -1228,7 +1271,7 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
     if len(width_classes) > 1:
         ax_hist.legend(fontsize=7)
 
-    # --- Rows 3+: per-fish waveform overlays ---
+    # --- Rows 4+: per-fish waveform overlays ---
     if n_assigned > 0:
         shape_classes = sorted(eod_data['shape_class'].unique())
         sc_cmap = plt.cm.Set2(np.linspace(0, 0.9, max(len(shape_classes), 1)))
@@ -1236,7 +1279,7 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
 
         wf_panel_idx = 0
         for row_offset in range(n_rows_r3):
-            gs_r3 = gs_outer[2 + row_offset].subgridspec(1, n_cols_r3, wspace=0.3)
+            gs_r3 = gs_outer[3 + row_offset].subgridspec(1, n_cols_r3, wspace=0.3)
             for col_idx in range(n_cols_r3):
                 if wf_panel_idx >= n_assigned:
                     ax_wf = fig.add_subplot(gs_r3[col_idx])
