@@ -514,6 +514,15 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
             sample_pos = np.arange(n_wc)
         n_sample = len(sample_pos)
 
+        # Too few pulses to run PCA+DBSCAN: assign all to a single cluster and move on.
+        if n_sample < 2:
+            print(f"  Width class {wc}: 1 shape cluster(s) (trivial, n={n_wc})")
+            for pulse_idx in wc_indices:
+                eod_data.loc[pulse_idx, 'shape_class'] = next_shape_id
+                eod_data.loc[pulse_idx, 'shape_source'] = 'p1'
+            next_shape_id += 1
+            continue
+
         # [Phase 2] Adaptive epsilon: PCA(5) features + KNN 80th percentile.
         # eps is taken directly from the 80th percentile of k-NN distances in PCA space,
         # giving a data-driven scale that adapts to actual waveform spread.
@@ -1126,44 +1135,43 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
     ax_loc.set_title('Pulse location vs time')
     ax_loc.legend(markerscale=3, loc='upper right', fontsize=7, ncol=max(1, n_assigned // 8))
 
-    # --- Row 2: fish number vs time, line + dot markers, colored by species ---
+    # --- Row 2: number of active fish per species vs time ---
+    # For each time bin, count unique fish IDs that emitted at least one pulse in that bin.
     ax_fish = fig.add_subplot(gs_outer[1])
     if n_assigned > 0:
+        t_min, t_max = t_sec.min(), t_sec.max()
+        bin_edges_fish = np.arange(np.floor(t_min), np.ceil(t_max) + 1, 1.0)
+        n_bins_fish = len(bin_edges_fish) - 1
+        bin_centers_fish = 0.5 * (bin_edges_fish[:-1] + bin_edges_fish[1:])
+
+        assigned_data = eod_data[eod_data['fish_id'] >= 0].copy()
+        assigned_data['t_bin'] = np.searchsorted(bin_edges_fish[1:], t_sec[assigned_data.index])
+        assigned_data['t_bin'] = assigned_data['t_bin'].clip(0, n_bins_fish - 1)
+
         if use_species_matching and 'species_assigned' in eod_data.columns:
-            sp_list_fish = sorted(eod_data.loc[eod_data['fish_id'] >= 0, 'species_assigned'].unique())
+            sp_list_fish = sorted(assigned_data['species_assigned'].unique())
             sp_pal_fish = plt.cm.Set1(np.linspace(0, 0.8, max(len(sp_list_fish), 1)))
             sp_color_fish = {sp: sp_pal_fish[i] for i, sp in enumerate(sp_list_fish)}
+            for sp in sp_list_fish:
+                sp_data = assigned_data[assigned_data['species_assigned'] == sp]
+                counts = sp_data.groupby('t_bin')['fish_id'].nunique().reindex(
+                    range(n_bins_fish), fill_value=0
+                ).values
+                ax_fish.plot(bin_centers_fish, counts, '-o', color=sp_color_fish[sp],
+                             markersize=3, linewidth=1.2, label=sp, alpha=0.9, rasterized=True)
         else:
-            sp_list_fish = []
-            sp_color_fish = {}
-        legend_handles_fish = {}
-        for fish_num, fid in enumerate(fish_ids_assigned, start=1):
-            fid_mask = eod_data['fish_id'] == fid
-            t_fish = t_sec[fid_mask]
-            sort_order = np.argsort(t_fish)
-            t_sorted = t_fish[sort_order]
-            y_vals = np.full(len(t_sorted), fish_num)
-            if use_species_matching and 'species_assigned' in eod_data.columns:
-                sp = eod_data.loc[fid_mask, 'species_assigned'].iloc[0]
-                color = sp_color_fish.get(sp, 'steelblue')
-            else:
-                sp = f'Fish {fid}'
-                color = fish_color_map[fid]
-            line, = ax_fish.plot(t_sorted, y_vals, '-o', color=color,
-                                 markersize=2, linewidth=0.8, alpha=0.8, rasterized=True)
-            if sp not in legend_handles_fish:
-                legend_handles_fish[sp] = line
-        ax_fish.set_yticks(range(1, len(fish_ids_assigned) + 1))
-        ax_fish.set_yticklabels([f'Fish {fid}' for fid in fish_ids_assigned], fontsize=7)
+            counts = assigned_data.groupby('t_bin')['fish_id'].nunique().reindex(
+                range(n_bins_fish), fill_value=0
+            ).values
+            ax_fish.plot(bin_centers_fish, counts, '-o', color='steelblue',
+                         markersize=3, linewidth=1.2, label='all', alpha=0.9, rasterized=True)
+
+        ax_fish.yaxis.get_major_locator().set_params(integer=True)
+        ax_fish.set_ylabel('N fish')
         ax_fish.set_xlabel('Time (s)')
-        ax_fish.set_title('Fish tracks over time')
+        ax_fish.set_title('Active fish per species over time')
         ax_fish.set_xlim(ax_loc.get_xlim())
-        if legend_handles_fish:
-            ax_fish.legend(
-                handles=list(legend_handles_fish.values()),
-                labels=list(legend_handles_fish.keys()),
-                fontsize=7, loc='upper right', ncol=max(1, len(legend_handles_fish) // 4)
-            )
+        ax_fish.legend(fontsize=7, loc='upper right')
     else:
         ax_fish.axis('off')
         ax_fish.text(0.5, 0.5, 'No fish assigned', ha='center', va='center',
