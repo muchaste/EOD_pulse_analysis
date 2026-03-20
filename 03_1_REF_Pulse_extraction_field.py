@@ -157,7 +157,7 @@ except Exception as e:
     exit()
 
 # Apply calibration factors
-cor_factors = cor_factors_all.iloc[np.where(cor_factors_all['file_id']==os.path.basename(file_set['filename'][0]).split('.')[0])[0][0]]
+cor_factors = np.array(cor_factors_all.iloc[np.where(cor_factors_all['file_id']==os.path.basename(file_set['filename'][0]).split('.')[0])[0][0]])
 for i in range(n_channels):
     data[:, i] *= cor_factors[i]
 
@@ -217,7 +217,7 @@ for n, filepath in enumerate(file_set['filename']):
     print(f"    Loaded file: {file_duration:.1f}s, {n_channels} channels, {len(data)} samples")
     
     # Calibrate with correction factor
-    cor_factors = cor_factors_all.iloc[np.where(cor_factors_all['file_id']==fname.split('.')[0])[0][0]]
+    cor_factors = np.array(cor_factors_all.iloc[np.where(cor_factors_all['file_id']==fname.split('.')[0])[0][0]])
     for i in range(n_channels):
         data[:, i] *= cor_factors[i]
     
