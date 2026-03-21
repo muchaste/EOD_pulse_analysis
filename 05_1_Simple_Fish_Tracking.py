@@ -451,7 +451,11 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
     kde = gaussian_kde(widths, bw_method=kde_bw)
     kde_vals = kde(width_range)
 
-    min_peak_distance_bins = int(width_min_separation_us / (width_range[1] - width_range[0]))
+    bin_width_us = width_range[1] - width_range[0]
+    if bin_width_us > 0:
+        min_peak_distance_bins = int(width_min_separation_us / bin_width_us)
+    else:
+        min_peak_distance_bins = 1  # all pulses have identical width → single class
     peaks_idx, _ = find_peaks(kde_vals, distance=max(1, min_peak_distance_bins),
                                prominence=0.01 * kde_vals.max())
 
