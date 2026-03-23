@@ -162,7 +162,8 @@ min_track_duration_s = float(params['min_track_duration_s'])
 
 width_min_separation_us = float(params['width_min_separation_us'])
 use_species_matching    = bool(params['use_species_matching'])
-lda_min_probability     = float(params.get('lda_min_probability', 0.0))
+lda_min_probability       = float(params.get('lda_min_probability', 0.0))
+lda_dist_uncertainty_pct  = int(params.get('lda_dist_uncertainty_pct', 95))
 
 # Load interp_factor from analysis_parameters.csv for physics-based KDE bandwidth
 _ap_file = os.path.join(input_folder, "analysis_parameters.csv")
@@ -268,8 +269,23 @@ if use_species_matching:
             ref_pca_scores = pca_cls.fit_transform(ref_matrix)
             lda = LinearDiscriminantAnalysis()
             lda.fit(ref_pca_scores, ref_species_arr)
+            # Per-species centroid + distance threshold in LDA space for out-of-distribution detection.
+            # A field fish whose LDA coordinate exceeds the Nth percentile of intra-species
+            # control scatter is flagged uncertain regardless of softmax probability.
+            ctrl_lda_coords = lda.transform(ref_pca_scores)  # (N_ref, n_lda_axes)
+            lda_sp_centroids = {}
+            lda_sp_dist_thresholds = {}
+            for _sp in all_species_codes:
+                _sp_idx = np.where(ref_species_arr == _sp)[0]
+                _sp_coords = ctrl_lda_coords[_sp_idx]
+                _centroid = _sp_coords.mean(axis=0)
+                _dists = np.linalg.norm(_sp_coords - _centroid, axis=1)
+                lda_sp_centroids[_sp] = _centroid
+                lda_sp_dist_thresholds[_sp] = float(np.percentile(_dists, lda_dist_uncertainty_pct)) if len(_dists) > 1 else np.inf
             print(f"\u2713 LDA fitted on {len(ref_matrix)} control mean waveforms "
                   f"({len(all_species_codes)} species, {n_pca_cls} PCA components)")
+            for _sp in all_species_codes:
+                print(f"  {_sp}: LDA dist threshold (p{lda_dist_uncertainty_pct}) = {lda_sp_dist_thresholds[_sp]:.4f}")
             # Leave-one-individual-out CV (each ref_matrix row = one individual mean waveform)
             sp_counts_loo = {sp: int((ref_species_arr == sp).sum()) for sp in all_species_codes}
             loo_feasible = all(c >= 2 for c in sp_counts_loo.values())
@@ -1055,15 +1071,22 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
                 track_pca_s = pca_cls.transform(track_mean_wf[None, :])
                 sp_pred = lda.predict(track_pca_s)[0]
                 sp_proba = lda.predict_proba(track_pca_s)[0]
+                track_lda_coord = lda.transform(track_pca_s)[0]  # (n_lda_axes,)
+                lda_dist = float(np.linalg.norm(track_lda_coord - lda_sp_centroids[sp_pred]))
+                dist_threshold = lda_sp_dist_thresholds[sp_pred]
                 eod_data.loc[fid_mask, 'species_assigned'] = sp_pred
+                eod_data.loc[fid_mask, 'lda_dist_centroid'] = lda_dist
+                eod_data.loc[fid_mask, 'lda_dist_threshold'] = dist_threshold
                 for sp, p in zip(lda.classes_, sp_proba):
                     eod_data.loc[fid_mask, f'lda_proba_{sp}'] = float(p)
                 assigned_proba = float(sp_proba[list(lda.classes_).index(sp_pred)])
-                uncertain = assigned_proba < lda_min_probability
+                uncertain = (assigned_proba < lda_min_probability) or (lda_dist > dist_threshold)
                 eod_data.loc[fid_mask, 'species_uncertain'] = uncertain
                 uncertain_flag = " (!)" if uncertain else ""
-                print(f"  Fish {fid:2d}: {sp_pred}{uncertain_flag} (p={assigned_proba:.3f}, "
+                dist_flag = f", LDA_d={lda_dist:.3f}/>{dist_threshold:.3f}" if lda_dist > dist_threshold else f", LDA_d={lda_dist:.3f}"
+                print(f"  Fish {fid:2d}: {sp_pred}{uncertain_flag} (p={assigned_proba:.3f}{dist_flag}, "
                       f"nearest: {ref_ids[nn_idx]}, dist={nn_dist:.4f}, margin={margin:.4f})")
+
             else:
                 # 1-NN fallback when only 1 species in reference library
                 eod_data.loc[fid_mask, 'species_assigned'] = ref_species[nn_idx]
