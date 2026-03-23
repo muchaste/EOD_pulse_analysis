@@ -31,6 +31,7 @@ from pulse_functions import (
     # save_fixed_length_waveforms,
     create_channel_events,
     merge_channel_events,
+    split_long_events,
     filter_events,
     create_event_plots
 )
@@ -186,6 +187,9 @@ del data
 # Initialize cross-file continuation variables
 retained_data = None
 retained_data_start_time = None
+retained_eod_table = None
+retained_eod_waveforms = None
+retained_audio_start_idx = None
 
 # Process each file
 for n, filepath in enumerate(file_set['filename']):
@@ -196,13 +200,14 @@ for n, filepath in enumerate(file_set['filename']):
 
     # Release large arrays left from any previous iteration that exited early
     for _cleanup_var in [
-        'data_diff', 'detection_signal',
+        'data_diff', 'detection_data', 'detection_signal',
         'unique_midpoints', 'unique_peaks', 'unique_troughs', 'unique_widths',
         'eod_snippets', 'eod_amps', 'eod_widths', 'eod_chan', 'is_differential',
         'snippet_p1_idc', 'snippet_p2_idc', 'raw_p1_idc', 'raw_p2_idc',
         'pulse_orientations', 'amp_ratios', 'fft_peak_freqs', 'pulse_locations', 'wf_lengths',
         'raw_midpoint_idc', 'snippet_midpoint_idc', 'eod_timestamps',
         'complete_eod_table', 'eod_table', 'filteredout_eod_table',
+        'combined_eod_table', 'combined_eod_waveforms',
         'filtered_eod_waveforms', 'final_events', 'events_at_end',
         'filteredout_eod_chan', 'filteredout_final_p1_idc', 'filteredout_final_p2_idc',
     ]:
@@ -221,29 +226,33 @@ for n, filepath in enumerate(file_set['filename']):
     for i in range(n_channels):
         data[:, i] *= cor_factors[i]
     
-    # Handle cross-file continuation: prepend retained data from previous file
+    # EOD detection and waveform extraction run on the new file only.
+    # Audio is still concatenated with the retained tail for event WAV export.
+    detection_data = data
+    retain_len = 0
+
+    # Handle cross-file continuation: prepend retained audio from previous file
     if retained_data is not None:
-        print(f"    Concatenating {len(retained_data)} samples from previous file")
-        # Concatenate retained data to current file
+        print(f"    Concatenating {len(retained_data)} samples from previous file (audio only)")
         original_data_length = len(data)
         retained_duration = len(retained_data) / rate
+        retain_len = len(retained_data)
         data = np.concatenate([retained_data, data], axis=0)
         retained_data = None  # free immediately — no longer needed
-        # Adjust file start time to account for prepended data
         file_start_time = retained_data_start_time
-        print(f"    Extended file: {original_data_length/rate:.1f}s + {retained_duration:.2f}s = {len(data)/rate:.1f}s total")
+        print(f"    Extended audio: {original_data_length/rate:.1f}s + {retained_duration:.2f}s = {len(data)/rate:.1f}s total")
         print(f"    Adjusted file_start_time to: {file_start_time}")
+        print(f"    EOD detection on new file only ({original_data_length/rate:.1f}s)")
     else:
-        # Normal processing - use timestamp from file
         file_start_time = file_set['timestamp'][n]
         print(f"    Using file timestamp: {file_start_time}")
         
     # Create differential data and determine detection channels
     if parameters['source'] == 'multich_linear':
-        data_diff = np.diff(data, axis = 1)
+        data_diff = np.diff(detection_data, axis=1)
         n_detect_channels = n_channels - 1  # Differential pairs
     elif parameters['source'] == '1ch_diff':
-        data_diff = data
+        data_diff = detection_data
         n_detect_channels = 1  # Only first channel for single-channel differential
     else:
         raise ValueError(f"Unknown source: {parameters['source']}")
@@ -299,8 +308,8 @@ for n, filepath in enumerate(file_set['filename']):
                 pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations,
                 wf_lengths, snippet_p3_idc, final_p3_idc
             ) = extract_pulse_snippets(
-                data, unique_peaks, unique_troughs, rate = rate,
-                source = 'multich_linear', return_differential = parameters['return_diff'], 
+                detection_data, unique_peaks, unique_troughs, rate=rate,
+                source='multich_linear', return_differential=parameters['return_diff'],
                 interp_factor=parameters['interp_factor'],
                 use_pca=False,
                 window_mode = parameters['extraction_window'],
@@ -315,10 +324,10 @@ for n, filepath in enumerate(file_set['filename']):
                 pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations,
                 wf_lengths, snippet_p3_idc, final_p3_idc
             ) = extract_pulse_snippets(
-                data, unique_peaks, unique_troughs, rate = rate,
-                source = 'multich_linear', return_differential = parameters['return_diff'], 
+                detection_data, unique_peaks, unique_troughs, rate=rate,
+                source='multich_linear', return_differential=parameters['return_diff'],
                 interp_factor=parameters['interp_factor'],
-                use_pca=True, pca_interp_points = 300,
+                use_pca=True, pca_interp_points=300,
                 window_mode = parameters['extraction_window'],
                 window_factor = parameters['extraction_window_factor'],
                 window_length = parameters['extraction_window_length_us'],
@@ -329,55 +338,35 @@ for n, filepath in enumerate(file_set['filename']):
             print("    No valid EOD snippets extracted after waveform extraction")
             continue
 
-        # Remove duplicates
-        (
-            eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
-            snippet_p1_idc, snippet_p2_idc, 
-            raw_p1_idc, raw_p2_idc,
-            pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations, wf_lengths,
-            snippet_p3_idc, final_p3_idc
-        ) = remove_duplicates(
-            eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
-            snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc,
-            pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations, wf_lengths,
-            snippet_p3_idc, final_p3_idc, parameters
-        )
-        
-        if len(eod_snippets) == 0:
-            print("    No valid EOD snippets extracted after duplicate removal")
-            continue
-
-        # Apply filtering pipeline
+        # Filter first — eliminates noise before the O(n·k) dedup walk
         if use_ml_filtering and loaded_classifier is not None and loaded_scaler is not None:
-            # Use enhanced ML-based filtering
             keep_indices, filtered_features, filteredout_features = filter_waveforms_with_classifier(
                 eod_snippets, eod_widths, amp_ratios, fft_peak_freqs, rate,
                 classifier=loaded_classifier,
                 scaler=loaded_scaler,
-                dur_min=parameters['min_width_us'], 
+                dur_min=parameters['min_width_us'],
                 dur_max=parameters['max_width_us'],
-                pp_r_min=parameters['amplitude_ratio_min'], 
+                pp_r_min=parameters['amplitude_ratio_min'],
                 pp_r_max=parameters['amplitude_ratio_max'],
-                fft_freq_min=parameters['peak_fft_freq_min'], 
+                fft_freq_min=parameters['peak_fft_freq_min'],
                 fft_freq_max=parameters['peak_fft_freq_max'],
                 fish_probability_threshold=fish_probability_threshold,
                 use_basic_filtering=True,
-                return_features=True, 
+                return_features=True,
                 return_filteredout_features=True
             )
         else:
-            # Use basic threshold filtering
             keep_indices, filtered_features, filteredout_features = filter_waveforms(
                 eod_snippets, eod_widths, amp_ratios, fft_peak_freqs, rate,
-                dur_min=parameters['min_width_us'], 
+                dur_min=parameters['min_width_us'],
                 dur_max=parameters['max_width_us'],
-                pp_r_min=parameters['amplitude_ratio_min'], 
+                pp_r_min=parameters['amplitude_ratio_min'],
                 pp_r_max=parameters['amplitude_ratio_max'],
-                fft_freq_min=parameters['peak_fft_freq_min'], 
+                fft_freq_min=parameters['peak_fft_freq_min'],
                 fft_freq_max=parameters['peak_fft_freq_max'],
                 return_features=True, return_filteredout_features=True
             )
-        
+
         if len(keep_indices) == 0:
             print("    No pulses remaining after filtering")
             continue
@@ -385,36 +374,14 @@ for n, filepath in enumerate(file_set['filename']):
         print(f"    Filtered {len(eod_snippets) - len(keep_indices)} out of {len(eod_snippets)} pulses")
         del filtered_features, filteredout_features
 
-        # Get indices of filtered-out pulses for QC
-        all_indices = np.arange(len(eod_snippets))
-        filtered_out_indices = np.setdiff1d(all_indices, keep_indices)
-        
-        # Create results table
+        # Build QC table from full pre-filter set and extract filtered-out rows
+        filtered_out_indices = np.setdiff1d(np.arange(len(eod_snippets)), keep_indices)
         raw_midpoint_idc = (raw_p1_idc + raw_p2_idc) // 2
         snippet_midpoint_idc = (snippet_p1_idc + snippet_p2_idc) // 2
-
-        # Determine which file timestamp to use for each EOD
-        if retained_data is not None:
-            # We have prepended data - need to determine which EODs came from which file
-            retained_length = len(retained_data)
-            previous_fname = os.path.basename(file_set['filename'][n-1])
-            is_from_prev = raw_midpoint_idc < retained_length
-            n_from_previous = int(is_from_prev.sum())
-            n_from_current = len(raw_midpoint_idc) - n_from_previous
-            original_file_timestamps = [file_set['timestamp'][n-1] if p else file_set['timestamp'][n] for p in is_from_prev]
-            original_filenames = [previous_fname if p else fname for p in is_from_prev]
-            print(f"    EOD distribution: {n_from_previous} from previous file, {n_from_current} from current file")
-        else:
-            # No prepended data - all EODs are from current file
-            original_file_timestamps = [file_set['timestamp'][n]] * len(raw_midpoint_idc)
-            original_filenames = [fname] * len(raw_midpoint_idc)
-
-        eod_timestamps = [file_start_time + dt.timedelta(seconds=t) for t in raw_midpoint_idc / rate]
-
-        complete_eod_table = pd.DataFrame({
-            'timestamp': eod_timestamps,
-            'file_timestamp': original_file_timestamps,
-            'filename': original_filenames,
+        pre_filter_table = pd.DataFrame({
+            'timestamp': [file_set['timestamp'][n] + dt.timedelta(seconds=t) for t in raw_midpoint_idc / rate],
+            'file_timestamp': [file_set['timestamp'][n]] * len(raw_midpoint_idc),
+            'filename': [fname] * len(raw_midpoint_idc),
             'midpoint_idx': raw_midpoint_idc,
             'relative_time_s': raw_midpoint_idc / rate,
             'p1_idx': raw_p1_idc,
@@ -432,12 +399,98 @@ for n, filepath in enumerate(file_set['filename']):
             'fft_freq_max': fft_peak_freqs,
             'snippet_p3_idx': snippet_p3_idc,
             'p3_idx': final_p3_idc
-            })
+        })
+        filteredout_eod_table = pre_filter_table.iloc[filtered_out_indices].copy().reset_index(drop=True)
+        del pre_filter_table
 
-        # Filter by the initial criteria (duration, ratio, frequency)
-        eod_table = complete_eod_table.iloc[keep_indices].copy().reset_index(drop=True)
-        filtered_eod_waveforms = [eod_snippets[i] for i in keep_indices]
-        filteredout_eod_table = complete_eod_table.iloc[filtered_out_indices].copy().reset_index(drop=True)
+        # Subset all arrays to the kept pulses, then run dedup on the reduced set
+        eod_snippets = [eod_snippets[i] for i in keep_indices]
+        eod_amps = eod_amps[keep_indices]
+        eod_widths = eod_widths[keep_indices]
+        eod_chan = eod_chan[keep_indices]
+        is_differential = is_differential[keep_indices]
+        snippet_p1_idc = snippet_p1_idc[keep_indices]
+        snippet_p2_idc = snippet_p2_idc[keep_indices]
+        raw_p1_idc = raw_p1_idc[keep_indices]
+        raw_p2_idc = raw_p2_idc[keep_indices]
+        pulse_orientations = pulse_orientations[keep_indices]
+        amp_ratios = amp_ratios[keep_indices]
+        fft_peak_freqs = fft_peak_freqs[keep_indices]
+        pulse_locations = pulse_locations[keep_indices]
+        wf_lengths = wf_lengths[keep_indices]
+        snippet_p3_idc = snippet_p3_idc[keep_indices]
+        final_p3_idc = final_p3_idc[keep_indices]
+
+        (
+            eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
+            snippet_p1_idc, snippet_p2_idc,
+            raw_p1_idc, raw_p2_idc,
+            pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations, wf_lengths,
+            snippet_p3_idc, final_p3_idc
+        ) = remove_duplicates(
+            eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
+            snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc,
+            pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations, wf_lengths,
+            snippet_p3_idc, final_p3_idc, parameters
+        )
+
+        if len(eod_snippets) == 0:
+            print("    No valid EOD snippets remaining after duplicate removal")
+            continue
+
+        # Build eod_table from post-filter, post-dedup arrays
+        raw_midpoint_idc = (raw_p1_idc + raw_p2_idc) // 2
+        snippet_midpoint_idc = (snippet_p1_idc + snippet_p2_idc) // 2
+        eod_table = pd.DataFrame({
+            'timestamp': [file_set['timestamp'][n] + dt.timedelta(seconds=t) for t in raw_midpoint_idc / rate],
+            'file_timestamp': [file_set['timestamp'][n]] * len(raw_midpoint_idc),
+            'filename': [fname] * len(raw_midpoint_idc),
+            'midpoint_idx': raw_midpoint_idc,
+            'relative_time_s': raw_midpoint_idc / rate,
+            'p1_idx': raw_p1_idc,
+            'p2_idx': raw_p2_idc,
+            'eod_channel': eod_chan,
+            'pulse_location': pulse_locations,
+            'snippet_p1_idx': snippet_p1_idc,
+            'snippet_p2_idx': snippet_p2_idc,
+            'snippet_midpoint_idx': snippet_midpoint_idc,
+            'wf_length': wf_lengths,
+            'eod_amplitude': eod_amps,
+            'eod_width_us': eod_widths,
+            'eod_amplitude_ratio': amp_ratios,
+            'pulse_orientation': pulse_orientations,
+            'fft_freq_max': fft_peak_freqs,
+            'snippet_p3_idx': snippet_p3_idc,
+            'p3_idx': final_p3_idc
+        })
+        filtered_eod_waveforms = eod_snippets
+
+        # Combine with EODs retained from the previous file (event-creation mode only).
+        # retained_eod_table sample indices are in the previous combined-audio frame;
+        # subtract retained_audio_start_idx to bring them to the retained-audio frame
+        # (= start of the current combined audio). New-file indices shift up by retain_len.
+        if retained_eod_table is not None:
+            idx_cols = ['midpoint_idx', 'p1_idx', 'p2_idx', 'snippet_p1_idx', 'snippet_p2_idx',
+                        'snippet_midpoint_idx', 'snippet_p3_idx', 'p3_idx']
+            ret_adj = retained_eod_table.drop(columns=['original_index'], errors='ignore').copy()
+            for col in idx_cols:
+                if col in ret_adj.columns:
+                    ret_adj[col] -= retained_audio_start_idx
+            ret_adj['relative_time_s'] -= retained_audio_start_idx / rate
+            new_adj = eod_table.copy()
+            for col in idx_cols:
+                if col in new_adj.columns:
+                    new_adj[col] += retain_len
+            new_adj['relative_time_s'] += retain_len / rate
+            combined_eod_table = pd.concat([ret_adj, new_adj]).reset_index(drop=True)
+            combined_eod_waveforms = retained_eod_waveforms + filtered_eod_waveforms
+            retained_eod_table = None
+            retained_eod_waveforms = None
+            retained_audio_start_idx = None
+            print(f"    Combined EOD table: {len(combined_eod_table)} EODs ({len(ret_adj)} retained + {len(new_adj)} new)")
+        else:
+            combined_eod_table = eod_table
+            combined_eod_waveforms = filtered_eod_waveforms
 
 
         # =============================================================================
@@ -580,13 +633,13 @@ for n, filepath in enumerate(file_set['filename']):
             # Create events from eod_table
             print(f"    Stage 1 - Channel-wise temporal clustering using max_ipi_seconds = {parameters['max_ipi_seconds']}")
 
-            if len(eod_table) == 0:
+            if len(combined_eod_table) == 0:
                 print("No data to process!")
                 continue
 
             # Create Channel Events
             channel_events = create_channel_events(
-                eod_table, 
+                combined_eod_table,
                 parameters['max_ipi_seconds']
             )
 
@@ -616,7 +669,10 @@ for n, filepath in enumerate(file_set['filename']):
                 merged_events['merged_event_id'] = merged_events['channel_event_id']
                 merged_events['event_start_time'] = merged_events['channel_start_time']
                 merged_events['event_end_time'] = merged_events['channel_end_time']
-                        
+
+            # Optionally split events exceeding max_event_duration_seconds
+            merged_events = split_long_events(merged_events, parameters.get('max_event_duration_seconds', 0))
+
             # Flag events that reach the end of the file
             merged_events['reaches_file_end'] = merged_events['event_end_time'] >= file_start_time + dt.timedelta(seconds=len(data)/rate - parameters['max_ipi_seconds'])
 
@@ -629,15 +685,24 @@ for n, filepath in enumerate(file_set['filename']):
                 retain_start_time = events_at_end['event_start_time'].min() - dt.timedelta(seconds=parameters['margin'])
                 retain_start_idx = max(0, int((retain_start_time - file_start_time).total_seconds() * rate))
                 
-                # Store data and timing info for next iteration
+                # Store audio for next iteration (unchanged — used for event WAV export)
                 retained_data = data[retain_start_idx:, :].copy()
                 retained_data_start_time = retain_start_time
-                
+                # Store EOD table rows to skip re-detection of the retained region
+                ret_eod_mask = combined_eod_table['midpoint_idx'] >= retain_start_idx
+                retained_eod_table = combined_eod_table[ret_eod_mask].drop(columns=['original_index'], errors='ignore').copy()
+                retained_eod_waveforms = [combined_eod_waveforms[i] for i in retained_eod_table.index]
+                retained_audio_start_idx = retain_start_idx
+
                 print(f"    Retaining {len(retained_data)} samples ({len(retained_data)/rate:.2f}s) starting from {retain_start_time}")
+                print(f"    Retained {len(retained_eod_table)} EODs for next iteration")
             else:
                 # Clear retention variables
                 retained_data = None
                 retained_data_start_time = None
+                retained_eod_table = None
+                retained_eod_waveforms = None
+                retained_audio_start_idx = None
                 if len(events_at_end) > 0:
                     print(f"    Found {len(events_at_end['merged_event_id'].unique())} event(s) reaching file end (last file - not retaining)")
 
@@ -701,7 +766,9 @@ for n, filepath in enumerate(file_set['filename']):
                     'max_amplitude': event_eods['eod_amplitude'].max(),
                     'mean_width_ms': event_eods['eod_width_us'].mean() / 1000 if 'eod_width_us' in event_eods.columns else 0,
                     'n_files': event_eods['file_index'].nunique() if 'file_index' in event_eods.columns else 1,
-                    'file_names': ','.join(event_eods['filename'].unique()) if 'filename' in event_eods.columns else 'unknown'
+                    'file_names': ','.join(event_eods['filename'].unique()) if 'filename' in event_eods.columns else 'unknown',
+                    'original_event_id': int(event_eods['original_event_id'].iloc[0]),
+                    'split_segment_id': int(event_eods['split_segment_id'].iloc[0])
                 }
                 
                 event_summaries.append(summary)
@@ -712,7 +779,7 @@ for n, filepath in enumerate(file_set['filename']):
 
                 # Save waveforms for this event
                 event_eod_indices = event_eods['original_index'].values
-                event_eod_waveforms = [filtered_eod_waveforms[i] for i in event_eod_indices]
+                event_eod_waveforms = [combined_eod_waveforms[i] for i in event_eod_indices]
                 if len(event_eod_waveforms) > 0:
                     event_waveform_base = os.path.join(output_path, f'{fname[:-4]}_event_{event_id}_waveforms')
                     save_waveforms(event_eod_waveforms, event_waveform_base, length=parameters['extraction_window'])
