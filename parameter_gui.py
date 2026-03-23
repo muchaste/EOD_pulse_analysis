@@ -191,13 +191,18 @@ class ParameterConfigGUI:
         ttk.Checkbutton(pulse_frame, text="Return only Head-to-Tail", 
                        variable=self.param_vars['return_diff']).grid(
             row=next_row+1, column=3, columnspan=2, sticky=tk.W, pady=2)
+
+        ttk.Label(pulse_frame, text="Symmetry Threshold:").grid(row=next_row+2, column=3, sticky=tk.W, pady=2)
+        self.param_vars['symmetry_threshold'] = tk.DoubleVar(value=0.3)
+        ttk.Entry(pulse_frame, textvariable=self.param_vars['symmetry_threshold'], width=8).grid(
+            row=next_row+2, column=4, sticky=tk.W, padx=5)
         
         # Extraction window mode dropdown
-        ttk.Label(pulse_frame, text="Extraction window:").grid(row=next_row+2, column=3, sticky=tk.W, pady=2)
+        ttk.Label(pulse_frame, text="Extraction window:").grid(row=next_row+3, column=3, sticky=tk.W, pady=2)
         self.param_vars['extraction_window'] = tk.StringVar(value='fixed')
         length_combo = ttk.Combobox(pulse_frame, textvariable=self.param_vars['extraction_window'], 
                                     values=['fixed', 'variable'], state='readonly', width=12)
-        length_combo.grid(row=next_row+2, column=4, sticky=tk.W, padx=5)
+        length_combo.grid(row=next_row+3, column=4, sticky=tk.W, padx=5)
         
         # ===== EVENT CREATION PARAMETERS =====
         event_frame = ttk.LabelFrame(scrollable_frame, text="Event Creation Parameters", padding="10")
@@ -648,11 +653,16 @@ class ControlParameterConfigGUI:
                         variable=self.param_vars['return_diff']).grid(
             row=next_row + 1, column=3, columnspan=2, sticky=tk.W, pady=2)
 
-        ttk.Label(pulse_frame, text="Extraction window:").grid(row=next_row + 2, column=3, sticky=tk.W, pady=2)
+        ttk.Label(pulse_frame, text="Symmetry Threshold:").grid(row=next_row + 2, column=3, sticky=tk.W, pady=2)
+        self.param_vars['symmetry_threshold'] = tk.DoubleVar(value=0.3)
+        ttk.Entry(pulse_frame, textvariable=self.param_vars['symmetry_threshold'], width=8).grid(
+            row=next_row + 2, column=4, sticky=tk.W, padx=5)
+
+        ttk.Label(pulse_frame, text="Extraction window:").grid(row=next_row + 3, column=3, sticky=tk.W, pady=2)
         self.param_vars['extraction_window'] = tk.StringVar(value='fixed')
         length_combo = ttk.Combobox(pulse_frame, textvariable=self.param_vars['extraction_window'],
                                     values=['fixed', 'variable'], state='readonly', width=12)
-        length_combo.grid(row=next_row + 2, column=4, sticky=tk.W, padx=5)
+        length_combo.grid(row=next_row + 3, column=4, sticky=tk.W, padx=5)
 
         # Processing options
         options_frame = ttk.LabelFrame(scrollable_frame, text="Processing Options", padding="10")

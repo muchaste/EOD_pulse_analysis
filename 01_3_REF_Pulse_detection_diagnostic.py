@@ -78,6 +78,7 @@ class PulseDiagnosticTool:
             'peak_fft_freq_min': 50,
             'peak_fft_freq_max': 10000,
             'return_diff': True,
+            'symmetry_threshold': 0.2,
             'length': 2000,
             'length_extraction': 'fixed',
             'length_factor': 10,
@@ -1258,7 +1259,8 @@ class PulseDiagnosticTool:
                     window_mode=self.parameters['length_extraction'],
                     window_factor=int(self.parameters['length_factor']),
                     window_length=self.parameters['length'],
-                    search_window=self.parameters['search_window']
+                    search_window=self.parameters['search_window'],
+                    symmetry_threshold=self.parameters.get('symmetry_threshold', 0.3)
                 )
 
                 print(f"    Filtering for differential pulses...{len(unique_pulses)} total, {np.sum(is_differential)} differential")

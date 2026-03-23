@@ -112,7 +112,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
                            source, return_differential=True, interp_factor=1,
                            use_pca=False, pca_component=0, pca_interp_points=100,
                            window_mode="fixed", window_factor=7, window_length = 4000,
-                           search_window=10):
+                           search_window=10, symmetry_threshold=0.3):
     """
     Extract and analyze EOD snippets with variable widths based on detected pulse widths.
     For 2-D multi-channel data (finds polarity flips and extracts differential signals OR
@@ -231,7 +231,8 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
             print(f"    Extracting differential waveforms from {n_channels}-channel data...")
             # Find differential channel with polarity flip
             eod_chans, is_differential, _, cor_coefs = _select_differential_channel_pointwise(
-                data, n_channels, peaks, troughs)
+                data, n_channels, peaks, troughs,
+                symmetry_threshold=symmetry_threshold)
             n_pulses = len(eod_chans)
         else:
             print("    Single-channel data detected, skipping differential channel selection...")
@@ -592,7 +593,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
             waveform_lengths_array, snippet_p3_idc, final_p3_idc)
     
 
-def _select_differential_channel_pointwise(data, n_channels, peaks, troughs):
+def _select_differential_channel_pointwise(data, n_channels, peaks, troughs, symmetry_threshold=0.3):
     """
     Select the best differential channel from multi-channel data.
     Modified version - this one only uses peak and trough (instead of waveform snippet)
@@ -655,7 +656,14 @@ def _select_differential_channel_pointwise(data, n_channels, peaks, troughs):
                         cor_coeffs_diff[i, j] = np.corrcoef(snippet_diff[:, j], snippet_diff[:, j+1])[0, 1]
 
             # Find polarity flips (negative correlations)
-            flips = np.where(cor_coeffs[i,:] < 0)[0]
+            flips_raw = np.where(cor_coeffs[i,:] < 0)[0]
+            # Reject shadow-artifact flips: a true differential flip has comparable amplitudes
+            # on both sides; a shadow from a distant fish has one dominant channel (~7x the other)
+            flips = np.array([
+                j for j in flips_raw
+                if max(amps[i, j], amps[i, j+1]) > 0 and
+                   min(amps[i, j], amps[i, j+1]) / max(amps[i, j], amps[i, j+1]) >= symmetry_threshold
+            ], dtype=int)
             flips_diff = np.where(cor_coeffs_diff[i,:] < 0)[0]
 
             if len(flips) > 1:

@@ -288,7 +288,8 @@ for n, individual in enumerate(individual_info):
                 window_mode = parameters['extraction_window'],
                 window_factor = parameters['extraction_window_factor'],
                 window_length = parameters['extraction_window_length_us'],
-                search_window=parameters['search_window']
+                search_window=parameters['search_window'],
+                symmetry_threshold=parameters.get('symmetry_threshold', 0.3)
             )
         
         # extract_pulse_snippets(
