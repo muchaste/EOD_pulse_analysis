@@ -220,7 +220,6 @@ class ParameterConfigGUI:
             ('max_merge_gap_seconds', 'Max Merge Gap (s):', 0.5, float),
             ('min_eods_postmerge', 'Min EODs Post-Merge:', 30, int),
             ('margin', 'Event Time Margin (s):', 1.0, float),
-            ('max_event_duration_seconds', 'Max Event Duration (s) [0=off]:', 0.0, float),
         ]
         
         self.event_param_widgets = []  # Store widgets for enable/disable

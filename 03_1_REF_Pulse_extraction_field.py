@@ -31,7 +31,6 @@ from pulse_functions import (
     # save_fixed_length_waveforms,
     create_channel_events,
     merge_channel_events,
-    split_long_events,
     filter_events,
     create_event_plots
 )
@@ -670,9 +669,6 @@ for n, filepath in enumerate(file_set['filename']):
                 merged_events['event_start_time'] = merged_events['channel_start_time']
                 merged_events['event_end_time'] = merged_events['channel_end_time']
 
-            # Optionally split events exceeding max_event_duration_seconds
-            merged_events = split_long_events(merged_events, parameters.get('max_event_duration_seconds', 0))
-
             # Flag events that reach the end of the file
             merged_events['reaches_file_end'] = merged_events['event_end_time'] >= file_start_time + dt.timedelta(seconds=len(data)/rate - parameters['max_ipi_seconds'])
 
@@ -766,9 +762,7 @@ for n, filepath in enumerate(file_set['filename']):
                     'max_amplitude': event_eods['eod_amplitude'].max(),
                     'mean_width_ms': event_eods['eod_width_us'].mean() / 1000 if 'eod_width_us' in event_eods.columns else 0,
                     'n_files': event_eods['file_index'].nunique() if 'file_index' in event_eods.columns else 1,
-                    'file_names': ','.join(event_eods['filename'].unique()) if 'filename' in event_eods.columns else 'unknown',
-                    'original_event_id': int(event_eods['original_event_id'].iloc[0]),
-                    'split_segment_id': int(event_eods['split_segment_id'].iloc[0])
+                    'file_names': ','.join(event_eods['filename'].unique()) if 'filename' in event_eods.columns else 'unknown'
                 }
                 
                 event_summaries.append(summary)
