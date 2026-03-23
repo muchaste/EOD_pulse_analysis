@@ -964,15 +964,28 @@ def remove_proximity_duplicates(arrays_dict, proximity_threshold=3):
     """
     final_midpoint_idc = arrays_dict['final_midpoint_idc']
     eod_chan = arrays_dict['eod_chan']
-    
-    unique_mask = np.ones(len(final_midpoint_idc), dtype=bool)
-    for i in range(len(final_midpoint_idc)):
-        if unique_mask[i]:
-            for j in range(i+1, len(final_midpoint_idc)):
-                if (eod_chan[i] == eod_chan[j] and 
-                    abs(final_midpoint_idc[i] - final_midpoint_idc[j]) <= proximity_threshold):
-                    unique_mask[j] = False
-    
+
+    # Sort by midpoint index so the sliding window can break early.
+    # For each pulse i (in sorted order), advance j while the distance is within
+    # the threshold — same-channel neighbours in that window are duplicates.
+    # Only non-duplicate pulses are used as seeds (checked via unique_mask_sorted[i]).
+    sort_order = np.argsort(final_midpoint_idc, kind='stable')
+    sorted_midpoints = final_midpoint_idc[sort_order]
+    sorted_channels = eod_chan[sort_order]
+
+    unique_mask_sorted = np.ones(len(sorted_midpoints), dtype=bool)
+    for i in range(len(sorted_midpoints)):
+        if unique_mask_sorted[i]:
+            j = i + 1
+            while j < len(sorted_midpoints) and sorted_midpoints[j] - sorted_midpoints[i] <= proximity_threshold:
+                if sorted_channels[j] == sorted_channels[i]:
+                    unique_mask_sorted[j] = False
+                j += 1
+
+    # Map mask back to original (unsorted) order
+    unique_mask = np.empty(len(final_midpoint_idc), dtype=bool)
+    unique_mask[sort_order] = unique_mask_sorted
+
     n_removed = np.sum(~unique_mask)
     
     # Filter all arrays by the unique mask
@@ -2277,6 +2290,65 @@ def merge_channel_events(channel_events, max_merge_gap_seconds, verbose=False):
         print("  No merged events found!")
         return pd.DataFrame()
     
+
+def split_long_events(merged_events, max_event_duration_seconds):
+    """
+    Split events longer than max_event_duration_seconds at the largest IPI gaps.
+
+    Adds two columns:
+      original_event_id  — pre-split merged_event_id (equals merged_event_id for unsplit events)
+      split_segment_id   — 0 for unsplit events; 1, 2, 3 ... for each segment of a split event
+
+    For split events, merged_event_id, event_start_time and event_end_time are updated
+    per segment so that downstream filter_events and sequential ID reassignment work
+    without modification.
+
+    Setting max_event_duration_seconds <= 0 disables splitting.
+    """
+    result = merged_events.copy()
+    result['original_event_id'] = result['merged_event_id']
+    result['split_segment_id'] = 0
+
+    if max_event_duration_seconds <= 0:
+        return result
+
+    next_new_id = int(result['merged_event_id'].max()) + 1
+    parts = []
+
+    for event_id, event_eods in result.groupby('merged_event_id', sort=False):
+        duration = (event_eods['event_end_time'].iloc[0] - event_eods['event_start_time'].iloc[0]).total_seconds()
+
+        if duration <= max_event_duration_seconds or len(event_eods) < 2:
+            parts.append(event_eods)
+            continue
+
+        event_eods = event_eods.sort_values('timestamp_dt').copy()
+
+        n_segments = int(np.ceil(duration / max_event_duration_seconds))
+        n_cuts = min(n_segments - 1, len(event_eods) - 1)
+
+        timestamps = event_eods['timestamp_dt'].values  # numpy datetime64[ns]
+        ipis_ns = np.diff(timestamps).astype(np.int64)  # nanoseconds as int64 — sortable
+        cut_after = np.sort(np.argsort(ipis_ns)[-n_cuts:])  # row positions after which to cut
+
+        segment_starts = np.concatenate([[0], cut_after + 1])
+        segment_ends = np.concatenate([cut_after + 1, [len(event_eods)]])
+
+        print(f"    Split event {event_id} ({duration:.0f}s) into {len(segment_starts)} segments")
+
+        for seg_idx, (seg_s, seg_e) in enumerate(zip(segment_starts, segment_ends)):
+            seg = event_eods.iloc[seg_s:seg_e].copy()
+            seg['event_start_time'] = seg['timestamp_dt'].min()
+            seg['event_end_time'] = seg['timestamp_dt'].max()
+            seg['original_event_id'] = event_id
+            seg['split_segment_id'] = seg_idx + 1
+            if seg_idx > 0:
+                seg['merged_event_id'] = next_new_id
+                next_new_id += 1
+            parts.append(seg)
+
+    return pd.concat(parts, ignore_index=True)
+
 
 def filter_events(events_to_filter, min_eods_per_event, min_amplitude):
     """
