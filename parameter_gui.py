@@ -881,6 +881,16 @@ class TrackingParameterConfigGUI:
                                          width=10, state='disabled')
         self._lda_prob_entry.grid(row=2, column=1, sticky=tk.W, padx=5)
 
+        self._lda_dist_label = ttk.Label(species_frame,
+                                         text="LDA Distance Uncertainty Percentile (ctrl scatter):",
+                                         state='disabled')
+        self._lda_dist_label.grid(row=3, column=0, sticky=tk.W, pady=2)
+        self.param_vars['lda_dist_uncertainty_pct'] = tk.IntVar(value=95)
+        self._lda_dist_entry = ttk.Entry(species_frame,
+                                         textvariable=self.param_vars['lda_dist_uncertainty_pct'],
+                                         width=10, state='disabled')
+        self._lda_dist_entry.grid(row=3, column=1, sticky=tk.W, padx=5)
+
         # Normalization parameters
         norm_frame = ttk.LabelFrame(scrollable_frame, text="Waveform Normalization", padding="10")
         norm_frame.grid(row=current_row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
@@ -1003,6 +1013,8 @@ class TrackingParameterConfigGUI:
         self._control_btn.config(state=state)
         self._lda_prob_label.config(state=state)
         self._lda_prob_entry.config(state=state)
+        self._lda_dist_label.config(state=state)
+        self._lda_dist_entry.config(state=state)
 
     def browse_folder(self, var_name):
         folder = filedialog.askdirectory(title=f"Select {var_name.replace('_', ' ').title()}")
