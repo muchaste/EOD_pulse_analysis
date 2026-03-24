@@ -76,11 +76,14 @@ class PulseDiagnosticTool:
             'amplitude_ratio_max': 4.0,
             'save_filtered_out': False,
             'peak_fft_freq_min': 50,
-            'peak_fft_freq_max': 10000,
+            'peak_fft_freq_max': 13000,
             'return_diff': True,
+            'use_pca': False,
+            'pca_interp_points': 300,
+            'pca_component': 0,
             'symmetry_threshold': 0.2,
             'length': 2000,
-            'length_extraction': 'fixed',
+            'length_extraction': 'variable',
             'length_factor': 10,
             'search_window': 10
         }
@@ -108,7 +111,7 @@ class PulseDiagnosticTool:
         # Bandpass configuration variables
         self.use_bandpass_filter = tk.BooleanVar(value=False)
         self.bandpass_lowcut = tk.DoubleVar(value=100.0)
-        self.bandpass_highcut = tk.DoubleVar(value=10000.0)
+        self.bandpass_highcut = tk.DoubleVar(value=13000.0)
         self.bandpass_order = tk.IntVar(value=4)
 
         
@@ -471,138 +474,6 @@ class PulseDiagnosticTool:
             self.update_file_info()
             print(f"Selected NI source data: {file_path}")
             print("Click 'Load Data' to load from NI source")
-    
-    # def load_ni_source_data_old(self):
-    #     """OLD VERSION - Load data from NI source (.bin file with .txt logfile)"""
-    #     file_path = filedialog.askopenfilename(
-    #         title="Select NI Log File",
-    #         filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
-    #     )
-        
-    #     if file_path:
-    #         try:
-    #             # Extract filename from path
-    #             self.file_name = os.path.basename(file_path).replace('log_', '').replace('.txt', '')
-                
-    #             # Parse log file
-    #             with open(file_path, 'r') as file:
-    #                 log_data = {line.split(": ")[0]: line.split(": ")[1].strip() for line in file.readlines()}
-
-    #             # Get base filepath for data files
-    #             base_filepath = file_path.split('log_')[0] + file_path.split('log_')[-1].split('.')[0]
-    #             feather_filepath = base_filepath + '.feather'
-    #             parquet_filepath = base_filepath + '.parquet'
-    #             bin_filepath = base_filepath + '.bin'
-
-    #             # Extract parameters
-    #             if "Sample_Rate" in log_data:
-    #                 sample_rate = int(log_data["Sample_Rate"])
-    #             elif "Sample Rate" in log_data:
-    #                 sample_rate = int(log_data["Sample Rate"])
-
-    #             # Get time window from GUI
-    #             start_time = float(self.start_time_var.get()) if self.start_time_var.get().strip() else 0.0
-    #             end_time = float(self.end_time_var.get()) if self.end_time_var.get().strip() else 0.0
-                
-    #             start_sample = int(start_time * sample_rate)
-    #             end_sample = None if end_time == 0 else int(end_time * sample_rate)
-
-    #             # Determine number of channels from log
-    #             if "N_Input_Channels" in log_data:
-    #                 n_channels = int(log_data["N_Input_Channels"])
-    #             elif "Input_Channels" in log_data:
-    #                 n_channels = len(log_data["Input_Channels"].split(","))
-    #             elif "Number of Input Channels" in log_data:
-    #                 n_channels = int(log_data["Number of Input Channels"])
-    #             else:
-    #                 n_channels = 1  # fallback
-
-    #             # # For NI source, only accept single-channel differential data
-    #             # if n_channels > 1:
-    #             #     messagebox.showerror("Error", f"NI source with {n_channels} channels not supported.\nOnly single-channel differential data is supported for NI source.")
-    #             #     return
-
-    #             n_cols = n_channels + 1  # time_ms + channels
-
-    #             # Load data from available file format
-    #             data = None
-    #             if os.path.exists(bin_filepath):
-    #                 # Load from .bin file
-    #                 if end_sample is not None:
-    #                     n_samples = end_sample - start_sample
-    #                     offset = start_sample * n_cols * 8  # float64 = 8 bytes
-    #                     with open(bin_filepath, 'rb') as f:
-    #                         f.seek(offset)
-    #                         raw_data = np.fromfile(f, dtype='f8', count=n_samples * n_cols)
-    #                 else:
-    #                     offset = start_sample * n_cols * 8
-    #                     with open(bin_filepath, 'rb') as f:
-    #                         f.seek(offset)
-    #                         raw_data = np.fromfile(f, dtype='f8')
-    #                 reshaped = raw_data.reshape(-1, n_cols)
-    #                 columns = ['time_ms'] + [f'ch{i+1}' for i in range(n_channels)]
-    #                 data = pd.DataFrame(reshaped, columns=columns)
-
-    #             elif os.path.exists(feather_filepath):
-    #                 try:
-    #                     import pyarrow.feather as feather
-    #                     table = feather.read_table(feather_filepath)
-    #                     if end_sample is None:
-    #                         table = table.slice(start_sample)
-    #                     else:
-    #                         table = table.slice(start_sample, end_sample - start_sample)
-    #                     data = table.to_pandas()
-    #                 except ImportError:
-    #                     raise ImportError("pyarrow not available for .feather file reading")
-
-    #             elif os.path.exists(parquet_filepath):
-    #                 try:
-    #                     import pyarrow.parquet as pq
-    #                     table = pq.read_table(parquet_filepath)
-    #                     if end_sample is None:
-    #                         table = table.slice(start_sample)
-    #                     else:
-    #                         table = table.slice(start_sample, end_sample - start_sample)
-    #                     data = table.to_pandas()
-    #                 except ImportError:
-    #                     raise ImportError("pyarrow not available for .parquet file reading")
-
-    #             else:
-    #                 raise FileNotFoundError("Expected data file (.bin, .feather, or .parquet) not found.")
-
-    #             # Convert to audio format (remove time column, keep only channels)
-    #             channel_columns = [col for col in data.columns if col.startswith('ch')]
-    #             audio_data = data[channel_columns].values
-                
-    #             # Set data
-    #             self.raw_data = audio_data
-    #             self.sample_rate = sample_rate
-    #             self.calibrated_data = audio_data.copy()  # NI data doesn't need calibration
-                
-    #             # Store metadata for reloading
-    #             self.source_file_path = file_path
-    #             self.source_file_type = 'ni_source'
-    #             self.calibration_factors = None
-    #             self.calibration_file_path = None
-    #             self.full_data = None  # NI source: don't cache, reload on demand
-                
-    #             actual_end = (len(audio_data) / sample_rate) + start_time if end_time == 0 else end_time
-    #             self.loaded_time_window = {'start_sec': start_time, 'end_sec': actual_end}
-                
-    #             # Set data source to single-channel differential (NI source assumption)
-    #             self.data_source = '1ch_diff'
-                
-    #             self.update_file_info()
-    #             print(f"Loaded NI source data: {file_path}")
-    #             print(f"Shape: {self.calibrated_data.shape}, Sample rate: {self.sample_rate}")
-    #             print(f"Channels: {n_channels}, Time window: {start_time}-{end_time}s")
-                
-    #             # Plot the data immediately
-    #             self.data()
-                
-    #         except Exception as e:
-    #             messagebox.showerror("Error", f"Failed to load NI source data:\n{str(e)}")
-    #             print(f"Full error: {e}")
     
     def load_data(self):
         """Unified data loading function - loads data based on selected file type and time window"""
@@ -1122,9 +993,11 @@ class PulseDiagnosticTool:
             for param, var in self.param_vars.items():
                 value_str = var.get().strip()
                 
-                if param in ['save_filtered_out', 'return_diff']:
+                if param in ['save_filtered_out', 'return_diff', 'use_pca']:
                     self.parameters[param] = value_str.lower() in ['true', '1', 'yes', 'on']
-                elif param in ['interp_factor', 'min_width_us', 'max_width_us', 'peak_fft_freq_min', 'peak_fft_freq_max', 'length', 'length_factor', 'search_window', 'duplicate_samples']:
+                elif param in ['interp_factor', 'min_width_us', 'max_width_us', 'peak_fft_freq_min', 
+                               'peak_fft_freq_max', 'length', 'length_factor', 'search_window', 
+                               'duplicate_samples', 'pca_component', 'pca_interp_points']:
                     self.parameters[param] = int(float(value_str))
                 else:
                     self.parameters[param] = float(value_str)
@@ -1245,6 +1118,17 @@ class PulseDiagnosticTool:
                 peaks = np.array([p[1] for p in unique_pulses])
                 troughs = np.array([p[2] for p in unique_pulses])
                 widths = np.array([p[3] for p in unique_pulses])
+
+                if self.parameters['return_diff'] and not self.parameters['use_pca']:
+                    return_diff = True
+                    use_pca = False
+                elif not self.parameters['return_diff'] and self.parameters['use_pca']:
+                    return_diff = False
+                    use_pca = True
+                elif self.parameters['return_diff'] and self.parameters['use_pca']:
+                    messagebox.showwarning("Parameter Warning", "Both 'Return Differential' and 'Use PCA' are enabled. PCA will be applied to single-ended data, ignoring the differential return setting.")
+                    return_diff = False
+                    use_pca = True
                 
                 # Extract waveforms
                 (
@@ -1254,7 +1138,9 @@ class PulseDiagnosticTool:
                     wf_lengths, snippet_p3_idc, final_p3_idc
                 ) = extract_pulse_snippets(
                     data, peaks, troughs, rate = rate,  
-                    source=self.data_source, return_differential=self.parameters['return_diff'],
+                    source=self.data_source, return_differential=return_diff, use_pca=use_pca,
+                    pca_interp_points=self.parameters['pca_interp_points'],
+                    pca_component=self.parameters['pca_component'],
                     interp_factor=self.parameters['interp_factor'],
                     window_mode=self.parameters['length_extraction'],
                     window_factor=int(self.parameters['length_factor']),
