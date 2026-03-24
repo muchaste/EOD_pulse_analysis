@@ -333,12 +333,14 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
                 diff_location = _estimate_differential_pulse_location(
                     data, peak_idx, trough_idx, filtered_eod_chans[i], n_channels
                 )
+                # diff_location, _, _ = _estimate_gaussian_pulse_location(
+                #     data, peak_idx, trough_idx, n_channels
+                # )
                 if attempt == 0:
                     pulse_locations.append(diff_location)
                     location_appended = True
                 else:
                     pulse_locations[-1] = diff_location
-            # NOTE: LOCATION MIGHT HAVE TO BE UPDATED IF P1 IS FALSELY DETECTED?
 
             if snippet.shape[0] == 0:
                 eod_waveforms.append(np.array([]))
@@ -354,6 +356,8 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
                 waveform_lengths.append(0)
                 eod_chans_out.append(filtered_eod_chans[i])
                 is_differential_out.append(filtered_is_differential[i] if not use_pca else 2)
+                snippet_p3_idc.append(-1)
+                final_p3_idc.append(-1)
                 skip_pulse = True
                 break
 
@@ -729,25 +733,38 @@ def _estimate_differential_pulse_location(data, peak_idx, trough_idx, channel_id
         return float(max(0, min(channel_idx, n_channels - 1)))
     
     try:
-        # Get amplitudes at peak and trough for both channels
-        ch1_weight = np.sqrt(abs(data[peak_idx, channel_idx] - (data[trough_idx, channel_idx])))
-        ch2_weight = np.sqrt(abs(data[peak_idx, channel_idx + 1] - (data[trough_idx, channel_idx + 1])))
+        # Stage 1 (fallback): parabolic model on the two single-ended channels of the flip pair.
+        # |A_k| = a*(x0 - k)^2  =>  x0 - channel_idx = sqrt(A_j) / (sqrt(A_j) + sqrt(A_{j+1}))
+        ch1_weight = np.sqrt(abs(data[peak_idx, channel_idx] - data[trough_idx, channel_idx]))
+        ch2_weight = np.sqrt(abs(data[peak_idx, channel_idx + 1] - data[trough_idx, channel_idx + 1]))
         total_weight = ch1_weight + ch2_weight
+        x0_coarse = channel_idx + (ch1_weight / total_weight if total_weight > 0 else 0.5)
 
-        if total_weight > 0:
-            # Use ch1_weight for zero-crossing estimation (parabolic model)
-            # The zero-crossing is closer to the channel with smaller amplitude
-            # Derivation: |A1| = a(x0)^2, |A2| = a(1-x0)^2  =>  x0 = sqrt(A1) / (sqrt(A1) + sqrt(A2))
-            offset = ch1_weight / total_weight
-            interpolated_location = channel_idx + offset
-        else:
-            # No signal - use midpoint
-            interpolated_location = channel_idx + 0.5
-            
-        return interpolated_location
-        
+        # Stage 2: weighted centroid over the flip pair and up to one neighbouring differential
+        # pair on each side.  For each adjacent pair (k, k+1), the absolute differential
+        # P1-P2 amplitude is diff_amp[k] = |v_k - v_{k+1}| where v_k is the signed
+        # single-ended P1-P2 at channel k.  This quantity is largest at the flip pair and
+        # falls off toward neighbours, but the left/right asymmetry encodes which side of
+        # [channel_idx, channel_idx+1] x0 lies on.
+        j = channel_idx
+        k_lo = max(0, j - 1)
+        k_hi = min(n_channels - 2, j + 1)  # inclusive upper bound for pair index
+
+        w_sum = 0.0
+        wx_sum = 0.0
+        for k in range(k_lo, k_hi + 1):
+            v_k  = data[peak_idx, k]     - data[trough_idx, k]
+            v_k1 = data[peak_idx, k + 1] - data[trough_idx, k + 1]
+            diff_amp = abs(v_k - v_k1)
+            midpoint = k + 0.5
+            w_sum  += diff_amp
+            wx_sum += diff_amp * midpoint
+
+        if w_sum > 0:
+            return wx_sum / w_sum
+        return x0_coarse
+
     except (IndexError, ValueError):
-        # Fallback to midpoint if any error occurs
         return channel_idx + 0.5
 
 def _estimate_gaussian_pulse_location(data, ref_p1_idx, ref_p2_idx, n_channels):
@@ -820,6 +837,78 @@ def _estimate_gaussian_pulse_location(data, ref_p1_idx, ref_p2_idx, n_channels):
         weighted_loc = float(np.dot(electrode_positions, abs_amps) / total) if total > 0 else float(peak_ch)
         return weighted_loc, ch_amps, False
     
+def _fit_dipole_location(spatial_amplitudes):
+    """
+    Fit a 1-D dipole model to the signed PCA spatial amplitude profile to estimate
+    fish location along the electrode array.
+
+    The model is the potential along a line at perpendicular distance d from a
+    current dipole located at x0:
+
+        V(x) = A * (x - x0) / ((x - x0)^2 + d^2)^(3/2)
+
+    The zero-crossing x0 is the fish position. d is the depth of the fish
+    perpendicular to the electrode axis. The sign convention on spatial_amplitudes
+    must already be normalised (positive loading on the channel with largest absolute
+    value) before calling, which `_extract_pca_waveform` guarantees.
+
+    Parameters
+    ----------
+    spatial_amplitudes : 1-D array, shape (N,)
+        Signed PCA spatial amplitudes at each electrode (electrode index 0..N-1).
+
+    Returns
+    -------
+    x0 : float
+        Estimated fish location in electrode-index units [–1, N].
+    d : float
+        Estimated fish depth in electrode-index units (> 0).
+    fit_success : bool
+        True if the fit converged and x0 is within [–0.5, N – 0.5].
+    """
+    N = len(spatial_amplitudes)
+    electrode_positions = np.arange(N, dtype=float)
+
+    def dipole_model(x, x0, d, A):
+        return A * (x - x0) / ((x - x0) ** 2 + d ** 2) ** 1.5
+
+    # Initial x0: interpolated zero-crossing between sign-change neighbours
+    signs = np.sign(spatial_amplitudes)
+    sign_changes = np.where(np.diff(signs) != 0)[0]
+    if len(sign_changes) > 0:
+        idx = sign_changes[0]
+        a0 = np.abs(spatial_amplitudes[idx])
+        a1 = np.abs(spatial_amplitudes[idx + 1])
+        x0_guess = idx + a0 / (a0 + a1 + 1e-12)
+    else:
+        x0_guess = float(electrode_positions[np.argmin(np.abs(spatial_amplitudes))])
+
+    # Initial d: the peak is at x0 ± d/sqrt(2), so d ≈ |peak_pos - x0| * sqrt(2)
+    peak_ch = int(np.argmax(np.abs(spatial_amplitudes)))
+    dist_to_peak = abs(float(peak_ch) - x0_guess)
+    d_guess = max(dist_to_peak * np.sqrt(2), 0.5)
+
+    # Initial A from model evaluated at peak with initial params
+    denom = (float(peak_ch) - x0_guess) ** 2 + d_guess ** 2
+    A_pred = denom ** 1.5 / (float(peak_ch) - x0_guess + 1e-12)
+    A_guess = float(spatial_amplitudes[peak_ch]) * A_pred
+
+    p0 = [x0_guess, d_guess, A_guess]
+    bounds = ([-1.0, 0.1, -np.inf], [float(N), float(N + 1), np.inf])
+
+    try:
+        popt, _ = curve_fit(dipole_model, electrode_positions, spatial_amplitudes,
+                            p0=p0, bounds=bounds, maxfev=1000)
+        x0 = float(popt[0])
+        d = float(popt[1])
+        if -0.5 <= x0 <= N - 0.5:
+            return x0, d, True
+        else:
+            return x0, d, False
+    except (RuntimeError, ValueError):
+        return x0_guess, d_guess, False
+
+
 def _extract_pca_waveform(snippet_multichannel, pca_component=0, interp_points=300, 
                          apply_common_average=True):
     """
@@ -890,38 +979,50 @@ def _extract_pca_waveform(snippet_multichannel, pca_component=0, interp_points=3
     # Step 5: Select target projection (typically first component)
     pk = P[:, pca_component]  # Shape: (M,)
     ck = eigenvectors[:, pca_component]  # Shape: (N,)
-    
+
+    # Enforce consistent sign convention: the channel with the largest absolute loading is
+    # always positive. np.linalg.eigh gives no sign guarantee — it can flip the eigenvector
+    # sign between pulses depending on numerics, which mirrors the spatial amplitude profile
+    # and causes the peak location to jump randomly between opposite ends of the array.
+    if ck[np.argmax(np.abs(ck))] < 0:
+        ck = -ck
+        pk = -pk
+
     # Step 6: Dimensional scaling - convert to physical units
     # φk = max(|pk|) · ck gives amplitudes at each electrode
     max_proj = np.max(np.abs(pk))
     spatial_amplitudes = max_proj * ck  # Shape: (N,)
-    
+
     # Step 7: 1D Spatial Interpolation along electrode array
-    # Physical positions of electrodes (assuming uniform spacing)
     electrode_positions = np.arange(N)
-    
-    # Create dense interpolation grid
     interp_positions = np.linspace(0, N-1, interp_points)
-    
-    # Cubic spline interpolation
-    cs = CubicSpline(electrode_positions, spatial_amplitudes)
+
+    # Fit the absolute amplitude envelope (always non-negative).
+    # bc_type='natural' sets second derivatives to zero at the endpoints, preventing the
+    # spline from curving upward past the last data point — the main cause of location
+    # estimates sticking at edge electrodes.
+    cs = CubicSpline(electrode_positions, np.abs(spatial_amplitudes), bc_type='natural')
     amplitudes_interpolated = cs(interp_positions)
-    
-    # Reconstruct waveform: multiply interpolated spatial pattern by temporal signal
-    # We need to find the peak position in the interpolated spatial profile
-    peak_spatial_idx = np.argmax(np.abs(amplitudes_interpolated))
-    
+    amplitudes_interpolated = np.clip(amplitudes_interpolated, 0, None)
+
+    peak_spatial_idx = np.argmax(amplitudes_interpolated)
+
     # Return the temporal waveform scaled by the spatial amplitude at peak location
-    # This gives us the "best" signal extracted from the multi-channel data
     waveform_interpolated = pk * (amplitudes_interpolated[peak_spatial_idx] / max_proj)
-    
+
     # Determine which physical electrode has the highest amplitude
     peak_electrode_channel = np.argmax(np.abs(spatial_amplitudes))
-    
-    # Scale interpolated peak position to electrode coordinate range [0, N-1]
-    # This gives the continuous spatial location of the peak signal
-    peak_interpolated_location = peak_spatial_idx * (N - 1) / (interp_points - 1)
-    
+
+    # Dipole fit gives the fish's actual position (zero-crossing of the bipolar profile),
+    # which is more accurate than the spline peak-of-envelope approach (biased toward the
+    # nearest electrode rather than the true fish depth-corrected position).
+    # Fall back to the spline-envelope peak if the dipole fit fails.
+    dipole_x0, _, dipole_success = _fit_dipole_location(spatial_amplitudes)
+    if dipole_success:
+        peak_interpolated_location = dipole_x0
+    else:
+        peak_interpolated_location = peak_spatial_idx * (N - 1) / (interp_points - 1)
+
     return waveform_interpolated, spatial_amplitudes, explained_variance_ratio, peak_electrode_channel, peak_interpolated_location
 
 
