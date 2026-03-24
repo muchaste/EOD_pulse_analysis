@@ -470,8 +470,7 @@ for n, filepath in enumerate(file_set['filename']):
         # subtract retained_audio_start_idx to bring them to the retained-audio frame
         # (= start of the current combined audio). New-file indices shift up by retain_len.
         if retained_eod_table is not None:
-            idx_cols = ['midpoint_idx', 'p1_idx', 'p2_idx', 'snippet_p1_idx', 'snippet_p2_idx',
-                        'snippet_midpoint_idx', 'snippet_p3_idx', 'p3_idx']
+            idx_cols = ['midpoint_idx', 'p1_idx', 'p2_idx', 'p3_idx']
             ret_adj = retained_eod_table.drop(columns=['original_index'], errors='ignore').copy()
             for col in idx_cols:
                 if col in ret_adj.columns:
