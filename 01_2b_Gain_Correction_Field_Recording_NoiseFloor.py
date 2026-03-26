@@ -19,6 +19,7 @@ MASK_WIDTH_MS = 2
 N_THRESHOLDS = 50
 MIN_PEAKS = 100
 KNEE_REL_THRESHOLD = 0.05
+KNEE_MULTIPLIER = 3
 plot_data = True
 
 root = tk.Tk()
@@ -50,7 +51,7 @@ for fidx, fname in enumerate(file_list):
     W = int(rate * MASK_WIDTH_MS // 1000)
     min_peak_distance = int(rate // 500)  # 2 ms minimum spacing between peaks
 
-    thresholds = np.linspace(0.95, 0.05, N_THRESHOLDS)
+    thresholds = np.linspace(0.95, 0.001, N_THRESHOLDS)
     rms = np.zeros(channels)
 
     knee_thresholds = np.full(channels, np.nan)
@@ -85,7 +86,7 @@ for fidx, fname in enumerate(file_list):
                 i + 1, max(diffs) / peak_counts[-1]))
         else:
             knee_idx = np.argmax(diffs)
-            thresh_cut = thresholds[knee_idx]
+            thresh_cut = thresholds[knee_idx]*KNEE_MULTIPLIER
             knee_thresholds[i] = thresh_cut
             knee_valid[i] = True
 
