@@ -139,7 +139,8 @@ for fidx, fname in enumerate(file_list):
         fig.suptitle(file_id, fontsize=10)
         plt.tight_layout()
         plt.savefig('%s\\%s_threshold_scan.png' % (output_path, file_id))
-        plt.show(block=False)
+        # plt.show(block=False)
+        plt.close(fig)
 
     gc.collect()
 
@@ -173,4 +174,5 @@ plt.title('Correction Factors per Channel and File')
 plt.legend()
 plt.tight_layout()
 plt.savefig('%s\\%s_correction_factors_all_files.png' % (output_path, logger_id))
-plt.show(block=False)
+# plt.show(block=False)
+plt.close()
