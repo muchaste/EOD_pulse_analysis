@@ -91,6 +91,7 @@ if parameters['create_events']:
     print("Setting event extraction parameters...")
     event_counter = 0           # Keep track of total events across files
     event_summaries = []
+    retained_part_state = None  # {'base_event_id': int, 'part_number': int} when a split is in progress
 
     print(f"  max_ipi_seconds: {parameters['max_ipi_seconds']}")
     print(f"  min_eods_premerge: {parameters['min_eods_premerge']}")
@@ -674,12 +675,116 @@ for n, filepath in enumerate(file_set['filename']):
 
             # Retain events that reach the end of the file and prepare data for next file
             events_at_end = merged_events[merged_events['reaches_file_end']].copy()
+
+            # Retrospective split: if any reaching-end event exceeds 2x split_duration,
+            # save the first split_duration window now and narrow the retain window.
+            split_duration = parameters.get('split_duration', 0)
+            split_triggered = False
+            if split_duration > 0 and len(events_at_end) > 0 and n < len(file_set) - 1:
+                for _mid in events_at_end['merged_event_id'].unique():
+                    _ev = events_at_end[events_at_end['merged_event_id'] == _mid]
+                    _dur = (_ev['event_end_time'].iloc[0] - _ev['event_start_time'].iloc[0]).total_seconds()
+                    if _dur > 2 * split_duration:
+                        split_triggered = True
+                        break
+
+            if split_triggered:
+                for _mid in events_at_end['merged_event_id'].unique():
+                    _ev_rows = events_at_end[events_at_end['merged_event_id'] == _mid]
+                    _ev_start = _ev_rows['event_start_time'].iloc[0]
+                    _ev_end = _ev_rows['event_end_time'].iloc[0]
+                    if (_ev_end - _ev_start).total_seconds() <= 2 * split_duration:
+                        continue
+                    _evt_start_idx = max(0, int((_ev_start - file_start_time).total_seconds() * rate))
+                    _split_end_idx = _evt_start_idx + int(split_duration * rate)
+                    _split_end_time = _ev_start + dt.timedelta(seconds=split_duration)
+
+                    _part_eod_mask = (
+                        (combined_eod_table['midpoint_idx'] >= _evt_start_idx) &
+                        (combined_eod_table['midpoint_idx'] < _split_end_idx)
+                    )
+                    _part_eods = combined_eod_table[_part_eod_mask].copy()
+                    _part_waveforms = [combined_eod_waveforms[i] for i in _part_eods['original_index'].values]
+
+                    _part_eods['original_p1_idx'] = _part_eods['p1_idx']
+                    _part_eods['original_p2_idx'] = _part_eods['p2_idx']
+                    _part_eods['original_midpoint_idx'] = _part_eods['midpoint_idx']
+                    for _col in ['p1_idx', 'p2_idx', 'midpoint_idx', 'p3_idx']:
+                        if _col in _part_eods.columns:
+                            _part_eods[_col] = _part_eods[_col] - _evt_start_idx
+                    _part_eods['relative_time_s'] = _part_eods['relative_time_s'] - _evt_start_idx / rate
+
+                    if retained_part_state is not None:
+                        _base_id = retained_part_state['base_event_id']
+                        _part_num = retained_part_state['part_number']
+                    else:
+                        event_counter += 1
+                        _base_id = event_counter
+                        _part_num = 1
+
+                    _part_label = f'event_{_base_id}_part{_part_num}'
+                    print(f"    Splitting large event ({(_ev_end - _ev_start).total_seconds():.0f}s > 2x{split_duration:.0f}s): saving {_part_label}")
+
+                    _part_audio = data[_evt_start_idx:_split_end_idx, :]
+                    aio.write_audio(os.path.join(output_path, f'{fname[:-4]}_{_part_label}.wav'), _part_audio, rate)
+                    _part_eods.to_csv(os.path.join(output_path, f'{fname[:-4]}_{_part_label}_eod_table.csv'), index=False)
+                    if len(_part_waveforms) > 0:
+                        save_waveforms(
+                            _part_waveforms,
+                            os.path.join(output_path, f'{fname[:-4]}_{_part_label}_waveforms'),
+                            length=parameters['extraction_window']
+                        )
+                    if parameters['create_plots'] and len(_part_eods) > 0:
+                        _plot_path = create_event_plots(
+                            event_id=_base_id,
+                            event_eods=_part_eods,
+                            event_data=_part_audio,
+                            event_start_time=_ev_start,
+                            sample_rate=rate,
+                            output_path=output_path,
+                            extraction_method=parameters['waveform_extraction']
+                        )
+                        if _plot_path and os.path.exists(_plot_path):
+                            os.rename(
+                                _plot_path,
+                                os.path.join(output_path, f'event_{_base_id:03d}_part{_part_num}_detection.png')
+                            )
+
+                    _n_eods = len(_part_eods)
+                    _part_summary = {
+                        'event_id': f'{_base_id}_part{_part_num}',
+                        'base_event_id': _base_id,
+                        'part_number': _part_num,
+                        'eod_start_time': _part_eods['timestamp_dt'].min() if _n_eods > 0 else _ev_start,
+                        'eod_end_time': _part_eods['timestamp_dt'].max() if _n_eods > 0 else _split_end_time,
+                        'event_start_time': _ev_start,
+                        'event_end_time': _split_end_time,
+                        'duration_seconds': split_duration,
+                        'n_eods': _n_eods,
+                        'n_channels': _part_eods['eod_channel'].nunique() if _n_eods > 0 else 0,
+                        'channels_used': ','.join(map(str, sorted(_part_eods['eod_channel'].unique()))) if _n_eods > 0 else '',
+                        'mean_ipi_seconds': _part_eods['channel_ipi_seconds'].mean() if _n_eods > 0 else 0,
+                        'ipi_cv': (_part_eods['channel_ipi_seconds'].std() / _part_eods['channel_ipi_seconds'].mean()) if _n_eods > 0 and _part_eods['channel_ipi_seconds'].mean() > 0 else 0,
+                        'median_ipi_seconds': _part_eods['channel_ipi_seconds'].median() if _n_eods > 0 else 0,
+                        'mean_amplitude': _part_eods['eod_amplitude'].mean() if _n_eods > 0 else 0,
+                        'max_amplitude': _part_eods['eod_amplitude'].max() if _n_eods > 0 else 0,
+                        'mean_width_ms': _part_eods['eod_width_us'].mean() / 1000 if _n_eods > 0 and 'eod_width_us' in _part_eods.columns else 0,
+                        'n_files': _part_eods['file_index'].nunique() if _n_eods > 0 and 'file_index' in _part_eods.columns else 1,
+                        'file_names': ','.join(_part_eods['filename'].unique()) if _n_eods > 0 and 'filename' in _part_eods.columns else fname
+                    }
+                    event_summaries.append(_part_summary)
+                    retained_part_state = {'base_event_id': _base_id, 'part_number': _part_num + 1}
+                    retain_start_time = _split_end_time
+                    retain_start_idx = _split_end_idx
+                    print(f"    Saved {_part_label} ({_n_eods} EODs), retaining from {_split_end_time} onward")
+
             if len(events_at_end) > 0 and n < len(file_set) - 1:  # Don't retain for last file
                 print(f"    Found {len(events_at_end['merged_event_id'].unique())} event(s) reaching file end - will retain for next file")
                 
                 # Calculate retention start index
-                retain_start_time = events_at_end['event_start_time'].min() - dt.timedelta(seconds=parameters['margin'])
-                retain_start_idx = max(0, int((retain_start_time - file_start_time).total_seconds() * rate))
+                if not split_triggered:
+                    retain_start_time = events_at_end['event_start_time'].min() - dt.timedelta(seconds=parameters['margin'])
+                    retain_start_idx = max(0, int((retain_start_time - file_start_time).total_seconds() * rate))
                 
                 # Store audio for next iteration (unchanged — used for event WAV export)
                 retained_data = data[retain_start_idx:, :].copy()
@@ -705,11 +810,15 @@ for n, filepath in enumerate(file_set['filename']):
             # Process events that don't reach file end normally.
             # Also exclude events whose end time falls inside the retained region to
             # avoid double-processing them in the next file iteration.
+            # On the last file nothing is retained, so all events (including those
+            # that reach the file end) must be processed rather than dropped.
             if retained_data is not None:
                 safe_end_mask = (
                     ~merged_events['reaches_file_end'] &
                     (merged_events['event_end_time'] <= retain_start_time)
                 )
+            elif n == len(file_set) - 1:
+                safe_end_mask = pd.Series(True, index=merged_events.index)
             else:
                 safe_end_mask = ~merged_events['reaches_file_end']
             events_to_filter = merged_events[safe_end_mask].copy()
@@ -740,13 +849,33 @@ for n, filepath in enumerate(file_set['filename']):
             for event_id in sorted(final_events['event_id'].unique()):
                 event_id = int(event_id)
                 event_eods = final_events[final_events['event_id'] == event_id]
-                
+
+                # Detect if this event is the final part of a retrospective split.
+                # Retained EODs have midpoint_idx < retain_len in the combined audio frame.
+                is_split_continuation = (
+                    retained_part_state is not None and
+                    retain_len > 0 and
+                    int(event_eods['midpoint_idx'].min()) < retain_len
+                )
+                if is_split_continuation:
+                    _base_id = retained_part_state['base_event_id']
+                    _part_num = retained_part_state['part_number']
+                    _save_label = f'event_{_base_id}_part{_part_num}'
+                    retained_part_state = None
+                    print(f"      Saving final part of split event as {_save_label}")
+                else:
+                    _base_id = event_id
+                    _part_num = None
+                    _save_label = f'event_{event_id}'
+
                 # Calculate summary statistics
                 duration = (event_eods['timestamp_dt'].max() - 
                             event_eods['timestamp_dt'].min()).total_seconds()
 
                 summary = {
                     'event_id': event_id,
+                    'base_event_id': _base_id,
+                    'part_number': _part_num,
                     'eod_start_time': event_eods['timestamp_dt'].min(),
                     'eod_end_time': event_eods['timestamp_dt'].max(),
                     'event_start_time': max(file_start_time, event_eods['event_start_time'].iloc[0] - dt.timedelta(seconds=parameters['margin'])),
@@ -775,7 +904,7 @@ for n, filepath in enumerate(file_set['filename']):
                 event_eod_indices = event_eods['original_index'].values
                 event_eod_waveforms = [combined_eod_waveforms[i] for i in event_eod_indices]
                 if len(event_eod_waveforms) > 0:
-                    event_waveform_base = os.path.join(output_path, f'{fname[:-4]}_event_{event_id}_waveforms')
+                    event_waveform_base = os.path.join(output_path, f'{fname[:-4]}_{_save_label}_waveforms')
                     save_waveforms(event_eod_waveforms, event_waveform_base, length=parameters['extraction_window'])
                     print(f"      Saved event waveforms: {event_waveform_base}_waveforms")
 
@@ -785,7 +914,7 @@ for n, filepath in enumerate(file_set['filename']):
 
                 # Extract and save the audio segment
                 event_data = data[event_audio_start_idx:event_audio_end_idx,:]
-                event_audio_output_file = os.path.join(output_path, f'{fname[:-4]}_event_{event_id}.wav')
+                event_audio_output_file = os.path.join(output_path, f'{fname[:-4]}_{_save_label}.wav')
                 aio.write_audio(event_audio_output_file, event_data, rate)
                 print(f"      Saved event audio segment: {event_audio_output_file}")
 
@@ -798,14 +927,14 @@ for n, filepath in enumerate(file_set['filename']):
                 event_eods['midpoint_idx'] = event_eods['midpoint_idx'] - event_audio_start_idx
 
                 # Save event EOD table
-                event_output_file = os.path.join(output_path, f'{fname[:-4]}_event_{event_id}_eod_table.csv')
+                event_output_file = os.path.join(output_path, f'{fname[:-4]}_{_save_label}_eod_table.csv')
                 event_eods.to_csv(event_output_file, index=False)
                 print(f"      Saved event EOD table: {event_output_file}")
 
                 # Create event plots
                 if parameters['create_plots']:
-                    create_event_plots(
-                        event_id=event_id,
+                    _plot_path = create_event_plots(
+                        event_id=_base_id,
                         event_eods=event_eods,
                         event_data=event_data,
                         event_start_time=event_start_time,
@@ -813,6 +942,11 @@ for n, filepath in enumerate(file_set['filename']):
                         output_path=output_path,
                         extraction_method=parameters['waveform_extraction']
                     )
+                    if is_split_continuation and _plot_path and os.path.exists(_plot_path):
+                        os.rename(
+                            _plot_path,
+                            os.path.join(output_path, f'event_{_base_id:03d}_part{_part_num}_detection.png')
+                        )
                 del event_eods, event_eod_waveforms, event_data
 
             del final_events, events_at_end
