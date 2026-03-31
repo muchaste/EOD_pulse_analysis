@@ -696,6 +696,11 @@ for n, filepath in enumerate(file_set['filename']):
                     if (_ev_end - _ev_start).total_seconds() <= 2 * split_duration:
                         continue
                     _evt_start_idx = max(0, int((_ev_start - file_start_time).total_seconds() * rate))
+                    # Add leading margin for part 1 only; no trailing margin (not the last part)
+                    if retained_part_state is None:
+                        _audio_start_idx = max(0, _evt_start_idx - int(parameters['margin'] * rate))
+                    else:
+                        _audio_start_idx = _evt_start_idx
                     _split_end_idx = _evt_start_idx + int(split_duration * rate)
                     _split_end_time = _ev_start + dt.timedelta(seconds=split_duration)
 
@@ -711,8 +716,8 @@ for n, filepath in enumerate(file_set['filename']):
                     _part_eods['original_midpoint_idx'] = _part_eods['midpoint_idx']
                     for _col in ['p1_idx', 'p2_idx', 'midpoint_idx', 'p3_idx']:
                         if _col in _part_eods.columns:
-                            _part_eods[_col] = _part_eods[_col] - _evt_start_idx
-                    _part_eods['relative_time_s'] = _part_eods['relative_time_s'] - _evt_start_idx / rate
+                            _part_eods[_col] = _part_eods[_col] - _audio_start_idx
+                    _part_eods['relative_time_s'] = _part_eods['relative_time_s'] - _audio_start_idx / rate
 
                     if retained_part_state is not None:
                         _base_id = retained_part_state['base_event_id']
@@ -725,7 +730,7 @@ for n, filepath in enumerate(file_set['filename']):
                     _part_label = f'event_{_base_id}_part{_part_num}'
                     print(f"    Splitting large event ({(_ev_end - _ev_start).total_seconds():.0f}s > 2x{split_duration:.0f}s): saving {_part_label}")
 
-                    _part_audio = data[_evt_start_idx:_split_end_idx, :]
+                    _part_audio = data[_audio_start_idx:_split_end_idx, :]
                     aio.write_audio(os.path.join(output_path, f'{fname[:-4]}_{_part_label}.wav'), _part_audio, rate)
                     _part_eods.to_csv(os.path.join(output_path, f'{fname[:-4]}_{_part_label}_eod_table.csv'), index=False)
                     if len(_part_waveforms) > 0:
@@ -897,17 +902,21 @@ for n, filepath in enumerate(file_set['filename']):
                 else:
                     parts_to_save = [(event_eods.copy(), f'event_{event_id}', None)]
 
-                for _part_eods, _save_label, _part_num in parts_to_save:
+                for _idx, (_part_eods, _save_label, _part_num) in enumerate(parts_to_save):
                     _part_duration = (
                         _part_eods['timestamp_dt'].max() - _part_eods['timestamp_dt'].min()
                     ).total_seconds()
+                    # Apply margin only to the first part (leading) and last part (trailing).
+                    # Intermediate parts are contiguous, so no margin → seamless stitching.
+                    _is_overall_first = (_part_num is None) or (_idx == 0 and _part_num_start == 1)
+                    _is_overall_last = (_part_num is None) or (_idx == len(parts_to_save) - 1)
                     _part_event_start = max(
                         file_start_time,
                         _part_eods['timestamp_dt'].min() - dt.timedelta(seconds=parameters['margin'])
-                    )
+                    ) if _is_overall_first else _part_eods['timestamp_dt'].min()
                     _part_event_end = (
                         _part_eods['timestamp_dt'].max() + dt.timedelta(seconds=parameters['margin'])
-                    )
+                    ) if _is_overall_last else _part_eods['timestamp_dt'].max()
 
                     summary = {
                         'event_id': event_id,
