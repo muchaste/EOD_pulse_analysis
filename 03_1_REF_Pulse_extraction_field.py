@@ -757,7 +757,7 @@ for n, filepath in enumerate(file_set['filename']):
 
                     _n_eods = len(_part_eods)
                     _part_summary = {
-                        'event_id': f'{_base_id}_part{_part_num}',
+                        'event_id': _base_id,
                         'base_event_id': _base_id,
                         'part_number': _part_num,
                         'eod_start_time': _part_eods['timestamp'].min() if _n_eods > 0 else _ev_start,
@@ -919,7 +919,7 @@ for n, filepath in enumerate(file_set['filename']):
                     ) if _is_overall_last else _part_eods['timestamp_dt'].max()
 
                     summary = {
-                        'event_id': event_id,
+                        'event_id': _base_id,
                         'base_event_id': _base_id,
                         'part_number': _part_num,
                         'eod_start_time': _part_eods['timestamp_dt'].min(),
