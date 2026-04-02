@@ -136,7 +136,7 @@ class ParameterConfigGUI:
         detection_params = [
             ('thresh', 'Detection Threshold:', 0.02, float),
             ('bandpass_low_cutoff', 'BP Low Cutoff (Hz):', 100, float),
-            ('bandpass_high_cutoff', 'BP High Cutoff (Hz):', 13000, float),
+            ('bandpass_high_cutoff', 'BP High Cutoff (Hz):', 15000, float),
             ('min_rel_slope_diff', 'Min Relative Slope Difference:', 0.25, float),
             ('min_width_us', 'Min Pulse Width (μs):', 30, float),
             ('max_width_us', 'Max Pulse Width (μs):', 1000, float),
@@ -163,7 +163,7 @@ class ParameterConfigGUI:
             ('amplitude_ratio_min', 'Min Amplitude Ratio:', 0.2, float),
             ('amplitude_ratio_max', 'Max Amplitude Ratio:', 4.0, float),
             ('peak_fft_freq_min', 'Min FFT Peak Frequency (Hz):', 100, float),
-            ('peak_fft_freq_max', 'Max FFT Peak Frequency (Hz):', 13000, float),
+            ('peak_fft_freq_max', 'Max FFT Peak Frequency (Hz):', 15000, float),
             ('extraction_window_length_us', 'Waveform Window Length (μs):', 4000, float),
             ('extraction_window_factor', 'Waveform Window Factor:', 10.0, float),
             ('search_window', 'Search Window (samples):', 10, int)
@@ -225,7 +225,6 @@ class ParameterConfigGUI:
             ('max_merge_gap_seconds', 'Max Merge Gap (s):', 0.5, float),
             ('min_eods_postmerge', 'Min EODs Post-Merge:', 30, int),
             ('margin', 'Event Time Margin (s):', 1.0, float),
-            ('split_duration', 'Max Event Duration / Split (s):', 600.0, float),
         ]
         
         self.event_param_widgets = []  # Store widgets for enable/disable
@@ -242,7 +241,7 @@ class ParameterConfigGUI:
             self.event_param_widgets.extend([lbl, entry])
         
         # Add vertical separator
-        ttk.Separator(event_frame, orient='vertical').grid(row=0, column=2, rowspan=9, sticky='ns', padx=10)
+        ttk.Separator(event_frame, orient='vertical').grid(row=0, column=2, rowspan=8, sticky='ns', padx=10)
         
         # Right column - Boolean options
         ttk.Label(event_frame, text="Event Processing Options", font=('TkDefaultFont', 9, 'bold')).grid(
@@ -655,7 +654,7 @@ class ControlParameterConfigGUI:
             row=next_row + 1, column=3, columnspan=2, sticky=tk.W, pady=2)
 
         ttk.Label(pulse_frame, text="Symmetry Threshold:").grid(row=next_row + 2, column=3, sticky=tk.W, pady=2)
-        self.param_vars['symmetry_threshold'] = tk.DoubleVar(value=0.05)
+        self.param_vars['symmetry_threshold'] = tk.DoubleVar(value=0.3)
         ttk.Entry(pulse_frame, textvariable=self.param_vars['symmetry_threshold'], width=8).grid(
             row=next_row + 2, column=4, sticky=tk.W, padx=5)
 
