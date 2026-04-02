@@ -189,6 +189,10 @@ retained_data_start_time = None
 retained_eod_table = None
 retained_eod_waveforms = None
 retained_audio_start_idx = None
+retained_event_ids = {}      # {merged_event_id: pre-assigned event_counter value}
+retained_part_counts = {}    # {merged_event_id: parts already saved to disk}
+retained_part_counts_snapshot = {}  # copy of retained_part_counts taken at event-id assignment
+n_prev_retained = 0          # row count of retained_eod_table entering current iteration
 
 # Process each file
 for n, filepath in enumerate(file_set['filename']):
@@ -683,7 +687,7 @@ for n, filepath in enumerate(file_set['filename']):
                 
                 # Store audio for next iteration (unchanged — used for event WAV export)
                 retained_data = data[retain_start_idx:, :].copy()
-                retained_data_start_time = retain_start_time
+                retained_data_start_time = file_start_time + dt.timedelta(seconds=retain_start_idx / rate)
                 # Store EOD table rows to skip re-detection of the retained region
                 ret_eod_mask = combined_eod_table['midpoint_idx'] >= retain_start_idx
                 retained_eod_table = combined_eod_table[ret_eod_mask].drop(columns=['original_index'], errors='ignore').copy()
