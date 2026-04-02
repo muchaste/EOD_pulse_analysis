@@ -473,6 +473,8 @@ for n, filepath in enumerate(file_set['filename']):
         # retained_eod_table sample indices are in the previous combined-audio frame;
         # subtract retained_audio_start_idx to bring them to the retained-audio frame
         # (= start of the current combined audio). New-file indices shift up by retain_len.
+        n_prev_retained = len(retained_eod_table) if retained_eod_table is not None else 0
+
         if retained_eod_table is not None:
             idx_cols = ['midpoint_idx', 'p1_idx', 'p2_idx', 'p3_idx']
             ret_adj = retained_eod_table.drop(columns=['original_index'], errors='ignore').copy()
@@ -694,8 +696,74 @@ for n, filepath in enumerate(file_set['filename']):
                 retained_eod_waveforms = [combined_eod_waveforms[i] for i in retained_eod_table.index]
                 retained_audio_start_idx = retain_start_idx
 
-                print(f"    Retaining {len(retained_data)} samples ({len(retained_data)/rate:.2f}s) starting from {retain_start_time}")
+                print(f"    Retaining {len(retained_data)} samples ({len(retained_data)/rate:.2f}s) starting from {retained_data_start_time}")
                 print(f"    Retained {len(retained_eod_table)} EODs for next iteration")
+
+                # ---- Case b: flush early parts of retained events that exceed 2x split_duration ----
+                split_duration = parameters.get('split_duration', 0.0)
+                if split_duration > 0:
+                    split_dur_samp = int(split_duration * rate)
+                    earliest_unsaved_samp = None  # within retained_data buffer
+                    for mid in events_at_end['merged_event_id'].unique():
+                        mid_eods = events_at_end[events_at_end['merged_event_id'] == mid]
+                        event_start_in_buf = max(0, int(mid_eods['midpoint_idx'].min()) - retain_start_idx)
+                        event_retained_duration = (len(retained_data) - event_start_in_buf) / rate
+                        if event_retained_duration <= 2 * split_duration:
+                            continue
+                        # Pre-assign event_id if not already done
+                        if mid not in retained_event_ids:
+                            event_counter += 1
+                            retained_event_ids[mid] = event_counter
+                            retained_part_counts[mid] = 0
+                        n_save = int((len(retained_data) - event_start_in_buf) / split_dur_samp) - 1
+                        for i in range(n_save):
+                            retained_part_counts[mid] += 1
+                            part_buf_start = event_start_in_buf + i * split_dur_samp
+                            part_buf_end   = event_start_in_buf + (i + 1) * split_dur_samp
+                            abs_part_start = retain_start_idx + part_buf_start
+                            abs_part_end   = retain_start_idx + part_buf_end
+                            part_audio = retained_data[part_buf_start:part_buf_end]
+                            part_wall_start = retained_data_start_time + dt.timedelta(seconds=part_buf_start / rate)
+                            part_eods = mid_eods[
+                                (mid_eods['midpoint_idx'] >= abs_part_start) &
+                                (mid_eods['midpoint_idx'] < abs_part_end)
+                            ].copy()
+                            for col in ['p1_idx', 'p2_idx', 'midpoint_idx']:
+                                if col in part_eods.columns:
+                                    part_eods[col] = part_eods[col] - abs_part_start
+                            part_num = retained_part_counts[mid]
+                            event_num = retained_event_ids[mid]
+                            part_audio_file = os.path.join(output_path, f'{fname[:-4]}_event_{event_num}_part_{part_num}.wav')
+                            aio.write_audio(part_audio_file, part_audio, rate)
+                            print(f"      Saved case-b part audio: {part_audio_file}")
+                            if parameters['create_plots'] and len(part_eods) > 0:
+                                create_event_plots(
+                                    event_id=event_num,
+                                    event_eods=part_eods,
+                                    event_data=part_audio,
+                                    event_start_time=part_wall_start,
+                                    sample_rate=rate,
+                                    output_path=output_path,
+                                    extraction_method=parameters['waveform_extraction'],
+                                    part_suffix=f'_part_{part_num}'
+                                )
+                        # Track unsaved start for buffer trimming
+                        unsaved_buf_start = event_start_in_buf + n_save * split_dur_samp
+                        if earliest_unsaved_samp is None or unsaved_buf_start < earliest_unsaved_samp:
+                            earliest_unsaved_samp = unsaved_buf_start
+                    # Trim retained buffer to discard saved samples
+                    if earliest_unsaved_samp is not None and earliest_unsaved_samp > 0:
+                        new_retain_abs = retain_start_idx + earliest_unsaved_samp
+                        retained_data = retained_data[earliest_unsaved_samp:].copy()
+                        retained_data_start_time = retained_data_start_time + dt.timedelta(seconds=earliest_unsaved_samp / rate)
+                        retained_audio_start_idx = new_retain_abs
+                        keep_mask = retained_eod_table['midpoint_idx'].values >= new_retain_abs
+                        kept_positions = np.where(keep_mask)[0]
+                        retained_eod_table = retained_eod_table[keep_mask].copy().reset_index(drop=True)
+                        retained_eod_waveforms = [retained_eod_waveforms[j] for j in kept_positions]
+                        print(f"    Case-b trim: removed {earliest_unsaved_samp} samples, {len(retained_eod_table)} EODs remain in buffer")
+                # ---- End case b ----
+
             else:
                 # Clear retention variables
                 retained_data = None
