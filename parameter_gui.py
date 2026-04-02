@@ -225,6 +225,7 @@ class ParameterConfigGUI:
             ('max_merge_gap_seconds', 'Max Merge Gap (s):', 0.5, float),
             ('min_eods_postmerge', 'Min EODs Post-Merge:', 30, int),
             ('margin', 'Event Time Margin (s):', 1.0, float),
+            ('split_duration', 'Max Part Duration (s, 0=off):', 0.0, float),
         ]
         
         self.event_param_widgets = []  # Store widgets for enable/disable
@@ -241,7 +242,7 @@ class ParameterConfigGUI:
             self.event_param_widgets.extend([lbl, entry])
         
         # Add vertical separator
-        ttk.Separator(event_frame, orient='vertical').grid(row=0, column=2, rowspan=8, sticky='ns', padx=10)
+        ttk.Separator(event_frame, orient='vertical').grid(row=0, column=2, rowspan=9, sticky='ns', padx=10)
         
         # Right column - Boolean options
         ttk.Label(event_frame, text="Event Processing Options", font=('TkDefaultFont', 9, 'bold')).grid(
