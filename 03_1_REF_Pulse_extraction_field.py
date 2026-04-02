@@ -887,20 +887,24 @@ for n, filepath in enumerate(file_set['filename']):
                 event_eods['p2_idx'] = event_eods['p2_idx'] - event_audio_start_idx
                 event_eods['midpoint_idx'] = event_eods['midpoint_idx'] - event_audio_start_idx
 
-                # Compute part boundaries and assign audio_part column to eod_table
+                # Compute part boundaries and assign audio_part + part_audio_start_sample columns
                 if needs_parts and split_duration > 0 and len(event_data) > split_dur_samp:
                     part_boundaries = list(range(0, len(event_data), split_dur_samp)) + [len(event_data)]
                     audio_parts = np.full(len(event_eods), -1, dtype=int)
+                    part_starts = np.full(len(event_eods), -1, dtype=int)
                     for _pi in range(len(part_boundaries) - 1):
                         _mask = (
                             (event_eods['midpoint_idx'].values >= part_boundaries[_pi]) &
                             (event_eods['midpoint_idx'].values < part_boundaries[_pi + 1])
                         )
                         audio_parts[_mask] = start_part + _pi
+                        part_starts[_mask] = part_boundaries[_pi]
                     event_eods['audio_part'] = audio_parts
+                    event_eods['part_audio_start_sample'] = part_starts
                 else:
                     part_boundaries = None
                     event_eods['audio_part'] = start_part
+                    event_eods['part_audio_start_sample'] = 0
 
                 # Save event EOD table (always whole event, regardless of splitting)
                 event_output_file = os.path.join(output_path, f'{fname[:-4]}_event_{event_id}_eod_table.csv')
