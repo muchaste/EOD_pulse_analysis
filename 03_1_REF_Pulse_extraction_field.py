@@ -797,11 +797,25 @@ for n, filepath in enumerate(file_set['filename']):
                 print("    No final events to process after filtering!")
                 continue
 
-            # Reassign sequential event IDs
-            unique_ids = sorted(final_events['merged_event_id'].unique())
-            for id in unique_ids:
-                event_counter += 1  # Increment global event counter
-                final_events.loc[final_events['merged_event_id'] == id, 'event_id'] = int(event_counter)
+            # Reassign sequential event IDs, re-using pre-assigned IDs for retained events
+            continued_merged_ids = {}
+            if retained_event_ids:
+                retained_rows = final_events[final_events['original_index'] < n_prev_retained]
+                for mid, eid in retained_event_ids.items():
+                    if mid in retained_rows['merged_event_id'].values:
+                        continued_merged_ids[mid] = eid
+
+            for mid in sorted(final_events['merged_event_id'].unique()):
+                if mid in continued_merged_ids:
+                    final_events.loc[final_events['merged_event_id'] == mid, 'event_id'] = continued_merged_ids[mid]
+                else:
+                    event_counter += 1
+                    final_events.loc[final_events['merged_event_id'] == mid, 'event_id'] = int(event_counter)
+
+            retained_event_ids.clear()
+            retained_part_counts_snapshot = retained_part_counts.copy()
+            retained_part_counts.clear()
+            n_prev_retained = 0
 
             # Clean up event data
             del merged_events, channel_events, filtered_channel_events, events_to_filter
@@ -855,13 +869,17 @@ for n, filepath in enumerate(file_set['filename']):
                 event_audio_start_idx = max(0, int((event_start_time - file_start_time).total_seconds() * rate))
                 event_audio_end_idx = int((event_end_time - file_start_time).total_seconds() * rate)
 
-                # Extract and save the audio segment
+                # Extract full event audio window
                 event_data = data[event_audio_start_idx:event_audio_end_idx,:]
-                event_audio_output_file = os.path.join(output_path, f'{fname[:-4]}_event_{event_id}.wav')
-                aio.write_audio(event_audio_output_file, event_data, rate)
-                print(f"      Saved event audio segment: {event_audio_output_file}")
 
-                # Compute p1/p2/midpoint indices relative to event audio segment
+                # Determine split parameters for this event
+                mid_for_event = event_eods['merged_event_id'].iloc[0]
+                start_part = retained_part_counts_snapshot.get(mid_for_event, 0) + 1
+                split_duration = parameters.get('split_duration', 0.0)
+                split_dur_samp = int(split_duration * rate) if split_duration > 0 else 0
+                needs_parts = start_part > 1 or (split_duration > 0 and len(event_data) > split_dur_samp)
+
+                # Compute p1/p2/midpoint indices relative to event audio segment (for eod_table)
                 event_eods['original_p1_idx'] = event_eods['p1_idx']
                 event_eods['original_p2_idx'] = event_eods['p2_idx']
                 event_eods['original_midpoint_idx'] = event_eods['midpoint_idx']
@@ -869,22 +887,58 @@ for n, filepath in enumerate(file_set['filename']):
                 event_eods['p2_idx'] = event_eods['p2_idx'] - event_audio_start_idx
                 event_eods['midpoint_idx'] = event_eods['midpoint_idx'] - event_audio_start_idx
 
-                # Save event EOD table
+                # Save event EOD table (always whole event, regardless of splitting)
                 event_output_file = os.path.join(output_path, f'{fname[:-4]}_event_{event_id}_eod_table.csv')
                 event_eods.to_csv(event_output_file, index=False)
                 print(f"      Saved event EOD table: {event_output_file}")
 
-                # Create event plots
-                if parameters['create_plots']:
-                    create_event_plots(
-                        event_id=event_id,
-                        event_eods=event_eods,
-                        event_data=event_data,
-                        event_start_time=event_start_time,
-                        sample_rate=rate,   
-                        output_path=output_path,
-                        extraction_method=parameters['waveform_extraction']
-                    )
+                # Save audio and plots — split into parts if event exceeds split_duration
+                if needs_parts and split_duration > 0 and len(event_data) > split_dur_samp:
+                    part_boundaries = list(range(0, len(event_data), split_dur_samp)) + [len(event_data)]
+                    for i in range(len(part_boundaries) - 1):
+                        part_num = start_part + i
+                        part_start = part_boundaries[i]
+                        part_end = part_boundaries[i + 1]
+                        part_audio = event_data[part_start:part_end]
+                        part_wall_start = event_start_time + dt.timedelta(seconds=part_start / rate)
+                        part_eods = event_eods[
+                            (event_eods['midpoint_idx'] >= part_start) &
+                            (event_eods['midpoint_idx'] < part_end)
+                        ].copy()
+                        part_eods['p1_idx'] = part_eods['p1_idx'] - part_start
+                        part_eods['p2_idx'] = part_eods['p2_idx'] - part_start
+                        part_eods['midpoint_idx'] = part_eods['midpoint_idx'] - part_start
+                        part_audio_file = os.path.join(output_path, f'{fname[:-4]}_event_{event_id}_part_{part_num}.wav')
+                        aio.write_audio(part_audio_file, part_audio, rate)
+                        print(f"      Saved part audio: {part_audio_file}")
+                        if parameters['create_plots'] and len(part_eods) > 0:
+                            create_event_plots(
+                                event_id=event_id,
+                                event_eods=part_eods,
+                                event_data=part_audio,
+                                event_start_time=part_wall_start,
+                                sample_rate=rate,
+                                output_path=output_path,
+                                extraction_method=parameters['waveform_extraction'],
+                                part_suffix=f'_part_{part_num}'
+                            )
+                else:
+                    # Single audio/plot file — add part suffix only if this is a continuation
+                    part_suffix = f'_part_{start_part}' if needs_parts else ''
+                    event_audio_output_file = os.path.join(output_path, f'{fname[:-4]}_event_{event_id}{part_suffix}.wav')
+                    aio.write_audio(event_audio_output_file, event_data, rate)
+                    print(f"      Saved event audio segment: {event_audio_output_file}")
+                    if parameters['create_plots']:
+                        create_event_plots(
+                            event_id=event_id,
+                            event_eods=event_eods,
+                            event_data=event_data,
+                            event_start_time=event_start_time,
+                            sample_rate=rate,
+                            output_path=output_path,
+                            extraction_method=parameters['waveform_extraction'],
+                            part_suffix=part_suffix
+                        )
                 del event_eods, event_eod_waveforms, event_data
 
             del final_events, events_at_end
