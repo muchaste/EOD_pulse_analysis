@@ -11,6 +11,8 @@ from scipy.optimize import linear_sum_assignment
 from scipy.stats import gaussian_kde
 from scipy.signal import find_peaks
 from sklearn.cluster import DBSCAN
+from sklearn.decomposition import PCA
+from sklearn.metrics import pairwise_distances
 
 from pulse_functions import load_waveforms, normalize_waveforms
 
@@ -34,21 +36,38 @@ if not output_folder:
 print(f"✓ Output folder: {output_folder}")
 
 # ---------------------------------------------------------------------------
-# Load annotations — select events with verified fish count
+# Load annotations — recursively scan session root for all annotation files
 # ---------------------------------------------------------------------------
-annotations_path = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "annotations.json"
-)
-if not os.path.exists(annotations_path):
-    raise FileNotFoundError(f"annotations.json not found at {annotations_path}")
+print("\nSelect SESSION ROOT folder containing annotation JSON files...")
+ann_root = filedialog.askdirectory(title="Select Session Root (contains annotation JSON files)")
+if not ann_root:
+    raise ValueError("No annotation root folder selected")
+print(f"✓ Session root: {ann_root}")
 
-with open(annotations_path, "r") as fh:
-    ann_data = json.load(fh)
+ann_files = glob.glob(os.path.join(ann_root, "**", "annotations*.json"), recursive=True)
+ann_files += glob.glob(os.path.join(ann_root, "**", "annotations*.JSON"), recursive=True)
+ann_files = list(set(ann_files))
 
-annotations = ann_data.get("annotations", {})
-fish_counts = ann_data.get("fish_counts", {})
+if not ann_files:
+    raise FileNotFoundError(f"No annotation JSON files found under {ann_root}")
+print(f"✓ Found {len(ann_files)} annotation file(s)")
 
-# Keep only events that are clear_fish and have a numeric count
+annotations = {}
+fish_counts = {}
+key_conflicts = 0
+for ann_path in sorted(ann_files):
+    with open(ann_path, "r") as fh:
+        ann_data = json.load(fh)
+    for k, v in ann_data.get("annotations", {}).items():
+        if k in annotations:
+            key_conflicts += 1
+        annotations[k] = v
+    for k, v in ann_data.get("fish_counts", {}).items():
+        fish_counts[k] = v
+
+if key_conflicts > 0:
+    print(f"  ⚠ {key_conflicts} duplicate annotation keys (last file wins)")
+
 gt_events = {}
 for key, label in annotations.items():
     if label == "clear_fish" and fish_counts.get(key) in ("1", "2"):
@@ -110,16 +129,18 @@ min_track_pulses = 15
 min_track_duration_s = 0.5
 width_min_separation_us = 15
 debug_pass1 = False
+min_shape_eps = 0.1
 
 # ---------------------------------------------------------------------------
 # Parameter grid (tuned parameters)
 # ---------------------------------------------------------------------------
 param_grid = {
-    "shape_dbscan_eps":      [0.2, 0.3, 0.4],
+    "knn_percentile":         [70, 85],
     "ipi_tolerance_fraction": [0.2, 0.4, 0.6],
-    "pass1_cost_threshold":  [5.0, 10.0, 20.0],
-    "location_weight":       [0.1, 0.3, 0.5],   # ipi_weight = 1 - location_weight
-    "pass2_cost_threshold":  [2.0, 4.0, 8.0],
+    "pass1_cost_threshold":   [5.0, 10.0, 20.0],
+    "location_weight":        [0.1, 0.3],
+    "waveform_weight":        [0.1, 0.3, 0.5],
+    "pass2_cost_threshold":   [2.0, 4.0, 8.0],
 }
 
 param_keys = list(param_grid.keys())
@@ -170,6 +191,33 @@ for m in matched:
 
 print(f"\n✓ {len(event_cache)} events ready for tuning")
 
+# Amplitude distribution: derive location-quality thresholds from data
+all_amps = np.concatenate([
+    cache["eod_data"]["eod_amplitude"].values for cache in event_cache.values()
+])
+amp_location_low = float(np.percentile(all_amps, 15))
+amp_location_high = float(np.percentile(all_amps, 75))
+print(f"✓ Amplitude thresholds: low={amp_location_low:.4f} V (p15), "
+      f"high={amp_location_high:.4f} V (p75)")
+
+fig_amp, ax_amp = plt.subplots(figsize=(8, 4))
+ax_amp.hist(all_amps, bins=100, color="steelblue", alpha=0.7)
+ax_amp.axvline(amp_location_low, color="orange", linestyle="--",
+               label=f"p15 = {amp_location_low:.4f} V  (loc_quality=0)")
+ax_amp.axvline(amp_location_high, color="green", linestyle="--",
+               label=f"p75 = {amp_location_high:.4f} V  (loc_quality=1)")
+ax_amp.set_xlabel("EOD amplitude (V)")
+ax_amp.set_ylabel("Pulse count")
+ax_amp.set_title(
+    "Amplitude distribution — annotated events\n"
+    "Edit percentiles (15, 75) in script above if thresholds look wrong"
+)
+ax_amp.legend(fontsize=8)
+plt.tight_layout()
+plt.savefig(os.path.join(output_folder, "amplitude_distribution.png"), dpi=120)
+plt.close()
+print("✓ Saved amplitude distribution diagnostic")
+
 # ---------------------------------------------------------------------------
 # Grid search loop
 # ---------------------------------------------------------------------------
@@ -179,11 +227,12 @@ run_idx = 0
 
 for combo in param_combos:
     params = dict(zip(param_keys, combo))
-    shape_dbscan_eps = params["shape_dbscan_eps"]
+    knn_percentile = int(params["knn_percentile"])
     ipi_tolerance_fraction = params["ipi_tolerance_fraction"]
     pass1_cost_threshold = params["pass1_cost_threshold"]
     location_weight = params["location_weight"]
-    ipi_weight = 1.0 - location_weight
+    waveform_weight = params["waveform_weight"]
+    ipi_weight = max(0.0, 1.0 - location_weight - waveform_weight)
     pass2_cost_threshold = params["pass2_cost_threshold"]
 
     for event_key, cache in event_cache.items():
@@ -212,7 +261,7 @@ for combo in param_combos:
             n_width_classes = 1
         eod_data["width_class"] = pulse_width_class
 
-        # --- Shape clustering with subsampled DBSCAN ---
+        # --- Shape clustering: adaptive KNN eps, noise→centroid reassignment ---
         eod_data["shape_class"] = -1
         next_shape_id = 0
         for wc in range(n_width_classes):
@@ -223,34 +272,60 @@ for combo in param_combos:
             if n_wc > dbscan_max_direct:
                 rng = np.random.default_rng(seed=42)
                 sample_pos = rng.choice(n_wc, size=min(dbscan_sample_size, n_wc), replace=False)
-                sample_wf = wc_waveforms[sample_pos]
-                db = DBSCAN(eps=shape_dbscan_eps, min_samples=shape_dbscan_min_samples, metric="euclidean")
-                sample_labels = db.fit_predict(sample_wf)
+            else:
+                sample_pos = np.arange(n_wc)
+            sample_wf = wc_waveforms[sample_pos]
+            n_sample = len(sample_pos)
+            min_pts = max(shape_dbscan_min_samples, int(n_sample * 0.01))
+            n_pca = min(5, n_sample - 1, waveform_target_length)
+            if n_sample < 2 or n_pca < 1:
+                db_labels = np.zeros(n_wc, dtype=int)
+                n_clusters = 1
+            else:
+                pca_s = PCA(n_components=n_pca)
+                feat_sample = pca_s.fit_transform(sample_wf)
+                knn_dists = np.sort(pairwise_distances(feat_sample), axis=1)
+                knn_col = min(min_pts, knn_dists.shape[1] - 1)
+                adaptive_eps = max(
+                    float(np.percentile(knn_dists[:, knn_col], knn_percentile)),
+                    min_shape_eps
+                )
+                db = DBSCAN(eps=adaptive_eps, min_samples=min_pts, metric="euclidean")
+                sample_labels = db.fit_predict(feat_sample)
                 cluster_ids = np.unique(sample_labels[sample_labels >= 0])
                 n_clusters = len(cluster_ids)
-                if n_clusters > 0:
-                    centroids = np.array([sample_wf[sample_labels == cid].mean(axis=0) for cid in cluster_ids])
+                if n_clusters == 0:
+                    cluster_ids = np.array([0], dtype=int)
+                    n_clusters = 1
+                    centroids = feat_sample.mean(axis=0, keepdims=True)
+                    sample_labels = np.zeros(n_sample, dtype=int)
                 else:
-                    centroids = np.empty((0, wc_waveforms.shape[1]))
-                db_labels = np.full(n_wc, -1, dtype=int)
-                for sp, sl in zip(sample_pos, sample_labels):
-                    db_labels[sp] = sl
-                unassigned_mask_wc = np.ones(n_wc, dtype=bool)
-                unassigned_mask_wc[sample_pos] = False
-                if n_clusters > 0 and unassigned_mask_wc.any():
-                    unassigned_wf = wc_waveforms[unassigned_mask_wc]
-                    dists = np.linalg.norm(unassigned_wf[:, None, :] - centroids[None, :, :], axis=2)
-                    db_labels[unassigned_mask_wc] = cluster_ids[np.argmin(dists, axis=1)]
-            else:
-                db = DBSCAN(eps=shape_dbscan_eps, min_samples=shape_dbscan_min_samples, metric="euclidean")
-                db_labels = db.fit_predict(wc_waveforms)
-                n_clusters = (np.unique(db_labels[db_labels >= 0])).size
+                    centroids = np.array(
+                        [feat_sample[sample_labels == cid].mean(axis=0) for cid in cluster_ids]
+                    )
+                if n_wc > dbscan_max_direct:
+                    db_labels = np.full(n_wc, -1, dtype=int)
+                    for sp, sl in zip(sample_pos, sample_labels):
+                        db_labels[sp] = sl
+                    unassigned = np.where(db_labels == -1)[0]
+                    if unassigned.size > 0:
+                        feat_un = pca_s.transform(wc_waveforms[unassigned])
+                        dists = np.linalg.norm(
+                            feat_un[:, None, :] - centroids[None, :, :], axis=2
+                        )
+                        db_labels[unassigned] = cluster_ids[np.argmin(dists, axis=1)]
+                else:
+                    db_labels = sample_labels.copy()
+                    noise_mask = db_labels == -1
+                    if noise_mask.any():
+                        feat_noise = pca_s.transform(wc_waveforms[noise_mask])
+                        dists_noise = np.linalg.norm(
+                            feat_noise[:, None, :] - centroids[None, :, :], axis=2
+                        )
+                        db_labels[noise_mask] = cluster_ids[np.argmin(dists_noise, axis=1)]
             for i, pulse_idx in enumerate(wc_indices):
-                if db_labels[i] >= 0:
-                    eod_data.loc[pulse_idx, "shape_class"] = next_shape_id + db_labels[i]
-                else:
-                    eod_data.loc[pulse_idx, "shape_class"] = next_shape_id + n_clusters + i
-            next_shape_id += n_clusters + len(wc_indices)
+                eod_data.loc[pulse_idx, "shape_class"] = next_shape_id + db_labels[i]
+            next_shape_id += n_clusters
 
         shape_groups = (
             eod_data[["width_class", "shape_class"]]
@@ -270,6 +345,11 @@ for combo in param_combos:
             for pulse_idx in group_indices:
                 pulse_ts = eod_data.loc[pulse_idx, "timestamp"]
                 pulse_loc = eod_data.loc[pulse_idx, "pulse_location"]
+                pulse_amp = eod_data.loc[pulse_idx, "eod_amplitude"]
+                loc_quality = np.clip(
+                    (pulse_amp - amp_location_low) / (amp_location_high - amp_location_low + 1e-12),
+                    0.0, 1.0
+                )
                 candidate_ids = []
                 for fid, f in fragments.items():
                     if f["shape_class"] != sc or f["width_class"] != wc:
@@ -322,7 +402,12 @@ for combo in param_combos:
                         ipi_cost = abs(dt - median_ipi) / ipi_tol
                     else:
                         ipi_cost = 0.0
-                    cost = location_weight * loc_cost + ipi_weight * ipi_cost
+                    recent_wf = waveforms_l2[f["history"][-10:]]
+                    frag_median_wf = np.median(recent_wf, axis=0)
+                    wf_cost = float(np.linalg.norm(waveforms_l2[pulse_idx] - frag_median_wf))
+                    cost = (location_weight * loc_quality * loc_cost
+                            + ipi_weight * ipi_cost
+                            + waveform_weight * wf_cost)
                     if cost < best_cost:
                         best_cost = cost
                         best_fid = fid
@@ -371,8 +456,6 @@ for combo in param_combos:
                         continue
                     if fragments[fid_end]["width_class"] != fragments[fid_start]["width_class"]:
                         continue
-                    if fragments[fid_end]["shape_class"] != fragments[fid_start]["shape_class"]:
-                        continue
                     loc_diff = abs(frag_start_loc[fid_start] - frag_end_loc[fid_end])
                     if loc_diff > 3.0 * gap:
                         continue
@@ -418,10 +501,11 @@ for combo in param_combos:
         n_fish_tracked = len(fragments)
         assigned = sum(len(f["history"]) for f in fragments.values())
         assignment_rate = assigned / len(eod_data) if len(eod_data) > 0 else 0.0
-        fragmentation = n_fish_tracked / gt_fish_count if gt_fish_count > 0 else np.nan
+        fragmentation_ratio = n_fish_tracked / gt_fish_count if gt_fish_count > 0 else np.nan
         correct = int(n_fish_tracked == gt_fish_count)
         over_fragmented = int(n_fish_tracked > gt_fish_count)
         merged = int(n_fish_tracked < gt_fish_count)
+        composite_score = correct - 0.5 * abs(fragmentation_ratio - 1.0) if not np.isnan(fragmentation_ratio) else np.nan
 
         row = {
             "event_key": event_key,
@@ -430,7 +514,8 @@ for combo in param_combos:
             "correct": correct,
             "over_fragmented": over_fragmented,
             "merged": merged,
-            "fragmentation": fragmentation,
+            "fragmentation_ratio": fragmentation_ratio,
+            "composite_score": composite_score,
             "assignment_rate": assignment_rate,
         }
         row.update(params)
@@ -446,26 +531,28 @@ print(f"✓ Saved full results: {os.path.basename(results_path)}")
 # ---------------------------------------------------------------------------
 # Summary: aggregate by parameter combination
 # ---------------------------------------------------------------------------
-summary_cols = param_keys + ["correct", "over_fragmented", "merged", "fragmentation", "assignment_rate"]
 summary = results_df.groupby(param_keys)[["correct", "over_fragmented", "merged",
-                                           "fragmentation", "assignment_rate"]].mean().reset_index()
-# Also compute separate mean_correct for each fish count class
+                                           "fragmentation_ratio", "composite_score",
+                                           "assignment_rate"]].mean().reset_index()
 for gt_count in [1, 2]:
     sub = results_df[results_df["gt_fish_count"] == gt_count].groupby(param_keys)["correct"].mean().reset_index()
     sub = sub.rename(columns={"correct": f"correct_gt{gt_count}"})
     summary = summary.merge(sub, on=param_keys, how="left")
+    sub_cs = results_df[results_df["gt_fish_count"] == gt_count].groupby(param_keys)["composite_score"].mean().reset_index()
+    sub_cs = sub_cs.rename(columns={"composite_score": f"composite_gt{gt_count}"})
+    summary = summary.merge(sub_cs, on=param_keys, how="left")
 
-summary = summary.sort_values("correct", ascending=False)
+summary = summary.sort_values("composite_score", ascending=False)
 summary_path = os.path.join(output_folder, "parameter_tuning_summary.csv")
 summary.to_csv(summary_path, index=False)
 print(f"✓ Saved summary: {os.path.basename(summary_path)}")
 
-print("\n--- Top 10 parameter sets by mean correct (all events) ---")
+print("\n--- Top 10 parameter sets by composite score (all events) ---")
 print(summary.head(10).to_string(index=False))
 
-print("\n--- Top 10 by correct on 2-fish events ---")
-if "correct_gt2" in summary.columns:
-    print(summary.sort_values("correct_gt2", ascending=False).head(10).to_string(index=False))
+print("\n--- Top 10 by composite score on 2-fish events ---")
+if "composite_gt2" in summary.columns:
+    print(summary.sort_values("composite_gt2", ascending=False).head(10).to_string(index=False))
 
 # ---------------------------------------------------------------------------
 # Heatmaps: 2D slices through parameter space (fixing remaining params at median)
@@ -476,7 +563,7 @@ param_middle = {k: sorted(param_grid[k])[len(param_grid[k]) // 2] for k in param
 pair_list = list(itertools.combinations(param_keys, 2))  # 10 pairs total, show first 9 in 3x3
 
 fig, axes = plt.subplots(3, 3, figsize=(14, 12))
-fig.suptitle("Parameter tuning: mean correct (all events)\n"
+fig.suptitle("Parameter tuning: composite score (all events)\n"
              "(each panel: other params fixed at middle value)", fontsize=10)
 
 for ax_idx, (pk1, pk2) in enumerate(pair_list[:9]):
@@ -491,7 +578,7 @@ for ax_idx, (pk1, pk2) in enumerate(pair_list[:9]):
     if sub.empty:
         ax.set_visible(False)
         continue
-    pivot = sub.pivot_table(index=pk1, columns=pk2, values="correct", aggfunc="mean")
+    pivot = sub.pivot_table(index=pk1, columns=pk2, values="composite_score", aggfunc="mean")
     im = ax.imshow(pivot.values, aspect="auto", cmap="RdYlGn", vmin=0, vmax=1,
                    origin="lower")
     ax.set_xticks(range(len(pivot.columns)))
@@ -514,9 +601,9 @@ plt.close()
 print(f"\n✓ Saved heatmaps: {os.path.basename(heatmap_path)}")
 
 # Separate heatmap for 2-fish events only (most diagnostic for multi-fish tracking)
-if "correct_gt2" in summary.columns and summary["correct_gt2"].notna().any():
+if "composite_gt2" in summary.columns and summary["composite_gt2"].notna().any():
     fig2, axes2 = plt.subplots(3, 3, figsize=(14, 12))
-    fig2.suptitle("Parameter tuning: mean correct on 2-FISH events\n"
+    fig2.suptitle("Parameter tuning: composite score on 2-FISH events\n"
                   "(each panel: other params fixed at middle value)", fontsize=10)
     for ax_idx, (pk1, pk2) in enumerate(pair_list[:9]):
         ax = axes2[ax_idx // 3][ax_idx % 3]
@@ -526,10 +613,10 @@ if "correct_gt2" in summary.columns and summary["correct_gt2"].notna().any():
                 continue
             mask = mask & (summary[pk] == param_middle[pk])
         sub = summary[mask.values]
-        if sub.empty or sub["correct_gt2"].isna().all():
+        if sub.empty or sub["composite_gt2"].isna().all():
             ax.set_visible(False)
             continue
-        pivot = sub.pivot_table(index=pk1, columns=pk2, values="correct_gt2", aggfunc="mean")
+        pivot = sub.pivot_table(index=pk1, columns=pk2, values="composite_gt2", aggfunc="mean")
         im = ax.imshow(pivot.values, aspect="auto", cmap="RdYlGn", vmin=0, vmax=1, origin="lower")
         ax.set_xticks(range(len(pivot.columns)))
         ax.set_xticklabels([f"{v:.2g}" for v in pivot.columns], fontsize=7)
