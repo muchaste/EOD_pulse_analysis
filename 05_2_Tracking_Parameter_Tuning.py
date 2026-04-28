@@ -23,11 +23,11 @@ print("=" * 70)
 root = tk.Tk()
 root.withdraw()
 
-print("\nSelect INPUT folder containing EOD data...")
-input_folder = filedialog.askdirectory(title="Select Input Folder (EOD data)")
-if not input_folder:
-    raise ValueError("No input folder selected")
-print(f"✓ Input folder: {input_folder}")
+print("\nSelect ROOT folder to scan for annotated events...")
+root_folder = filedialog.askdirectory(title="Select Root Folder (e.g. E:\\)")
+if not root_folder:
+    raise ValueError("No root folder selected")
+print(f"✓ Root folder: {root_folder}")
 
 print("\nSelect OUTPUT folder for tuning results...")
 output_folder = filedialog.askdirectory(title="Select Output Folder")
@@ -36,76 +36,61 @@ if not output_folder:
 print(f"✓ Output folder: {output_folder}")
 
 # ---------------------------------------------------------------------------
-# Load annotations — recursively scan session root for all annotation files
+# Scan recursively for annotation files; match event files in same directory
 # ---------------------------------------------------------------------------
-print("\nSelect SESSION ROOT folder containing annotation JSON files...")
-ann_root = filedialog.askdirectory(title="Select Session Root (contains annotation JSON files)")
-if not ann_root:
-    raise ValueError("No annotation root folder selected")
-print(f"✓ Session root: {ann_root}")
-
-ann_files = glob.glob(os.path.join(ann_root, "**", "annotations*.json"), recursive=True)
-ann_files += glob.glob(os.path.join(ann_root, "**", "annotations*.JSON"), recursive=True)
-ann_files = list(set(ann_files))
+ann_files = glob.glob(os.path.join(root_folder, "**", "annotations*.json"), recursive=True)
+ann_files += glob.glob(os.path.join(root_folder, "**", "annotations*.JSON"), recursive=True)
+ann_files = sorted(set(ann_files))
 
 if not ann_files:
-    raise FileNotFoundError(f"No annotation JSON files found under {ann_root}")
-print(f"✓ Found {len(ann_files)} annotation file(s)")
-
-annotations = {}
-fish_counts = {}
-key_conflicts = 0
-for ann_path in sorted(ann_files):
-    with open(ann_path, "r") as fh:
-        ann_data = json.load(fh)
-    for k, v in ann_data.get("annotations", {}).items():
-        if k in annotations:
-            key_conflicts += 1
-        annotations[k] = v
-    for k, v in ann_data.get("fish_counts", {}).items():
-        fish_counts[k] = v
-
-if key_conflicts > 0:
-    print(f"  ⚠ {key_conflicts} duplicate annotation keys (last file wins)")
-
-gt_events = {}
-for key, label in annotations.items():
-    if label == "clear_fish" and fish_counts.get(key) in ("1", "2"):
-        gt_events[key] = int(fish_counts[key])
-
-print(f"\n✓ Ground-truth events: {len(gt_events)} "
-      f"({sum(v == 1 for v in gt_events.values())} single-fish, "
-      f"{sum(v == 2 for v in gt_events.values())} two-fish)")
-
-# ---------------------------------------------------------------------------
-# Match ground-truth events to files in input folder
-# ---------------------------------------------------------------------------
-eod_files = {
-    os.path.basename(f).replace("_eod_table.csv", ""): f
-    for f in glob.glob(os.path.join(input_folder, "*_eod_table.csv"))
-}
+    raise FileNotFoundError(f"No annotation JSON files found under {root_folder}")
+print(f"\n✓ Found {len(ann_files)} annotation file(s) — scanning for matched events...")
 
 matched = []
-for event_key, gt_count in gt_events.items():
-    if event_key not in eod_files:
-        continue
-    eod_file = eod_files[event_key]
-    waveform_base = os.path.join(input_folder, f"{event_key}_waveforms")
-    audio_file = os.path.join(input_folder, f"{event_key}.wav")
-    if os.path.exists(waveform_base + "_concatenated.npz") and os.path.exists(audio_file):
+seen_keys = set()
+n_skip_label = 0
+n_skip_files = 0
+n_skip_dup = 0
+
+for ann_path in ann_files:
+    event_dir = os.path.dirname(ann_path)
+    with open(ann_path, "r") as fh:
+        ann_data = json.load(fh)
+    file_annotations = ann_data.get("annotations", {})
+    file_fish_counts = ann_data.get("fish_counts", {})
+
+    for key, label in file_annotations.items():
+        if label != "clear_fish" or file_fish_counts.get(key) not in ("1", "2"):
+            n_skip_label += 1
+            continue
+        gt_count = int(file_fish_counts[key])
+        eod_file = os.path.join(event_dir, f"{key}_eod_table.csv")
+        waveform_base = os.path.join(event_dir, f"{key}_waveforms")
+        if not os.path.exists(eod_file) or not os.path.exists(waveform_base + "_concatenated.npz"):
+            n_skip_files += 1
+            continue
+        unique_key = os.path.join(event_dir, key)
+        if unique_key in seen_keys:
+            n_skip_dup += 1
+            continue
+        seen_keys.add(unique_key)
         matched.append({
-            "event_key": event_key,
+            "event_key": key,
+            "event_dir": event_dir,
             "gt_fish_count": gt_count,
             "eod_file": eod_file,
             "waveform_base": waveform_base,
         })
 
 if not matched:
-    raise ValueError("No annotated events with matching files found in input folder")
+    raise ValueError("No annotated events with matching data files found under root folder")
 
-print(f"✓ Matched {len(matched)} annotated events to files")
-for m in matched:
-    print(f"  - {m['event_key']} (gt={m['gt_fish_count']} fish)")
+n_single = sum(m["gt_fish_count"] == 1 for m in matched)
+n_two = sum(m["gt_fish_count"] == 2 for m in matched)
+print(f"✓ Matched {len(matched)} annotated events "
+      f"({n_single} single-fish, {n_two} two-fish)")
+print(f"  Skipped: {n_skip_label} wrong label/count, "
+      f"{n_skip_files} missing data files, {n_skip_dup} duplicates")
 
 # ---------------------------------------------------------------------------
 # Fixed tracking parameters (not tuned)
