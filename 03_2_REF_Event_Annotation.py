@@ -45,11 +45,11 @@ except ImportError:
     AUDIO_AVAILABLE = False
     print("WARNING: Audio playback not available (install soundfile and sounddevice)")
 
-# Import EOD functions for loading variable-length waveforms
-try:
-    from eod_functions_backup import load_variable_length_waveforms
-except ImportError:
-    print("Warning: Could not import eod_functions - waveform loading may not work")
+# # Import EOD functions for loading variable-length waveforms
+# try:
+#     from pulse_functions import load_variable_length_waveforms
+# except ImportError:
+#     print("Warning: Could not import pulse_functions - waveform loading may not work")
 
 # =============================================================================
 # CONFIGURATION
@@ -286,28 +286,50 @@ class EventAnnotationTool:
             return
             
         # Find all event audio files
-        # New format: loggerID_loggerTimestamp_event_###_eventTimestamp.wav
+        # Supports both whole-event files and split part files (_part_N suffix)
         audio_files = list(self.events_folder.glob("*_event_*.wav"))
         
         if not audio_files:
             messagebox.showerror("Error", "No event audio files found in the selected folder!")
             return
         
-        # Sort by event ID
-        # Extract event ID from format: loggerID_loggerTimestamp_event_###_eventTimestamp
-        def extract_event_id(filepath):
-            parts = filepath.stem.split('_event_')
+        # Group files by base stem (strip _part_N suffix if present)
+        events_dict = {}
+        for f in audio_files:
+            stem = f.stem
+            if '_part_' in stem:
+                base_stem = stem[:stem.rfind('_part_')]
+            else:
+                base_stem = stem
+            if base_stem not in events_dict:
+                events_dict[base_stem] = []
+            events_dict[base_stem].append(f)
+        
+        # Extract event number for sorting
+        def extract_event_num(base_stem):
+            parts = base_stem.split('_event_')
             if len(parts) == 2:
-                event_part = parts[1].split('_')[0]  # Get ### from event_###_timestamp
-                return int(event_part)
+                try:
+                    return int(parts[1].split('_')[0])
+                except ValueError:
+                    return 0
             return 0
         
-        self.event_files = sorted(audio_files, key=extract_event_id)
+        # Build sorted list of event entry dicts
+        self.event_files = []
+        for base_stem in sorted(events_dict.keys(), key=extract_event_num):
+            parts_list = sorted(events_dict[base_stem], key=lambda p: p.stem)
+            self.event_files.append({
+                'base_stem': base_stem,
+                'event_num': extract_event_num(base_stem),
+                'audio_parts': parts_list,
+                'is_split': len(parts_list) > 1,
+            })
         
         print(f"Found {len(self.event_files)} event files")
         
         # Initialize annotations and fish count dictionaries
-        self.annotations = {f.stem: 'unannotated' for f in self.event_files}
+        self.annotations = {e['base_stem']: 'unannotated' for e in self.event_files}
         self.fish_counts = {}  # Will be populated as needed
         
         # Update progress bar
@@ -326,7 +348,7 @@ class EventAnnotationTool:
         self.cleanup_previous_event()
             
         event_file = self.event_files[self.current_event_idx]
-        event_id = event_file.stem
+        event_id = event_file['base_stem']
         
         try:
             # Load audio file
@@ -386,8 +408,10 @@ class EventAnnotationTool:
         
         print(f"Memory cleanup completed for previous event")
     
-    def load_event_audio(self, audio_file):
-        """Load audio data for the current event with memory optimization"""
+    def load_event_audio(self, entry):
+        """Load audio data for the current event with memory optimization.
+        entry: dict with 'audio_parts' list of Path objects (may be a single-item list)
+        """
         
         # Clean up any existing audio data first
         if hasattr(self, 'current_audio') and self.current_audio is not None:
@@ -395,9 +419,22 @@ class EventAnnotationTool:
             self.current_audio = None
             gc.collect()
         
+        audio_parts = entry['audio_parts'] if isinstance(entry, dict) else [entry]
+        
         if AUDIO_AVAILABLE:
             try:
-                self.current_audio, self.sample_rate = sf.read(str(audio_file))
+                if len(audio_parts) == 1:
+                    self.current_audio, self.sample_rate = sf.read(str(audio_parts[0]))
+                else:
+                    parts_data = []
+                    for part_file in audio_parts:
+                        part_audio, self.sample_rate = sf.read(str(part_file))
+                        parts_data.append(part_audio)
+                    self.current_audio = np.concatenate(parts_data, axis=0)
+                    del parts_data
+                    gc.collect()
+                if self.current_audio.dtype != np.float32:
+                    self.current_audio = self.current_audio.astype(np.float32)
                 print(f"Loaded audio: {self.current_audio.shape}, {self.current_audio.dtype}, {self.current_audio.nbytes / 1024 / 1024:.1f} MB")
             except Exception as e:
                 self.current_audio = None
@@ -406,15 +443,24 @@ class EventAnnotationTool:
             # Load with scipy as fallback
             try:
                 import scipy.io.wavfile as wav
-                self.sample_rate, audio_data = wav.read(str(audio_file))
-                # Convert to float and normalize
-                if audio_data.dtype == np.int16:
-                    self.current_audio = audio_data.astype(np.float32) / 32768.0
+                if len(audio_parts) == 1:
+                    self.sample_rate, audio_data = wav.read(str(audio_parts[0]))
+                    if audio_data.dtype == np.int16:
+                        self.current_audio = audio_data.astype(np.float32) / 32768.0
+                    else:
+                        self.current_audio = audio_data.astype(np.float32)
+                    del audio_data
                 else:
-                    self.current_audio = audio_data.astype(np.float32)
-                    
-                # Clean up temporary array
-                del audio_data
+                    parts_data = []
+                    for part_file in audio_parts:
+                        rate, part_data = wav.read(str(part_file))
+                        self.sample_rate = rate
+                        if part_data.dtype == np.int16:
+                            parts_data.append(part_data.astype(np.float32) / 32768.0)
+                        else:
+                            parts_data.append(part_data.astype(np.float32))
+                    self.current_audio = np.concatenate(parts_data, axis=0)
+                    del parts_data
                 gc.collect()
                 print(f"Loaded audio (scipy): {self.current_audio.shape}, {self.current_audio.dtype}, {self.current_audio.nbytes / 1024 / 1024:.1f} MB")
             except ImportError:
@@ -431,23 +477,10 @@ class EventAnnotationTool:
         if summary_file.exists():
             summary_df = pd.read_csv(summary_file)
             
-            # Extract event number from filename
-            # New format: loggerID_loggerTimestamp_event_###_eventTimestamp
-            event_filename = self.event_files[self.current_event_idx].stem
+            # Extract event number from current event entry
+            event_num = self.event_files[self.current_event_idx]['event_num']
             
-            # Extract event ID
-            event_num = None
-            parts = event_filename.split('_event_')
-            if len(parts) == 2:
-                event_part = parts[1].split('_')[0]  # Get ### from event_###_timestamp
-                try:
-                    event_num = int(event_part)
-                except ValueError:
-                    event_num = self.current_event_idx  # Use index as fallback
-            else:
-                event_num = self.current_event_idx  # Use index as fallback
-            
-            print(f"Looking for event_id {event_num} in summary (from filename: {event_filename})")
+            print(f"Looking for event_id {event_num} in summary")
             
             # Look for matching event in summary
             event_row = summary_df[summary_df['event_id'] == event_num]
@@ -464,7 +497,7 @@ class EventAnnotationTool:
     
     def extract_event_features(self):
         """Extract comprehensive features for the current event"""
-        event_id = self.event_files[self.current_event_idx].stem
+        event_id = self.event_files[self.current_event_idx]['base_stem']
         features = {}
         
         # Basic audio features
@@ -536,8 +569,7 @@ class EventAnnotationTool:
     
     def update_display(self):
         """Update all display elements"""
-        event_file = self.event_files[self.current_event_idx]
-        event_id = event_file.stem
+        event_id = self.event_files[self.current_event_idx]['base_stem']
         
         # Update event label and progress
         self.event_label.config(text=f"Event: {self.current_event_idx + 1} / {len(self.event_files)} ({event_id})")
@@ -556,7 +588,7 @@ class EventAnnotationTool:
     
     def update_info_text(self):
         """Update the event information text display"""
-        event_id = self.event_files[self.current_event_idx].stem
+        event_id = self.event_files[self.current_event_idx]['base_stem']
         
         # Clear existing text
         self.info_text.delete(1.0, tk.END)
@@ -722,12 +754,25 @@ class EventAnnotationTool:
         self.ax.grid(True, alpha=0.3)
         
         # Color-code by annotation
-        event_id = self.event_files[self.current_event_idx].stem
+        event_id = self.event_files[self.current_event_idx]['base_stem']
         current_annotation = self.annotations.get(event_id, 'unannotated')
         bg_color = ANNOTATION_CATEGORIES[current_annotation]['color']
         
         self.ax.set_title(f'{event_id} - {ANNOTATION_CATEGORIES[current_annotation]["label"]}', 
                          bbox=dict(boxstyle="round,pad=0.3", facecolor=bg_color, alpha=0.3))
+        
+        # Draw part boundaries for split events
+        entry = self.event_files[self.current_event_idx]
+        if entry['is_split'] and self.current_eod_table is not None and 'part_audio_start_sample' in self.current_eod_table.columns:
+            boundary_samples = sorted(self.current_eod_table['part_audio_start_sample'].unique())
+            for i, bsamp in enumerate(boundary_samples):
+                if bsamp > 0:
+                    self.ax.axvline(x=bsamp, color='gray', linestyle='--', linewidth=0.8, alpha=0.6)
+                part_num = self.current_eod_table.loc[
+                    self.current_eod_table['part_audio_start_sample'] == bsamp, 'audio_part'
+                ].iloc[0] if 'audio_part' in self.current_eod_table.columns else (i + 1)
+                self.ax.text(bsamp + 100, self.ax.get_ylim()[1] * 0.95, f'_part_{part_num}',
+                             fontsize=7, color='gray', va='top')
         
         # Create canvas first (but don't pack yet)
         self.canvas = FigureCanvasTkAgg(self.fig, self.plot_frame)
@@ -751,7 +796,7 @@ class EventAnnotationTool:
         if not self.event_files:
             return
             
-        event_id = self.event_files[self.current_event_idx].stem
+        event_id = self.event_files[self.current_event_idx]['base_stem']
         self.annotations[event_id] = category
         
         print(f"Annotated {event_id} as {ANNOTATION_CATEGORIES[category]['label']}")
@@ -1089,8 +1134,8 @@ class EventAnnotationTool:
                 # Create dataset DataFrame
                 dataset_rows = []
                 
-                for event_file in self.event_files:
-                    event_id = event_file.stem
+                for event in self.event_files:
+                    event_id = event['base_stem']
                     annotation = self.annotations.get(event_id, 'unannotated')
                     features = self.event_features.get(event_id, {})
                     fish_count = self.fish_counts.get(event_id, None)
@@ -1100,7 +1145,7 @@ class EventAnnotationTool:
                             'event_id': event_id,
                             'annotation': annotation,
                             'fish_count': fish_count if annotation == 'clear_fish' else None,
-                            'file_path': str(event_file)
+                            'file_path': str(event['audio_parts'][0])
                         }
                         row.update(features)
                         dataset_rows.append(row)

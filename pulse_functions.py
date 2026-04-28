@@ -2469,7 +2469,7 @@ def filter_events(events_to_filter, min_eods_per_event, min_amplitude):
     return events_filtered
 
 
-def create_event_plots(event_id, event_eods, event_data, event_start_time, sample_rate, output_path, max_plot_duration=300, extraction_method='Differential'):
+def create_event_plots(event_id, event_eods, event_data, event_start_time, sample_rate, output_path, max_plot_duration=300, extraction_method='Differential', part_suffix=''):
     """
     Create detection plots for EOD events with memory-efficient handling.
     Adapts to PCA (single-ended) or Differential extraction methods.
@@ -2731,7 +2731,7 @@ def create_event_plots(event_id, event_eods, event_data, event_start_time, sampl
     plt.xticks(rotation=45)
     
     # Save plot
-    plot_filename = f'event_{event_id:03d}_detection.png'
+    plot_filename = f'event_{event_id:03d}{part_suffix}_detection.png'
     plot_path = Path(output_path) / plot_filename
     plt.savefig(plot_path, dpi=150, bbox_inches='tight')
     plt.close()
