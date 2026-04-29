@@ -1,554 +1,802 @@
-import pandas as pd
+import os
+import glob
+import json
+import random
+import itertools
+import multiprocessing
 import numpy as np
-import matplotlib.pyplot as plt
+import pandas as pd
 import tkinter as tk
 from tkinter import filedialog
-import os
-import json
-import glob
-import itertools
 from scipy.optimize import linear_sum_assignment
 from scipy.stats import gaussian_kde
 from scipy.signal import find_peaks
 from sklearn.cluster import DBSCAN
+from sklearn.decomposition import PCA
+from sklearn.metrics import pairwise_distances
 
 from pulse_functions import load_waveforms, normalize_waveforms
 
-print("=" * 70)
-print("TRACKING PARAMETER TUNING")
-print("=" * 70)
+# ============================================================
+# CONFIGURATION — edit before running
+# ============================================================
 
-root = tk.Tk()
-root.withdraw()
+N_WORKERS        = 16     # parallel worker processes
+N_RANDOM_SAMPLES = 5000   # max combos to evaluate; 0 = exhaustive
+RANDOM_SEED      = 42
+BATCH_SIZE       = 200    # combos per incremental save
 
-print("\nSelect INPUT folder containing EOD data...")
-input_folder = filedialog.askdirectory(title="Select Input Folder (EOD data)")
-if not input_folder:
-    raise ValueError("No input folder selected")
-print(f"✓ Input folder: {input_folder}")
+# Fixed parameters (not tuned)
+_DBSCAN_MIN_SAMPLES = 5
+_DBSCAN_MAX_DIRECT  = 30000
+_DBSCAN_SAMPLE_SIZE = 20000
+_N_RECENT_IPI       = 8
+_MIN_TRACK_PULSES   = 15
+_MIN_TRACK_DUR_S    = 0.5
+_PASS2_MAX_FRAGS    = 1200
 
-print("\nSelect OUTPUT folder for tuning results...")
-output_folder = filedialog.askdirectory(title="Select Output Folder")
-if not output_folder:
-    raise ValueError("No output folder selected")
-print(f"✓ Output folder: {output_folder}")
+# ============================================================
+# PARAMETER GRID
+# ============================================================
 
-# ---------------------------------------------------------------------------
-# Load annotations — select events with verified fish count
-# ---------------------------------------------------------------------------
-annotations_path = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "annotations.json"
-)
-if not os.path.exists(annotations_path):
-    raise FileNotFoundError(f"annotations.json not found at {annotations_path}")
-
-with open(annotations_path, "r") as fh:
-    ann_data = json.load(fh)
-
-annotations = ann_data.get("annotations", {})
-fish_counts = ann_data.get("fish_counts", {})
-
-# Keep only events that are clear_fish and have a numeric count
-gt_events = {}
-for key, label in annotations.items():
-    if label == "clear_fish" and fish_counts.get(key) in ("1", "2"):
-        gt_events[key] = int(fish_counts[key])
-
-print(f"\n✓ Ground-truth events: {len(gt_events)} "
-      f"({sum(v == 1 for v in gt_events.values())} single-fish, "
-      f"{sum(v == 2 for v in gt_events.values())} two-fish)")
-
-# ---------------------------------------------------------------------------
-# Match ground-truth events to files in input folder
-# ---------------------------------------------------------------------------
-eod_files = {
-    os.path.basename(f).replace("_eod_table.csv", ""): f
-    for f in glob.glob(os.path.join(input_folder, "*_eod_table.csv"))
+GRID = {
+    'waveform_target_length':       [150, 300],
+    'crop_factor':                  [4, 7],
+    'min_ipi_s':                    [0.01, 0.1],
+    'max_track_gap_s':              [2, 5, 10],
+    'max_location_jump_per_s':      [100, 200, 400],
+    'knn_percentile':               [70, 80, 90],
+    'min_shape_eps':                [0.2, 0.4, 0.6],
+    'fft_artifact_threshold':       [0.5, 0.75, 0.9],
+    'location_tolerance':           [5, 10, 20],
+    'ipi_tolerance_fraction':       [0.2, 0.4, 0.6],
+    'ipi_tolerance_min_s':          [0.01, 0.05, 0.1],
+    'pass1_new_frag_cost':          [1.0, 2.0, 4.0],
+    'pass2_max_gap_s':              [1.0, 2.0, 4.0],
+    'pass2_waveform_weight':        [0.2, 0.4, 0.8],
+    'pass2_spatial_weight':         [0.2, 0.4, 0.8],
+    'pass2_cost_threshold':         [1.0, 2.0, 4.0],
+    'pass2_max_iterations':         [2, 4, 6],
+    'pass2_overlap_wf_threshold':   [0.2, 0.4, 0.6],
+    'pass2_overlap_min_s':          [0.05, 0.1, 0.2],
+    'pass2_overlap_max_iterations': [2, 4, 6],
+    'width_min_separation_us':      [15.0, 30.0],
 }
 
-matched = []
-for event_key, gt_count in gt_events.items():
-    if event_key not in eod_files:
-        continue
-    eod_file = eod_files[event_key]
-    waveform_base = os.path.join(input_folder, f"{event_key}_waveforms")
-    audio_file = os.path.join(input_folder, f"{event_key}.wav")
-    if os.path.exists(waveform_base + "_concatenated.npz") and os.path.exists(audio_file):
-        matched.append({
-            "event_key": event_key,
-            "gt_fish_count": gt_count,
-            "eod_file": eod_file,
-            "waveform_base": waveform_base,
-        })
+# Valid (location_weight, ipi_weight, waveform_weight) triplets summing to 1.0
+# from candidate values [0.2, 0.4, 0.6]
+_w = [0.2, 0.4, 0.6]
+WEIGHT_TRIPLETS = [
+    (lw, iw, ww) for lw in _w for iw in _w for ww in _w
+    if abs(lw + iw + ww - 1.0) < 1e-9
+]
 
-if not matched:
-    raise ValueError("No annotated events with matching files found in input folder")
+# ============================================================
+# WORKER GLOBALS — set once per worker process via initializer
+# ============================================================
 
-print(f"✓ Matched {len(matched)} annotated events to files")
-for m in matched:
-    print(f"  - {m['event_key']} (gt={m['gt_fish_count']} fish)")
+_worker_events_data = None
 
-# ---------------------------------------------------------------------------
-# Fixed tracking parameters (not tuned)
-# ---------------------------------------------------------------------------
-waveform_target_length = 150
-min_ipi_s = 0.002
-max_track_gap_s = 2.0
-max_location_jump_per_s = 200.0
-location_tolerance = 20.0
-ipi_tolerance_min_s = 0.05
-n_recent_for_ipi = 8
-shape_dbscan_min_samples = 5
-dbscan_max_direct = 3000
-dbscan_sample_size = 2000
-pass2_max_gap_s = 2.0
-pass2_waveform_weight = 0.8
-pass2_spatial_weight = 0.2
-pass2_max_iterations = 3
-pass2_max_frags = 600
-min_track_pulses = 15
-min_track_duration_s = 0.5
-width_min_separation_us = 15
-debug_pass1 = False
 
-# ---------------------------------------------------------------------------
-# Parameter grid (tuned parameters)
-# ---------------------------------------------------------------------------
-param_grid = {
-    "shape_dbscan_eps":      [0.2, 0.3, 0.4],
-    "ipi_tolerance_fraction": [0.2, 0.4, 0.6],
-    "pass1_cost_threshold":  [5.0, 10.0, 20.0],
-    "location_weight":       [0.1, 0.3, 0.5],   # ipi_weight = 1 - location_weight
-    "pass2_cost_threshold":  [2.0, 4.0, 8.0],
-}
+def _worker_init(events_data):
+    global _worker_events_data
+    _worker_events_data = events_data
 
-param_keys = list(param_grid.keys())
-param_combos = list(itertools.product(*[param_grid[k] for k in param_keys]))
-print(f"\n✓ Parameter combinations: {len(param_combos)}")
 
-# ---------------------------------------------------------------------------
-# Pre-load and normalize all matched events once (expensive; do it once)
-# ---------------------------------------------------------------------------
-print("\nPre-loading event data...")
-event_cache = {}
-for m in matched:
-    key = m["event_key"]
-    eod_data = pd.read_csv(m["eod_file"])
-    eod_data["timestamp"] = pd.to_datetime(eod_data["timestamp"])
-    eod_data = eod_data.sort_values("timestamp")
-    original_indices = eod_data.index.tolist()
-    eod_data.reset_index(drop=True, inplace=True)
+# ============================================================
+# TRACKING FUNCTION — one event, one parameter set
+# No prints, no plots, no saves. Returns n_fish after pruning.
+# ============================================================
 
-    waveforms_raw = load_waveforms(m["waveform_base"], format="npz", length="variable")
-    waveforms_raw = [waveforms_raw[i] for i in original_indices]
+def _track_event(ev, p):
+    wt = p['waveform_target_length']
+    cf = p['crop_factor']
+    wf_l2, wf_l2_p2 = ev['pre_normalized'][(wt, cf)]
 
-    if len(waveforms_raw) != len(eod_data):
-        print(f"  ⚠ Skipping {key}: waveform/table mismatch")
-        continue
+    eod_data = pd.DataFrame({
+        'timestamp':      pd.to_datetime(ev['timestamps_ns']),
+        'pulse_location': ev['pulse_locations'],
+    })
+    eod_data['fragment_id'] = -1
+    eod_data['shape_class'] = -1
+    eod_data['shape_source'] = ''
+    eod_data['width_class']  = 0
 
-    normalized_waveforms = normalize_waveforms(
-        waveforms_raw,
-        snippet_p1_idc=eod_data["snippet_p1_idx"].values,
-        snippet_p2_idc=eod_data["snippet_p2_idx"].values,
-        method="p1_unity",
-        crop_and_interpolate=True,
-        crop_factor=4,
-        target_length=waveform_target_length,
-    )
-    normalized_waveforms = np.array(normalized_waveforms)
-    norms = np.linalg.norm(normalized_waveforms, axis=1, keepdims=True)
-    norms[norms == 0] = 1.0
-    waveforms_l2 = normalized_waveforms / norms
-    del normalized_waveforms, norms
+    widths   = ev['widths']
+    step_us  = ev['step_us']
+    n_pulses = len(eod_data)
 
-    event_cache[key] = {
-        "eod_data": eod_data,
-        "waveforms_l2": waveforms_l2,
-        "gt_fish_count": m["gt_fish_count"],
-    }
-    print(f"  ✓ {key}: {len(eod_data)} pulses loaded")
+    # Step 2a: Width-based pre-sorting
+    width_range  = np.linspace(widths.min(), widths.max(), 1000)
+    width_std    = np.std(widths)
+    kde_bw       = max(2.0 * step_us, 1.0) / width_std if width_std > 0 else 0.5
+    kde_vals     = gaussian_kde(widths, bw_method=kde_bw)(width_range)
+    bin_width_us = width_range[1] - width_range[0]
+    min_pk_dist  = int(p['width_min_separation_us'] / bin_width_us) if bin_width_us > 0 else 1
+    peaks_idx, _ = find_peaks(kde_vals, distance=max(1, min_pk_dist),
+                              prominence=0.01 * kde_vals.max())
+    if len(peaks_idx) > 1:
+        peak_pos = width_range[peaks_idx]
+        pwc      = np.argmin(np.abs(widths[:, None] - peak_pos[None, :]), axis=1)
+        n_wc     = len(peak_pos)
+    else:
+        pwc  = np.zeros(n_pulses, dtype=int)
+        n_wc = 1
+    eod_data['width_class'] = pwc
 
-print(f"\n✓ {len(event_cache)} events ready for tuning")
+    # Step 2b: Shape clustering within each width class
+    n_fft_total   = wt // 2 + 1
+    n_fft_low     = max(1, n_fft_total // 5)
+    next_shape_id = 0
 
-# ---------------------------------------------------------------------------
-# Grid search loop
-# ---------------------------------------------------------------------------
-results = []
-n_total = len(event_cache) * len(param_combos)
-run_idx = 0
+    for wc in range(n_wc):
+        wc_mask      = pwc == wc
+        wc_indices   = np.where(wc_mask)[0]
+        n_wc_count   = len(wc_indices)
+        wc_wf_p1     = wf_l2[wc_indices]
+        wc_wf_p2     = wf_l2_p2[wc_indices]
 
-for combo in param_combos:
-    params = dict(zip(param_keys, combo))
-    shape_dbscan_eps = params["shape_dbscan_eps"]
-    ipi_tolerance_fraction = params["ipi_tolerance_fraction"]
-    pass1_cost_threshold = params["pass1_cost_threshold"]
-    location_weight = params["location_weight"]
-    ipi_weight = 1.0 - location_weight
-    pass2_cost_threshold = params["pass2_cost_threshold"]
+        mean_wf  = wc_wf_p1.mean(axis=0)
+        mean_wf -= np.mean(mean_wf)
+        fft_power = np.abs(np.fft.rfft(mean_wf))
+        lfr       = fft_power[:n_fft_low].sum() / (fft_power.sum() + 1e-12)
+        if lfr < p['fft_artifact_threshold']:
+            for k, pidx in enumerate(wc_indices):
+                eod_data.at[pidx, 'shape_class']  = next_shape_id + k
+                eod_data.at[pidx, 'shape_source'] = 'artifact'
+            next_shape_id += n_wc_count
+            continue
 
-    for event_key, cache in event_cache.items():
-        run_idx += 1
-        if run_idx % 500 == 0:
-            print(f"  Progress: {run_idx}/{n_total}")
-
-        eod_data = cache["eod_data"].copy()
-        waveforms_l2 = cache["waveforms_l2"]
-        gt_fish_count = cache["gt_fish_count"]
-        widths = eod_data["eod_width_us"].values
-
-        # --- Width-based pre-sorting ---
-        width_range = np.linspace(widths.min(), widths.max(), 1000)
-        kde = gaussian_kde(widths, bw_method=0.1)
-        kde_vals = kde(width_range)
-        min_peak_distance_bins = int(width_min_separation_us / (width_range[1] - width_range[0]))
-        peaks_idx, _ = find_peaks(kde_vals, distance=max(1, min_peak_distance_bins),
-                                   prominence=0.05 * kde_vals.max())
-        if len(peaks_idx) > 1:
-            peak_positions = width_range[peaks_idx]
-            pulse_width_class = np.argmin(np.abs(widths[:, None] - peak_positions[None, :]), axis=1)
-            n_width_classes = len(peak_positions)
+        if n_wc_count > _DBSCAN_MAX_DIRECT:
+            rng        = np.random.default_rng(42)
+            sample_pos = rng.choice(n_wc_count, size=min(_DBSCAN_SAMPLE_SIZE, n_wc_count),
+                                    replace=False)
         else:
-            pulse_width_class = np.zeros(len(eod_data), dtype=int)
-            n_width_classes = 1
-        eod_data["width_class"] = pulse_width_class
+            sample_pos = np.arange(n_wc_count)
+        n_sample = len(sample_pos)
 
-        # --- Shape clustering with subsampled DBSCAN ---
-        eod_data["shape_class"] = -1
-        next_shape_id = 0
-        for wc in range(n_width_classes):
-            wc_mask = pulse_width_class == wc
-            wc_indices = np.where(wc_mask)[0]
-            wc_waveforms = waveforms_l2[wc_indices]
-            n_wc = len(wc_indices)
-            if n_wc > dbscan_max_direct:
-                rng = np.random.default_rng(seed=42)
-                sample_pos = rng.choice(n_wc, size=min(dbscan_sample_size, n_wc), replace=False)
-                sample_wf = wc_waveforms[sample_pos]
-                db = DBSCAN(eps=shape_dbscan_eps, min_samples=shape_dbscan_min_samples, metric="euclidean")
-                sample_labels = db.fit_predict(sample_wf)
-                cluster_ids = np.unique(sample_labels[sample_labels >= 0])
-                n_clusters = len(cluster_ids)
-                if n_clusters > 0:
-                    centroids = np.array([sample_wf[sample_labels == cid].mean(axis=0) for cid in cluster_ids])
-                else:
-                    centroids = np.empty((0, wc_waveforms.shape[1]))
-                db_labels = np.full(n_wc, -1, dtype=int)
-                for sp, sl in zip(sample_pos, sample_labels):
-                    db_labels[sp] = sl
-                unassigned_mask_wc = np.ones(n_wc, dtype=bool)
-                unassigned_mask_wc[sample_pos] = False
-                if n_clusters > 0 and unassigned_mask_wc.any():
-                    unassigned_wf = wc_waveforms[unassigned_mask_wc]
-                    dists = np.linalg.norm(unassigned_wf[:, None, :] - centroids[None, :, :], axis=2)
-                    db_labels[unassigned_mask_wc] = cluster_ids[np.argmin(dists, axis=1)]
+        if n_sample < 2:
+            for pidx in wc_indices:
+                eod_data.at[pidx, 'shape_class']  = next_shape_id
+                eod_data.at[pidx, 'shape_source'] = 'p1'
+            next_shape_id += 1
+            continue
+
+        n_pca   = min(5, n_sample - 1, wt)
+        min_pts = max(_DBSCAN_MIN_SAMPLES, int(n_sample * 0.01))
+        knn_col = min(min_pts, n_sample - 1)
+
+        pca_p1  = PCA(n_components=n_pca)
+        fp1     = pca_p1.fit_transform(wc_wf_p1[sample_pos])
+        knn_p1  = np.sort(pairwise_distances(fp1), axis=1)
+        eps_p1  = max(float(np.percentile(knn_p1[:, knn_col], p['knn_percentile'])),
+                      p['min_shape_eps'])
+
+        pca_p2  = PCA(n_components=n_pca)
+        fp2     = pca_p2.fit_transform(wc_wf_p2[sample_pos])
+        knn_p2  = np.sort(pairwise_distances(fp2), axis=1)
+        eps_p2  = max(float(np.percentile(knn_p2[:, knn_col], p['knn_percentile'])),
+                      p['min_shape_eps'])
+
+        sl_p1   = DBSCAN(eps=eps_p1, min_samples=min_pts).fit_predict(fp1)
+        sl_p2   = DBSCAN(eps=eps_p2, min_samples=min_pts).fit_predict(fp2)
+        cids_p1 = np.unique(sl_p1[sl_p1 >= 0])
+        cids_p2 = np.unique(sl_p2[sl_p2 >= 0])
+
+        if n_wc_count > _DBSCAN_MAX_DIRECT:
+            lbl_p1 = np.full(n_wc_count, -1, dtype=int)
+            lbl_p2 = np.full(n_wc_count, -1, dtype=int)
+            for sp_i, sp_l in zip(sample_pos, sl_p1):
+                lbl_p1[sp_i] = sp_l
+            for sp_i, sp_l in zip(sample_pos, sl_p2):
+                lbl_p2[sp_i] = sp_l
+            unassigned = np.ones(n_wc_count, dtype=bool)
+            unassigned[sample_pos] = False
+            if len(cids_p1) > 0 and unassigned.any():
+                cents_p1 = np.array([fp1[sl_p1 == c].mean(axis=0) for c in cids_p1])
+                d_p1     = np.linalg.norm(
+                    pca_p1.transform(wc_wf_p1[unassigned])[:, None, :] - cents_p1[None, :, :], axis=2)
+                lbl_p1[unassigned] = cids_p1[np.argmin(d_p1, axis=1)]
+            if len(cids_p2) > 0 and unassigned.any():
+                cents_p2 = np.array([fp2[sl_p2 == c].mean(axis=0) for c in cids_p2])
+                d_p2     = np.linalg.norm(
+                    pca_p2.transform(wc_wf_p2[unassigned])[:, None, :] - cents_p2[None, :, :], axis=2)
+                lbl_p2[unassigned] = cids_p2[np.argmin(d_p2, axis=1)]
+        else:
+            lbl_p1 = sl_p1
+            lbl_p2 = sl_p2
+
+        final_labels  = np.full(n_wc_count, -1, dtype=int)
+        source_labels = np.full(n_wc_count, '', dtype=object)
+        done_p1 = set()
+        done_p2 = set()
+        sz_p1   = {c: int((lbl_p1 == c).sum()) for c in cids_p1}
+        sz_p2   = {c: int((lbl_p2 == c).sum()) for c in cids_p2}
+        next_mid = 0
+
+        while True:
+            av1 = {c: sz_p1[c] for c in cids_p1 if c not in done_p1}
+            av2 = {c: sz_p2[c] for c in cids_p2 if c not in done_p2}
+            if not av1 and not av2:
+                break
+            bc1 = max(av1, key=av1.get) if av1 else None
+            bc2 = max(av2, key=av2.get) if av2 else None
+            s1  = av1[bc1] if bc1 is not None else 0
+            s2  = av2[bc2] if bc2 is not None else 0
+            if s1 >= s2:
+                chosen = lbl_p1 == bc1
+                final_labels[chosen]  = next_mid
+                source_labels[chosen] = 'p1'
+                for c2 in np.unique(lbl_p2[chosen]):
+                    if c2 >= 0:
+                        done_p2.add(c2)
+                done_p1.add(bc1)
             else:
-                db = DBSCAN(eps=shape_dbscan_eps, min_samples=shape_dbscan_min_samples, metric="euclidean")
-                db_labels = db.fit_predict(wc_waveforms)
-                n_clusters = (np.unique(db_labels[db_labels >= 0])).size
-            for i, pulse_idx in enumerate(wc_indices):
-                if db_labels[i] >= 0:
-                    eod_data.loc[pulse_idx, "shape_class"] = next_shape_id + db_labels[i]
-                else:
-                    eod_data.loc[pulse_idx, "shape_class"] = next_shape_id + n_clusters + i
-            next_shape_id += n_clusters + len(wc_indices)
+                chosen = lbl_p2 == bc2
+                final_labels[chosen]  = next_mid
+                source_labels[chosen] = 'p2'
+                for c1 in np.unique(lbl_p1[chosen]):
+                    if c1 >= 0:
+                        done_p1.add(c1)
+                done_p2.add(bc2)
+            next_mid += 1
 
-        shape_groups = (
-            eod_data[["width_class", "shape_class"]]
-            .drop_duplicates()
-            .sort_values(["width_class", "shape_class"])
-            .values.tolist()
-        )
+        n_clusters = next_mid
+        if n_clusters > 0:
+            noise_mask = final_labels == -1
+            if noise_mask.any():
+                m_cents = np.array([wc_wf_p1[final_labels == c].mean(axis=0)
+                                    for c in range(n_clusters)])
+                d_noise = np.linalg.norm(
+                    wc_wf_p1[noise_mask][:, None, :] - m_cents[None, :, :], axis=2)
+                final_labels[noise_mask]  = np.argmin(d_noise, axis=1)
+                source_labels[noise_mask] = 'noise'
+        else:
+            final_labels[:] = 0
+            source_labels[:] = 'noise'
+            n_clusters = 1
 
-        # --- Pass 1: sequential assignment ---
-        eod_data["fragment_id"] = -1
-        next_fragment_id = 0
-        fragments = {}
+        for k, pidx in enumerate(wc_indices):
+            eod_data.at[pidx, 'shape_class']  = next_shape_id + final_labels[k]
+            eod_data.at[pidx, 'shape_source'] = source_labels[k]
+        next_shape_id += n_clusters
 
-        for wc, sc in shape_groups:
-            group_mask = (eod_data["width_class"] == wc) & (eod_data["shape_class"] == sc)
-            group_indices = np.where(group_mask)[0]
-            for pulse_idx in group_indices:
-                pulse_ts = eod_data.loc[pulse_idx, "timestamp"]
-                pulse_loc = eod_data.loc[pulse_idx, "pulse_location"]
-                candidate_ids = []
-                for fid, f in fragments.items():
-                    if f["shape_class"] != sc or f["width_class"] != wc:
-                        continue
-                    dt = (pulse_ts - f["last_timestamp"]).total_seconds()
-                    if dt > max_track_gap_s or dt < min_ipi_s:
-                        continue
-                    if abs(pulse_loc - f["last_location"]) > max_location_jump_per_s * max(dt, 0.001):
-                        continue
-                    candidate_ids.append(fid)
+    shape_groups = (
+        eod_data[['width_class', 'shape_class']]
+        .drop_duplicates()
+        .sort_values(['width_class', 'shape_class'])
+        .values.tolist()
+    )
 
-                if not candidate_ids:
-                    fragments[next_fragment_id] = {
-                        "history": [pulse_idx], "ipi_history": [],
-                        "last_timestamp": pulse_ts, "last_location": pulse_loc,
-                        "width_class": wc, "shape_class": sc,
-                    }
-                    eod_data.loc[pulse_idx, "fragment_id"] = next_fragment_id
-                    next_fragment_id += 1
+    # Step 3: Pass 1 — sequential assignment within shape groups
+    fragments = {}
+    next_fid  = 0
+    loc_tol   = p['location_tolerance']
+    ipi_tf    = p['ipi_tolerance_fraction']
+    ipi_tmin  = p['ipi_tolerance_min_s']
+    lw        = p['location_weight']
+    iw        = p['ipi_weight']
+    ww        = p['waveform_weight']
+    max_gap   = p['max_track_gap_s']
+    min_ipi   = p['min_ipi_s']
+    max_jps   = p['max_location_jump_per_s']
+    new_cost  = p['pass1_new_frag_cost']
+
+    for wc, sc in shape_groups:
+        grp_mask    = (eod_data['width_class'] == wc) & (eod_data['shape_class'] == sc)
+        grp_indices = np.where(grp_mask)[0]
+
+        for pulse_idx in grp_indices:
+            pulse_ts  = eod_data.at[pulse_idx, 'timestamp']
+            pulse_loc = eod_data.at[pulse_idx, 'pulse_location']
+
+            candidate_ids = []
+            for fid, f in fragments.items():
+                if f['shape_class'] != sc or f['width_class'] != wc:
                     continue
-
-                if len(candidate_ids) == 1:
-                    best_fid = candidate_ids[0]
-                    f = fragments[best_fid]
-                    dt = (pulse_ts - f["last_timestamp"]).total_seconds()
-                    f["ipi_history"].append(dt)
-                    f["history"].append(pulse_idx)
-                    f["last_timestamp"] = pulse_ts
-                    f["last_location"] = pulse_loc
-                    eod_data.loc[pulse_idx, "fragment_id"] = best_fid
+                dt = (pulse_ts - f['last_timestamp']).total_seconds()
+                if dt > max_gap or dt < min_ipi:
                     continue
-
-                best_fid = None
-                best_cost = np.inf
-                for fid in candidate_ids:
-                    f = fragments[fid]
-                    dt = (pulse_ts - f["last_timestamp"]).total_seconds()
-                    if len(f["history"]) >= 2:
-                        prev_idx = f["history"][-2]
-                        dt_prev = (f["last_timestamp"] - eod_data.loc[prev_idx, "timestamp"]).total_seconds()
-                        velocity = (f["last_location"] - eod_data.loc[prev_idx, "pulse_location"]) / max(dt_prev, 1e-6)
-                        predicted_loc = f["last_location"] + velocity * dt
-                    else:
-                        predicted_loc = f["last_location"]
-                    loc_cost = abs(pulse_loc - predicted_loc) / location_tolerance
-                    if len(f["ipi_history"]) >= 1:
-                        recent_ipis = f["ipi_history"][-n_recent_for_ipi:]
-                        median_ipi = np.median(recent_ipis)
-                        ipi_tol = max(median_ipi * ipi_tolerance_fraction, ipi_tolerance_min_s)
-                        ipi_cost = abs(dt - median_ipi) / ipi_tol
-                    else:
-                        ipi_cost = 0.0
-                    cost = location_weight * loc_cost + ipi_weight * ipi_cost
-                    if cost < best_cost:
-                        best_cost = cost
-                        best_fid = fid
-
-                if best_cost < pass1_cost_threshold:
-                    f = fragments[best_fid]
-                    dt = (pulse_ts - f["last_timestamp"]).total_seconds()
-                    f["ipi_history"].append(dt)
-                    f["history"].append(pulse_idx)
-                    f["last_timestamp"] = pulse_ts
-                    f["last_location"] = pulse_loc
-                    eod_data.loc[pulse_idx, "fragment_id"] = best_fid
-                else:
-                    fragments[next_fragment_id] = {
-                        "history": [pulse_idx], "ipi_history": [],
-                        "last_timestamp": pulse_ts, "last_location": pulse_loc,
-                        "width_class": wc, "shape_class": sc,
-                    }
-                    eod_data.loc[pulse_idx, "fragment_id"] = next_fragment_id
-                    next_fragment_id += 1
-
-        # --- Pass 2: fragment stitching ---
-        for stitch_iter in range(pass2_max_iterations):
-            frag_ids = list(fragments.keys())
-            n_frags = len(frag_ids)
-            if n_frags < 2:
-                break
-            if n_frags > pass2_max_frags:
-                break
-
-            frag_start_ts = {fid: eod_data.loc[f["history"][0], "timestamp"] for fid, f in fragments.items()}
-            frag_end_ts = {fid: eod_data.loc[f["history"][-1], "timestamp"] for fid, f in fragments.items()}
-            frag_start_loc = {fid: eod_data.loc[f["history"][0], "pulse_location"] for fid, f in fragments.items()}
-            frag_end_loc = {fid: eod_data.loc[f["history"][-1], "pulse_location"] for fid, f in fragments.items()}
-            frag_start_wf = {fid: np.median(waveforms_l2[f["history"][:5]], axis=0) for fid, f in fragments.items()}
-            frag_end_wf = {fid: np.median(waveforms_l2[f["history"][-5:]], axis=0) for fid, f in fragments.items()}
-
-            INF = 1e6
-            cost_matrix = np.full((n_frags, n_frags), INF)
-            for i, fid_end in enumerate(frag_ids):
-                for j, fid_start in enumerate(frag_ids):
-                    if fid_end == fid_start:
-                        continue
-                    gap = (frag_start_ts[fid_start] - frag_end_ts[fid_end]).total_seconds()
-                    if gap <= 0 or gap > pass2_max_gap_s:
-                        continue
-                    if fragments[fid_end]["width_class"] != fragments[fid_start]["width_class"]:
-                        continue
-                    if fragments[fid_end]["shape_class"] != fragments[fid_start]["shape_class"]:
-                        continue
-                    loc_diff = abs(frag_start_loc[fid_start] - frag_end_loc[fid_end])
-                    if loc_diff > 3.0 * gap:
-                        continue
-                    wf_cost = np.linalg.norm(frag_end_wf[fid_end] - frag_start_wf[fid_start])
-                    spatial_cost = loc_diff / max(location_tolerance, 0.01)
-                    cost_matrix[i, j] = pass2_waveform_weight * wf_cost + pass2_spatial_weight * spatial_cost
-
-            row_ind, col_ind = linear_sum_assignment(cost_matrix)
-            merges = [(frag_ids[r], frag_ids[c]) for r, c in zip(row_ind, col_ind)
-                      if cost_matrix[r, c] < pass2_cost_threshold]
-            if not merges:
-                break
-
-            consumed = set()
-            for fid_end, fid_start in merges:
-                if fid_end in consumed or fid_start in consumed:
+                if abs(pulse_loc - f['last_location']) > max_jps * max(dt, 0.001):
                     continue
-                f_end = fragments[fid_end]
-                f_start = fragments[fid_start]
-                gap = (frag_start_ts[fid_start] - frag_end_ts[fid_end]).total_seconds()
-                f_end["history"].extend(f_start["history"])
-                f_end["ipi_history"].extend(f_start["ipi_history"])
-                f_end["ipi_history"].append(gap)
-                f_end["last_timestamp"] = f_start["last_timestamp"]
-                f_end["last_location"] = f_start["last_location"]
-                for pidx in f_start["history"]:
-                    eod_data.loc[pidx, "fragment_id"] = fid_end
-                del fragments[fid_start]
-                consumed.add(fid_start)
-                consumed.add(fid_end)
+                candidate_ids.append(fid)
 
-        # --- Pruning ---
-        fids_to_remove = []
-        for fid, f in fragments.items():
-            n_pulses = len(f["history"])
-            duration = (eod_data.loc[f["history"][-1], "timestamp"] -
-                        eod_data.loc[f["history"][0], "timestamp"]).total_seconds()
-            if n_pulses < min_track_pulses or duration < min_track_duration_s:
-                fids_to_remove.append(fid)
-        for fid in fids_to_remove:
-            del fragments[fid]
-
-        n_fish_tracked = len(fragments)
-        assigned = sum(len(f["history"]) for f in fragments.values())
-        assignment_rate = assigned / len(eod_data) if len(eod_data) > 0 else 0.0
-        fragmentation = n_fish_tracked / gt_fish_count if gt_fish_count > 0 else np.nan
-        correct = int(n_fish_tracked == gt_fish_count)
-        over_fragmented = int(n_fish_tracked > gt_fish_count)
-        merged = int(n_fish_tracked < gt_fish_count)
-
-        row = {
-            "event_key": event_key,
-            "gt_fish_count": gt_fish_count,
-            "n_fish_tracked": n_fish_tracked,
-            "correct": correct,
-            "over_fragmented": over_fragmented,
-            "merged": merged,
-            "fragmentation": fragmentation,
-            "assignment_rate": assignment_rate,
-        }
-        row.update(params)
-        results.append(row)
-
-print(f"\n✓ Grid search complete: {len(results)} runs")
-
-results_df = pd.DataFrame(results)
-results_path = os.path.join(output_folder, "parameter_tuning_results.csv")
-results_df.to_csv(results_path, index=False)
-print(f"✓ Saved full results: {os.path.basename(results_path)}")
-
-# ---------------------------------------------------------------------------
-# Summary: aggregate by parameter combination
-# ---------------------------------------------------------------------------
-summary_cols = param_keys + ["correct", "over_fragmented", "merged", "fragmentation", "assignment_rate"]
-summary = results_df.groupby(param_keys)[["correct", "over_fragmented", "merged",
-                                           "fragmentation", "assignment_rate"]].mean().reset_index()
-# Also compute separate mean_correct for each fish count class
-for gt_count in [1, 2]:
-    sub = results_df[results_df["gt_fish_count"] == gt_count].groupby(param_keys)["correct"].mean().reset_index()
-    sub = sub.rename(columns={"correct": f"correct_gt{gt_count}"})
-    summary = summary.merge(sub, on=param_keys, how="left")
-
-summary = summary.sort_values("correct", ascending=False)
-summary_path = os.path.join(output_folder, "parameter_tuning_summary.csv")
-summary.to_csv(summary_path, index=False)
-print(f"✓ Saved summary: {os.path.basename(summary_path)}")
-
-print("\n--- Top 10 parameter sets by mean correct (all events) ---")
-print(summary.head(10).to_string(index=False))
-
-print("\n--- Top 10 by correct on 2-fish events ---")
-if "correct_gt2" in summary.columns:
-    print(summary.sort_values("correct_gt2", ascending=False).head(10).to_string(index=False))
-
-# ---------------------------------------------------------------------------
-# Heatmaps: 2D slices through parameter space (fixing remaining params at median)
-# Metric shown: mean correct across all events
-# ---------------------------------------------------------------------------
-# 6 pairs from 5 parameters: use middle value of each non-plotted parameter
-param_middle = {k: sorted(param_grid[k])[len(param_grid[k]) // 2] for k in param_keys}
-pair_list = list(itertools.combinations(param_keys, 2))  # 10 pairs total, show first 9 in 3x3
-
-fig, axes = plt.subplots(3, 3, figsize=(14, 12))
-fig.suptitle("Parameter tuning: mean correct (all events)\n"
-             "(each panel: other params fixed at middle value)", fontsize=10)
-
-for ax_idx, (pk1, pk2) in enumerate(pair_list[:9]):
-    ax = axes[ax_idx // 3][ax_idx % 3]
-    # Filter rows where all other params are at their middle value
-    mask = pd.Series([True] * len(summary))
-    for pk in param_keys:
-        if pk in (pk1, pk2):
-            continue
-        mask = mask & (summary[pk] == param_middle[pk])
-    sub = summary[mask.values]
-    if sub.empty:
-        ax.set_visible(False)
-        continue
-    pivot = sub.pivot_table(index=pk1, columns=pk2, values="correct", aggfunc="mean")
-    im = ax.imshow(pivot.values, aspect="auto", cmap="RdYlGn", vmin=0, vmax=1,
-                   origin="lower")
-    ax.set_xticks(range(len(pivot.columns)))
-    ax.set_xticklabels([f"{v:.2g}" for v in pivot.columns], fontsize=7)
-    ax.set_yticks(range(len(pivot.index)))
-    ax.set_yticklabels([f"{v:.2g}" for v in pivot.index], fontsize=7)
-    ax.set_xlabel(pk2, fontsize=8)
-    ax.set_ylabel(pk1, fontsize=8)
-    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    for r in range(len(pivot.index)):
-        for c in range(len(pivot.columns)):
-            val = pivot.values[r, c]
-            if not np.isnan(val):
-                ax.text(c, r, f"{val:.2f}", ha="center", va="center", fontsize=6)
-
-plt.tight_layout()
-heatmap_path = os.path.join(output_folder, "parameter_tuning_heatmaps.png")
-plt.savefig(heatmap_path, dpi=120)
-plt.close()
-print(f"\n✓ Saved heatmaps: {os.path.basename(heatmap_path)}")
-
-# Separate heatmap for 2-fish events only (most diagnostic for multi-fish tracking)
-if "correct_gt2" in summary.columns and summary["correct_gt2"].notna().any():
-    fig2, axes2 = plt.subplots(3, 3, figsize=(14, 12))
-    fig2.suptitle("Parameter tuning: mean correct on 2-FISH events\n"
-                  "(each panel: other params fixed at middle value)", fontsize=10)
-    for ax_idx, (pk1, pk2) in enumerate(pair_list[:9]):
-        ax = axes2[ax_idx // 3][ax_idx % 3]
-        mask = pd.Series([True] * len(summary))
-        for pk in param_keys:
-            if pk in (pk1, pk2):
+            if not candidate_ids:
+                fragments[next_fid] = {
+                    'history': [pulse_idx], 'ipi_history': [],
+                    'last_timestamp': pulse_ts, 'last_location': pulse_loc,
+                    'width_class': wc, 'shape_class': sc,
+                    'waveform_signature': wf_l2[pulse_idx].copy(),
+                }
+                eod_data.at[pulse_idx, 'fragment_id'] = next_fid
+                next_fid += 1
                 continue
-            mask = mask & (summary[pk] == param_middle[pk])
-        sub = summary[mask.values]
-        if sub.empty or sub["correct_gt2"].isna().all():
-            ax.set_visible(False)
-            continue
-        pivot = sub.pivot_table(index=pk1, columns=pk2, values="correct_gt2", aggfunc="mean")
-        im = ax.imshow(pivot.values, aspect="auto", cmap="RdYlGn", vmin=0, vmax=1, origin="lower")
-        ax.set_xticks(range(len(pivot.columns)))
-        ax.set_xticklabels([f"{v:.2g}" for v in pivot.columns], fontsize=7)
-        ax.set_yticks(range(len(pivot.index)))
-        ax.set_yticklabels([f"{v:.2g}" for v in pivot.index], fontsize=7)
-        ax.set_xlabel(pk2, fontsize=8)
-        ax.set_ylabel(pk1, fontsize=8)
-        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        for r in range(len(pivot.index)):
-            for c in range(len(pivot.columns)):
-                val = pivot.values[r, c]
-                if not np.isnan(val):
-                    ax.text(c, r, f"{val:.2f}", ha="center", va="center", fontsize=6)
-    plt.tight_layout()
-    heatmap2_path = os.path.join(output_folder, "parameter_tuning_heatmaps_2fish.png")
-    plt.savefig(heatmap2_path, dpi=120)
-    plt.close()
-    print(f"✓ Saved 2-fish heatmaps: {os.path.basename(heatmap2_path)}")
 
-print("\n" + "=" * 70)
-print("TUNING COMPLETE")
-print("=" * 70)
+            best_fid  = None
+            best_cost = np.inf
+            for fid in candidate_ids:
+                f  = fragments[fid]
+                dt = (pulse_ts - f['last_timestamp']).total_seconds()
+                if len(f['history']) >= 2:
+                    prev_idx = f['history'][-2]
+                    dt_prev  = (f['last_timestamp'] -
+                                eod_data.at[prev_idx, 'timestamp']).total_seconds()
+                    vel      = ((f['last_location'] - eod_data.at[prev_idx, 'pulse_location'])
+                                / max(dt_prev, 1e-6))
+                    pred_loc = f['last_location'] + vel * dt
+                else:
+                    pred_loc = f['last_location']
+                loc_cost = abs(pulse_loc - pred_loc) / loc_tol
+                if f['ipi_history']:
+                    med_ipi  = np.median(f['ipi_history'][-_N_RECENT_IPI:])
+                    ipi_tol  = max(med_ipi * ipi_tf, ipi_tmin)
+                    ipi_cost = abs(dt - med_ipi) / ipi_tol
+                else:
+                    ipi_cost = 0.0
+                wf_cost = float(np.linalg.norm(wf_l2[pulse_idx] - f['waveform_signature']))
+                cost    = lw * loc_cost + iw * ipi_cost + ww * wf_cost
+                if cost < best_cost:
+                    best_cost = cost
+                    best_fid  = fid
+
+            if best_cost < new_cost:
+                f = fragments[best_fid]
+                dt = (pulse_ts - f['last_timestamp']).total_seconds()
+                f['ipi_history'].append(dt)
+                f['history'].append(pulse_idx)
+                f['last_timestamp'] = pulse_ts
+                f['last_location']  = pulse_loc
+                f['waveform_signature'] = np.median(wf_l2[f['history'][-10:]], axis=0)
+                eod_data.at[pulse_idx, 'fragment_id'] = best_fid
+            else:
+                fragments[next_fid] = {
+                    'history': [pulse_idx], 'ipi_history': [],
+                    'last_timestamp': pulse_ts, 'last_location': pulse_loc,
+                    'width_class': wc, 'shape_class': sc,
+                    'waveform_signature': wf_l2[pulse_idx].copy(),
+                }
+                eod_data.at[pulse_idx, 'fragment_id'] = next_fid
+                next_fid += 1
+
+    # Step 4a: Pass 2a — overlap merge
+    p2_ovlp_wft = p['pass2_overlap_wf_threshold']
+    p2_ovlp_min = p['pass2_overlap_min_s']
+    p2_ovlp_itr = p['pass2_overlap_max_iterations']
+
+    for _ in range(p2_ovlp_itr):
+        frag_ids   = list(fragments.keys())
+        if len(frag_ids) < 2:
+            break
+        f_start_ts = {fid: eod_data.at[f['history'][0],  'timestamp']
+                      for fid, f in fragments.items()}
+        f_end_ts   = {fid: eod_data.at[f['history'][-1], 'timestamp']
+                      for fid, f in fragments.items()}
+        f_med_wf   = {fid: np.median(wf_l2[f['history']], axis=0)
+                      for fid, f in fragments.items()}
+        n_frags    = len(frag_ids)
+
+        candidates = []
+        for i in range(n_frags):
+            for j in range(i + 1, n_frags):
+                fid_a, fid_b = frag_ids[i], frag_ids[j]
+                ovlp_end   = min(f_end_ts[fid_a],   f_end_ts[fid_b])
+                ovlp_start = max(f_start_ts[fid_a], f_start_ts[fid_b])
+                ovlp_s     = ((ovlp_end - ovlp_start).total_seconds()
+                              if ovlp_end > ovlp_start else 0.0)
+                if ovlp_s < p2_ovlp_min:
+                    continue
+                if fragments[fid_a]['width_class'] != fragments[fid_b]['width_class']:
+                    continue
+                wf_dist = float(np.linalg.norm(f_med_wf[fid_a] - f_med_wf[fid_b]))
+                if wf_dist >= p2_ovlp_wft:
+                    continue
+                merged_ts = np.sort([eod_data.at[pidx, 'timestamp'].timestamp()
+                                     for pidx in
+                                     fragments[fid_a]['history'] + fragments[fid_b]['history']])
+                if len(merged_ts) > 1 and np.min(np.diff(merged_ts)) < min_ipi:
+                    continue
+                candidates.append((wf_dist, fid_a, fid_b))
+
+        if not candidates:
+            break
+        candidates.sort(key=lambda x: x[0])
+        consumed = set()
+        n_merged = 0
+        for wf_dist, fid_a, fid_b in candidates:
+            if fid_a in consumed or fid_b in consumed:
+                continue
+            fid_keep   = min(fid_a, fid_b)
+            fid_drop   = max(fid_a, fid_b)
+            merged_raw = sorted(
+                [(eod_data.at[pidx, 'timestamp'], pidx)
+                 for pidx in fragments[fid_keep]['history'] + fragments[fid_drop]['history']],
+                key=lambda x: x[0])
+            s_idxs = [pidx for _, pidx in merged_raw]
+            s_ts   = [ts   for ts, _   in merged_raw]
+            fk     = fragments[fid_keep]
+            fk['history']     = s_idxs
+            fk['ipi_history'] = [(s_ts[k] - s_ts[k - 1]).total_seconds()
+                                 for k in range(1, len(s_ts))]
+            fk['last_timestamp']     = s_ts[-1]
+            fk['last_location']      = eod_data.at[s_idxs[-1], 'pulse_location']
+            fk['waveform_signature'] = np.median(wf_l2[s_idxs[-10:]], axis=0)
+            for pidx in fragments[fid_drop]['history']:
+                eod_data.at[pidx, 'fragment_id'] = fid_keep
+            del fragments[fid_drop]
+            consumed.add(fid_a)
+            consumed.add(fid_b)
+            n_merged += 1
+        if n_merged == 0:
+            break
+
+    # Step 4b: Pass 2b — LAP stitching
+    p2_max_gap = p['pass2_max_gap_s']
+    p2_wfw     = p['pass2_waveform_weight']
+    p2_sw      = p['pass2_spatial_weight']
+    p2_thresh  = p['pass2_cost_threshold']
+    p2_maxiter = p['pass2_max_iterations']
+    INF        = 1e6
+
+    for _ in range(p2_maxiter):
+        frag_ids = list(fragments.keys())
+        n_frags  = len(frag_ids)
+        if n_frags < 2 or n_frags > _PASS2_MAX_FRAGS:
+            break
+        f_start_ts  = {fid: eod_data.at[f['history'][0],  'timestamp']
+                       for fid, f in fragments.items()}
+        f_end_ts    = {fid: eod_data.at[f['history'][-1], 'timestamp']
+                       for fid, f in fragments.items()}
+        f_start_loc = {fid: eod_data.at[f['history'][0],  'pulse_location']
+                       for fid, f in fragments.items()}
+        f_end_loc   = {fid: eod_data.at[f['history'][-1], 'pulse_location']
+                       for fid, f in fragments.items()}
+        f_start_wf  = {fid: np.median(wf_l2[f['history'][:5]],  axis=0)
+                       for fid, f in fragments.items()}
+        f_end_wf    = {fid: np.median(wf_l2[f['history'][-5:]], axis=0)
+                       for fid, f in fragments.items()}
+
+        cost_matrix = np.full((n_frags, n_frags), INF)
+        for i, fid_end in enumerate(frag_ids):
+            for j, fid_start in enumerate(frag_ids):
+                if fid_end == fid_start:
+                    continue
+                gap = (f_start_ts[fid_start] - f_end_ts[fid_end]).total_seconds()
+                if gap <= 0 or gap > p2_max_gap:
+                    continue
+                if fragments[fid_end]['width_class'] != fragments[fid_start]['width_class']:
+                    continue
+                loc_diff = abs(f_start_loc[fid_start] - f_end_loc[fid_end])
+                if loc_diff > max_jps * gap:
+                    continue
+                wf_cost          = float(np.linalg.norm(f_end_wf[fid_end] - f_start_wf[fid_start]))
+                spatial_cost     = loc_diff / max(loc_tol, 0.01)
+                cost_matrix[i, j] = p2_wfw * wf_cost + p2_sw * spatial_cost
+
+        row_ind, col_ind = linear_sum_assignment(cost_matrix)
+        merges = [(frag_ids[r], frag_ids[c]) for r, c in zip(row_ind, col_ind)
+                  if cost_matrix[r, c] < p2_thresh]
+        if not merges:
+            break
+
+        consumed = set()
+        for fid_end, fid_start in merges:
+            if fid_end in consumed or fid_start in consumed:
+                continue
+            f_end    = fragments[fid_end]
+            f_start_f = fragments[fid_start]
+            gap      = (f_start_ts[fid_start] - f_end_ts[fid_end]).total_seconds()
+            f_end['history'].extend(f_start_f['history'])
+            f_end['ipi_history'].extend(f_start_f['ipi_history'])
+            f_end['ipi_history'].append(gap)
+            f_end['last_timestamp']     = f_start_f['last_timestamp']
+            f_end['last_location']      = f_start_f['last_location']
+            f_end['waveform_signature'] = np.median(wf_l2[f_end['history'][-10:]], axis=0)
+            for pidx in f_start_f['history']:
+                eod_data.at[pidx, 'fragment_id'] = fid_end
+            del fragments[fid_start]
+            consumed.add(fid_start)
+            consumed.add(fid_end)
+
+    # Step 5: Prune short/low-count fragments
+    to_del = [
+        fid for fid, f in fragments.items()
+        if (len(f['history']) < _MIN_TRACK_PULSES
+            or (eod_data.at[f['history'][-1], 'timestamp'] -
+                eod_data.at[f['history'][0],  'timestamp']).total_seconds() < _MIN_TRACK_DUR_S)
+    ]
+    for fid in to_del:
+        del fragments[fid]
+
+    return len(fragments)
+
+
+def _evaluate_combo_worker(args):
+    combo_idx, params = args
+    rows = []
+    for ev in _worker_events_data:
+        try:
+            n_fish = _track_event(ev, params)
+        except Exception:
+            n_fish = -1
+        rows.append({
+            'event_id':         ev['event_id'],
+            'n_fish_annotated': ev['n_fish_annotated'],
+            'n_fish_tracked':   n_fish,
+        })
+    return combo_idx, params, rows
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+if __name__ == '__main__':
+    print("=" * 70)
+    print("TRACKING PARAMETER TUNING")
+    print("=" * 70)
+
+    tk_root = tk.Tk()
+    tk_root.withdraw()
+    root_folder   = filedialog.askdirectory(title="Select root folder (e.g. E:\\)")
+    output_folder = filedialog.askdirectory(title="Select output folder for tuning results")
+    tk_root.destroy()
+
+    if not root_folder or not output_folder:
+        raise ValueError("Folder selection cancelled")
+
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Load all annotation JSONs recursively
+    annotation_files = sorted(set(
+        glob.glob(os.path.join(root_folder, "**", "annotations*.json"), recursive=True) +
+        glob.glob(os.path.join(root_folder, "**", "annotations*.JSON"), recursive=True)
+    ))
+    if not annotation_files:
+        raise ValueError(f"No annotation files found under {root_folder}")
+    print(f"\n✓ Found {len(annotation_files)} annotation file(s)")
+
+    # Parse: keep clear_fish with fish_count 1 or 2
+    ground_truth = []
+    for af in annotation_files:
+        session_dir = os.path.dirname(af)
+        with open(af, 'r') as fh:
+            ann_data = json.load(fh)
+        annotations = ann_data.get('annotations', {})
+        fish_counts = ann_data.get('fish_counts', {})
+        for key, category in annotations.items():
+            if category != 'clear_fish':
+                continue
+            try:
+                event_id = int(key)
+            except ValueError:
+                try:
+                    event_id = int(key.split("event_")[-1])
+                except (ValueError, IndexError):
+                    continue
+            count_str = fish_counts.get(key, fish_counts.get(str(event_id), ''))
+            if count_str not in ('1', '2'):
+                continue
+            ground_truth.append({
+                'event_id':         event_id,
+                'session_dir':      session_dir,
+                'n_fish_annotated': int(count_str),
+            })
+
+    print(f"✓ Qualifying events (clear_fish, count 1 or 2): {len(ground_truth)}")
+    if not ground_truth:
+        raise ValueError("No qualifying events found in annotation files")
+
+    # Pre-load all event data; normalize for each (wt, cf) combination once
+    wt_cf_combos = [(wt, cf)
+                    for wt in GRID['waveform_target_length']
+                    for cf in GRID['crop_factor']]
+    events_data = []
+    n_skipped   = 0
+
+    print("\nPre-loading event data...")
+    for gt in ground_truth:
+        session_dir      = gt['session_dir']
+        event_id         = gt['event_id']
+        n_fish_annotated = gt['n_fish_annotated']
+
+        eod_matches = glob.glob(os.path.join(session_dir, f"*event_{event_id}_eod_table.csv"))
+        if not eod_matches:
+            n_skipped += 1
+            continue
+        eod_file  = eod_matches[0]
+        base_name = os.path.basename(eod_file).replace("_eod_table.csv", "")
+        wf_base   = os.path.join(session_dir, f"{base_name}_waveforms")
+        if not os.path.exists(wf_base + "_concatenated.npz"):
+            n_skipped += 1
+            continue
+
+        ap_file = os.path.join(session_dir, "analysis_parameters.csv")
+        if os.path.exists(ap_file):
+            ap_df         = pd.read_csv(ap_file)
+            interp_factor = (float(ap_df['interp_factor'].iloc[0])
+                             if 'interp_factor' in ap_df.columns else 1.0)
+        else:
+            interp_factor = 1.0
+        step_us = 1e6 / (96000.0 * interp_factor)
+
+        eod_df = pd.read_csv(eod_file)
+        eod_df['timestamp'] = pd.to_datetime(eod_df['timestamp'])
+        eod_df = eod_df.sort_values('timestamp')
+        orig_idx = eod_df.index.tolist()
+        eod_df.reset_index(drop=True, inplace=True)
+
+        wf_raw = load_waveforms(wf_base, format='npz', length='variable')
+        wf_raw = [wf_raw[i] for i in orig_idx]
+        if len(wf_raw) != len(eod_df):
+            n_skipped += 1
+            continue
+
+        wf_detrended = []
+        bg_ratio_arr = np.zeros(len(wf_raw))
+        for i, wf in enumerate(wf_raw):
+            slope = np.linspace(float(wf[0]), float(wf[-1]), len(wf))
+            wf_d  = wf - slope
+            wf_detrended.append(wf_d)
+            peak_amp        = np.max(np.abs(wf_d))
+            bg_ratio_arr[i] = (abs(float(wf[0]) - float(wf[-1])) / peak_amp
+                               if peak_amp > 0 else 0.0)
+        del wf_raw
+
+        pre_normalized = {}
+        for wt, cf in wt_cf_combos:
+            wf_p1 = np.array(normalize_waveforms(
+                wf_detrended,
+                snippet_p1_idc=eod_df['snippet_p1_idx'].values,
+                snippet_p2_idc=eod_df['snippet_p2_idx'].values,
+                method='p1_unity', crop_and_interpolate=True,
+                crop_factor=cf, target_length=wt
+            ), dtype=np.float32)
+            norms = np.linalg.norm(wf_p1, axis=1, keepdims=True)
+            norms[norms == 0] = 1.0
+            wf_p1 /= norms
+
+            wf_p2 = np.array(normalize_waveforms(
+                wf_detrended,
+                snippet_p1_idc=eod_df['snippet_p2_idx'].values,
+                snippet_p2_idc=eod_df['snippet_p1_idx'].values,
+                method='p1_unity', crop_and_interpolate=True,
+                crop_factor=cf, target_length=wt
+            ), dtype=np.float32)
+            norms2 = np.linalg.norm(wf_p2, axis=1, keepdims=True)
+            norms2[norms2 == 0] = 1.0
+            wf_p2 /= norms2
+
+            pre_normalized[(wt, cf)] = (wf_p1, wf_p2)
+        del wf_detrended
+
+        events_data.append({
+            'event_id':         event_id,
+            'n_fish_annotated': n_fish_annotated,
+            'timestamps_ns':    eod_df['timestamp'].values.astype(np.int64),
+            'pulse_locations':  eod_df['pulse_location'].values.astype(np.float64),
+            'bg_ratio_arr':     bg_ratio_arr,
+            'widths':           eod_df['eod_width_us'].values.astype(np.float64),
+            'step_us':          step_us,
+            'pre_normalized':   pre_normalized,
+        })
+        if len(events_data) % 50 == 0:
+            print(f"  Loaded {len(events_data)} / {len(ground_truth)} events...")
+
+    print(f"✓ Pre-loaded {len(events_data)} events ({n_skipped} skipped: missing files)")
+    n_1fish = sum(1 for ev in events_data if ev['n_fish_annotated'] == 1)
+    n_2fish = sum(1 for ev in events_data if ev['n_fish_annotated'] == 2)
+    print(f"  1-fish events: {n_1fish},  2-fish events: {n_2fish}")
+
+    # Generate parameter combinations
+    grid_keys    = list(GRID.keys())
+    grid_vals    = [GRID[k] for k in grid_keys]
+    total_indep  = 1
+    for v in grid_vals:
+        total_indep *= len(v)
+    total_combos = total_indep * len(WEIGHT_TRIPLETS)
+    print(f"\nTotal possible combinations: {total_combos:,}  |  weight triplets: {len(WEIGHT_TRIPLETS)}")
+
+    rng_combo = random.Random(RANDOM_SEED)
+    if N_RANDOM_SAMPLES <= 0 or total_combos <= N_RANDOM_SAMPLES:
+        param_combos = []
+        for indep in itertools.product(*grid_vals):
+            d = dict(zip(grid_keys, indep))
+            for lw, iw, ww in WEIGHT_TRIPLETS:
+                c = dict(d)
+                c['location_weight'] = lw
+                c['ipi_weight']      = iw
+                c['waveform_weight'] = ww
+                param_combos.append(c)
+        print(f"Mode: exhaustive ({len(param_combos)} combinations)")
+    else:
+        param_combos = []
+        for _ in range(N_RANDOM_SAMPLES):
+            d = {k: rng_combo.choice(v) for k, v in GRID.items()}
+            lw, iw, ww    = rng_combo.choice(WEIGHT_TRIPLETS)
+            d['location_weight'] = lw
+            d['ipi_weight']      = iw
+            d['waveform_weight'] = ww
+            param_combos.append(d)
+        print(f"Mode: random search ({len(param_combos)} of {total_combos:,} combinations)")
+
+    # Parallel evaluation with incremental CSV saves
+    out_csv        = os.path.join(output_folder, 'parameter_tuning_results.csv')
+    header_written = os.path.exists(out_csv)
+    n_done         = 0
+
+    print(f"\nStarting pool ({N_WORKERS} workers) — events_data serialized once per worker")
+    print(f"Output: {out_csv}\n")
+
+    with multiprocessing.Pool(N_WORKERS,
+                              initializer=_worker_init,
+                              initargs=(events_data,)) as pool:
+        for batch_start in range(0, len(param_combos), BATCH_SIZE):
+            batch_args = [
+                (batch_start + i, p)
+                for i, p in enumerate(param_combos[batch_start: batch_start + BATCH_SIZE])
+            ]
+            batch_raw = pool.map(_evaluate_combo_worker, batch_args)
+
+            rows = []
+            for combo_idx, params, event_results in batch_raw:
+                valid = [r for r in event_results if r['n_fish_tracked'] >= 0]
+                res_1 = [r for r in valid if r['n_fish_annotated'] == 1]
+                res_2 = [r for r in valid if r['n_fish_annotated'] == 2]
+                n_1   = len(res_1)
+                n_2   = len(res_2)
+
+                n_exact_1 = sum(1 for r in res_1 if r['n_fish_tracked'] == 1)
+                n_over_1  = sum(1 for r in res_1 if r['n_fish_tracked'] >  1)
+                n_under_1 = sum(1 for r in res_1 if r['n_fish_tracked'] <  1)
+                n_exact_2 = sum(1 for r in res_2 if r['n_fish_tracked'] == 2)
+                n_over_2  = sum(1 for r in res_2 if r['n_fish_tracked'] >  2)
+                n_under_2 = sum(1 for r in res_2 if r['n_fish_tracked'] <  2)
+
+                acc_1 = n_exact_1 / n_1 if n_1 > 0 else float('nan')
+                acc_2 = n_exact_2 / n_2 if n_2 > 0 else float('nan')
+                mae   = (float(np.mean([abs(r['n_fish_tracked'] - r['n_fish_annotated'])
+                                        for r in valid]))
+                         if valid else float('nan'))
+
+                if n_1 > 0 and n_2 > 0:
+                    score = 0.6 * acc_1 + 0.4 * acc_2
+                elif n_1 > 0:
+                    score = acc_1
+                elif n_2 > 0:
+                    score = acc_2
+                else:
+                    score = float('nan')
+
+                row = {
+                    'combo_idx':  combo_idx,
+                    'score':      round(score, 4) if not np.isnan(score) else float('nan'),
+                    'acc_1fish':  round(acc_1, 4) if not np.isnan(acc_1) else float('nan'),
+                    'acc_2fish':  round(acc_2, 4) if not np.isnan(acc_2) else float('nan'),
+                    'mae':        round(mae,   4) if not np.isnan(mae)   else float('nan'),
+                    'n_exact_1':  n_exact_1, 'n_over_1':   n_over_1,  'n_under_1':  n_under_1,
+                    'n_exact_2':  n_exact_2, 'n_over_2':   n_over_2,  'n_under_2':  n_under_2,
+                    'n_events_1': n_1,       'n_events_2': n_2,
+                    'n_failed':   sum(1 for r in event_results if r['n_fish_tracked'] < 0),
+                }
+                row.update(params)
+                rows.append(row)
+
+            results_df = pd.DataFrame(rows)
+            results_df.to_csv(out_csv, mode='a', header=not header_written, index=False)
+            header_written = True
+            n_done += len(batch_args)
+            print(f"  {n_done}/{len(param_combos)} done  |  "
+                  f"batch best score: {results_df['score'].max():.4f}")
+
+    print(f"\n✓ Complete. Results saved to: {out_csv}")
+
+    final_df = pd.read_csv(out_csv).sort_values('score', ascending=False)
+    top_cols = [
+        'combo_idx', 'score', 'acc_1fish', 'acc_2fish', 'mae',
+        'pass1_new_frag_cost', 'max_track_gap_s', 'location_weight',
+        'ipi_weight', 'waveform_weight', 'location_tolerance',
+        'ipi_tolerance_fraction', 'pass2_cost_threshold',
+        'pass2_max_gap_s', 'width_min_separation_us',
+    ]
+    print(f"\nTop 10 combinations:\n")
+    print(final_df[top_cols].head(10).to_string(index=False))
