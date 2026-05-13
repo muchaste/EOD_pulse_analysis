@@ -22,7 +22,7 @@ from pulse_functions import load_waveforms, normalize_waveforms
 # ============================================================
 
 N_WORKERS        = 16     # parallel worker processes
-N_RANDOM_SAMPLES = 5000   # max combos to evaluate; 0 = exhaustive
+N_RANDOM_SAMPLES = 1   # max combos to evaluate; 0 = exhaustive
 RANDOM_SEED      = 42
 BATCH_SIZE       = 200    # combos per incremental save
 
@@ -42,7 +42,7 @@ _PASS2_MAX_FRAGS    = 1200
 GRID = {
     'waveform_target_length':       [150, 300],
     'crop_factor':                  [4, 7],
-    'min_ipi_s':                    [0.01, 0.1],
+    'min_ipi_s':                    [0.01, 0.005],
     'max_track_gap_s':              [2, 5, 10],
     'max_location_jump_per_s':      [100, 200, 400],
     'knn_percentile':               [70, 80, 90],
@@ -53,8 +53,6 @@ GRID = {
     'ipi_tolerance_min_s':          [0.01, 0.05, 0.1],
     'pass1_new_frag_cost':          [1.0, 2.0, 4.0],
     'pass2_max_gap_s':              [1.0, 2.0, 4.0],
-    'pass2_waveform_weight':        [0.2, 0.4, 0.8],
-    'pass2_spatial_weight':         [0.2, 0.4, 0.8],
     'pass2_cost_threshold':         [1.0, 2.0, 4.0],
     'pass2_max_iterations':         [2, 4, 6],
     'pass2_overlap_wf_threshold':   [0.2, 0.4, 0.6],
@@ -70,6 +68,8 @@ WEIGHT_TRIPLETS = [
     (lw, iw, ww) for lw in _w for iw in _w for ww in _w
     if abs(lw + iw + ww - 1.0) < 1e-9
 ]
+
+WEIGHT_PAIRS = [(ww, 1.0 - ww) for ww in [0.2, 0.4, 0.5, 0.6, 0.8]]
 
 # ============================================================
 # WORKER GLOBALS — set once per worker process via initializer
@@ -94,7 +94,7 @@ def _track_event(ev, p):
     wf_l2, wf_l2_p2 = ev['pre_normalized'][(wt, cf)]
 
     eod_data = pd.DataFrame({
-        'timestamp':      pd.to_datetime(ev['timestamps_ns']),
+        'timestamp':      pd.to_datetime(ev['timestamp']),
         'pulse_location': ev['pulse_locations'],
     })
     eod_data['fragment_id'] = -1
@@ -672,7 +672,7 @@ if __name__ == '__main__':
         events_data.append({
             'event_id':         event_id,
             'n_fish_annotated': n_fish_annotated,
-            'timestamps_ns':    eod_df['timestamp'].values.astype(np.int64),
+            'timestamp':        eod_df['timestamp'],
             'pulse_locations':  eod_df['pulse_location'].values.astype(np.float64),
             'bg_ratio_arr':     bg_ratio_arr,
             'widths':           eod_df['eod_width_us'].values.astype(np.float64),
@@ -693,8 +693,8 @@ if __name__ == '__main__':
     total_indep  = 1
     for v in grid_vals:
         total_indep *= len(v)
-    total_combos = total_indep * len(WEIGHT_TRIPLETS)
-    print(f"\nTotal possible combinations: {total_combos:,}  |  weight triplets: {len(WEIGHT_TRIPLETS)}")
+    total_combos = total_indep * len(WEIGHT_TRIPLETS) * len(WEIGHT_PAIRS)
+    print(f"\nTotal possible combinations: {total_combos:,}  |  weight triplets: {len(WEIGHT_TRIPLETS)}  |  weight pairs: {len(WEIGHT_PAIRS)}")
 
     rng_combo = random.Random(RANDOM_SEED)
     if N_RANDOM_SAMPLES <= 0 or total_combos <= N_RANDOM_SAMPLES:
@@ -702,20 +702,26 @@ if __name__ == '__main__':
         for indep in itertools.product(*grid_vals):
             d = dict(zip(grid_keys, indep))
             for lw, iw, ww in WEIGHT_TRIPLETS:
-                c = dict(d)
-                c['location_weight'] = lw
-                c['ipi_weight']      = iw
-                c['waveform_weight'] = ww
-                param_combos.append(c)
+                for p2ww, p2sw in WEIGHT_PAIRS:
+                    c = dict(d)
+                    c['location_weight']       = lw
+                    c['ipi_weight']            = iw
+                    c['waveform_weight']       = ww
+                    c['pass2_waveform_weight'] = p2ww
+                    c['pass2_spatial_weight']  = p2sw
+                    param_combos.append(c)
         print(f"Mode: exhaustive ({len(param_combos)} combinations)")
     else:
         param_combos = []
         for _ in range(N_RANDOM_SAMPLES):
             d = {k: rng_combo.choice(v) for k, v in GRID.items()}
-            lw, iw, ww    = rng_combo.choice(WEIGHT_TRIPLETS)
-            d['location_weight'] = lw
-            d['ipi_weight']      = iw
-            d['waveform_weight'] = ww
+            lw, iw, ww           = rng_combo.choice(WEIGHT_TRIPLETS)
+            p2ww, p2sw           = rng_combo.choice(WEIGHT_PAIRS)
+            d['location_weight']       = lw
+            d['ipi_weight']            = iw
+            d['waveform_weight']       = ww
+            d['pass2_waveform_weight'] = p2ww
+            d['pass2_spatial_weight']  = p2sw
             param_combos.append(d)
         print(f"Mode: random search ({len(param_combos)} of {total_combos:,} combinations)")
 
