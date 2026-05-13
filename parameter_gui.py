@@ -912,10 +912,12 @@ class TrackingParameterConfigGUI:
             ('crop_factor', 'Crop Factor:', 4, int),
         ]
         for i, (key, label, default, dtype) in enumerate(norm_params):
-            ttk.Label(norm_frame, text=label).grid(row=i, column=0, sticky=tk.W, pady=2)
+            col = (i % 2) * 3  # 0 for left column, 3 for right column
+            row = i // 2
+            ttk.Label(norm_frame, text=label).grid(row=row, column=col, sticky=tk.W, pady=2)
             self.param_vars[key] = tk.IntVar(value=default) if dtype == int else tk.DoubleVar(value=default)
             ttk.Entry(norm_frame, textvariable=self.param_vars[key], width=10).grid(
-                row=i, column=1, sticky=tk.W, padx=5)
+                row=row, column=col+1, sticky=tk.W, padx=5)
 
         # Width sorting + DBSCAN
         cluster_frame = ttk.LabelFrame(scrollable_frame, text="Width Sorting & Shape Clustering", padding="10")
@@ -923,58 +925,47 @@ class TrackingParameterConfigGUI:
         current_row += 1
 
         cluster_params = [
-            ('width_min_separation_us', 'Min Width Peak Separation (µs):', 15, float),
-            ('shape_dbscan_min_samples', 'DBSCAN Min Samples (floor):', 5, int),
-            ('knn_percentile', 'KNN Percentile for Epsilon:', 80, int),
-            ('min_shape_eps', 'Min Epsilon Floor:', 0.1, float),
-            ('fft_artifact_threshold', 'FFT Artifact Threshold:', 0.75, float),
-            ('dbscan_max_direct', 'DBSCAN Max Direct (subsampling):', 3000, int),
-            ('dbscan_sample_size', 'DBSCAN Sample Size:', 2000, int),
+            ('width_min_separation_us', 'Min Width Peak Sep. (µs):',   15,   float),
+            ('shape_dbscan_min_samples', 'DBSCAN Min Samples:',          5,   int),
+            ('knn_percentile',           'KNN Percentile for Epsilon:', 80,   int),
+            ('min_shape_eps',            'Min Epsilon Floor:',          0.1,  float),
+            ('fft_artifact_threshold',   'FFT Artifact Threshold:',     0.75, float),
+            ('dbscan_max_direct',        'DBSCAN Max Direct:',          3000, int),
+            ('dbscan_sample_size',       'DBSCAN Sample Size:',         2000, int),
         ]
         for i, (key, label, default, dtype) in enumerate(cluster_params):
-            ttk.Label(cluster_frame, text=label).grid(row=i, column=0, sticky=tk.W, pady=2)
+            col = (i % 2) * 3
+            row = i // 2
+            ttk.Label(cluster_frame, text=label).grid(row=row, column=col, sticky=tk.W, pady=2)
             self.param_vars[key] = tk.DoubleVar(value=default) if dtype == float else tk.IntVar(value=default)
             ttk.Entry(cluster_frame, textvariable=self.param_vars[key], width=10).grid(
-                row=i, column=1, sticky=tk.W, padx=5)
+                row=row, column=col + 1, sticky=tk.W, padx=5)
 
         # Pass 1 parameters — two columns
         p1_frame = ttk.LabelFrame(scrollable_frame, text="Pass 1: Sequential Assignment", padding="10")
         p1_frame.grid(row=current_row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
         current_row += 1
 
-        p1_left = [
-            ('max_track_gap_s', 'Max Track Gap (s):', 5.0, float),
-            ('max_location_jump_per_s', 'Max Location Jump/s:', 400.0, float),
-            ('location_tolerance', 'Location Tolerance:', 20.0, float),
-            ('ipi_tolerance_fraction', 'IPI Tolerance Fraction:', 0.4, float),
-            ('ipi_tolerance_min_s', 'IPI Tolerance Min (s):', 0.05, float),
+        p1_params = [
+            ('max_track_gap_s',         'Max Track Gap (s):',       5.0,   float),
+            ('location_weight',         'Location Weight:',          0.2,  float),
+            ('max_location_jump_per_s', 'Max Location Jump/s:',    400.0,  float),
+            ('ipi_weight',              'IPI Weight:',               0.4,  float),
+            ('location_tolerance',      'Location Tolerance:',      20.0,  float),
+            ('waveform_weight',         'Waveform Weight:',          0.4,  float),
+            ('ipi_tolerance_fraction',  'IPI Tolerance Fraction:',   0.4,  float),
+            ('n_recent_for_ipi',        'Recent IPIs for Median:',     8,  int),
+            ('ipi_tolerance_min_s',     'IPI Tolerance Min (s):',   0.05,  float),
+            ('pass1_new_frag_cost',     'New Fragment Cost:',        2.0,  float),
+            ('min_ipi_s',               'Min IPI (s):',            0.002,  float),
         ]
-        p1_right = [
-            ('location_weight', 'Location Weight:', 0.2, float),
-            ('ipi_weight', 'IPI Weight:', 0.4, float),
-            ('waveform_weight', 'Waveform Weight:', 0.4, float),
-            ('n_recent_for_ipi', 'Recent IPIs for Median:', 8, int),
-            ('pass1_new_frag_cost', 'New Fragment Cost:', 2.0, float),
-        ]
-
-        for i, (key, label, default, dtype) in enumerate(p1_left):
-            ttk.Label(p1_frame, text=label).grid(row=i, column=0, sticky=tk.W, pady=2)
+        for i, (key, label, default, dtype) in enumerate(p1_params):
+            col = (i % 2) * 3
+            row = i // 2
+            ttk.Label(p1_frame, text=label).grid(row=row, column=col, sticky=tk.W, pady=2)
             self.param_vars[key] = tk.DoubleVar(value=default) if dtype == float else tk.IntVar(value=default)
             ttk.Entry(p1_frame, textvariable=self.param_vars[key], width=10).grid(
-                row=i, column=1, sticky=tk.W, padx=5)
-
-        ttk.Separator(p1_frame, orient='vertical').grid(row=0, column=2, rowspan=6, sticky='ns', padx=10)
-
-        for i, (key, label, default, dtype) in enumerate(p1_right):
-            ttk.Label(p1_frame, text=label).grid(row=i, column=3, sticky=tk.W, pady=2)
-            self.param_vars[key] = tk.DoubleVar(value=default) if dtype == float else tk.IntVar(value=default)
-            ttk.Entry(p1_frame, textvariable=self.param_vars[key], width=10).grid(
-                row=i, column=4, sticky=tk.W, padx=5)
-
-        self.param_vars['min_ipi_s'] = tk.DoubleVar(value=0.002)
-        ttk.Label(p1_frame, text="Min IPI (s):").grid(row=len(p1_left), column=0, sticky=tk.W, pady=2)
-        ttk.Entry(p1_frame, textvariable=self.param_vars['min_ipi_s'], width=10).grid(
-            row=len(p1_left), column=1, sticky=tk.W, padx=5)
+                row=row, column=col + 1, sticky=tk.W, padx=5)
 
         # Pass 2 parameters
         p2_frame = ttk.LabelFrame(scrollable_frame, text="Pass 2: Fragment Stitching", padding="10")
@@ -982,17 +973,23 @@ class TrackingParameterConfigGUI:
         current_row += 1
 
         p2_params = [
-            ('pass2_max_gap_s', 'Max Gap (s):', 2.0, float),
-            ('pass2_waveform_weight', 'Waveform Weight:', 0.8, float),
-            ('pass2_spatial_weight', 'Spatial Weight:', 0.2, float),
-            ('pass2_cost_threshold', 'Cost Threshold:', 4.0, float),
-            ('pass2_max_iterations', 'Max Iterations:', 3, int),
+            ('pass2_max_gap_s',              'Max Gap (s):',                2.0,  float),
+            ('pass2_waveform_weight',        'Waveform Weight:',             0.8,  float),
+            ('pass2_cost_threshold',         'Cost Threshold:',              4.0,  float),
+            ('pass2_spatial_weight',         'Spatial Weight:',              0.2,  float),
+            ('pass2_max_iterations',         'Max Iterations:',                3,  int),
+            ('pass2_max_frags',              'Max Fragments for LAP:',      1200,  int),
+            ('pass2_overlap_wf_threshold',   'Overlap Merge WF Threshold:',  0.4,  float),
+            ('pass2_overlap_min_s',          'Overlap Merge Min (s):',       0.1,  float),
+            ('pass2_overlap_max_iterations', 'Overlap Merge Max Iter:',        3,  int),
         ]
         for i, (key, label, default, dtype) in enumerate(p2_params):
-            ttk.Label(p2_frame, text=label).grid(row=i, column=0, sticky=tk.W, pady=2)
+            col = (i % 2) * 3
+            row = i // 2
+            ttk.Label(p2_frame, text=label).grid(row=row, column=col, sticky=tk.W, pady=2)
             self.param_vars[key] = tk.DoubleVar(value=default) if dtype == float else tk.IntVar(value=default)
             ttk.Entry(p2_frame, textvariable=self.param_vars[key], width=10).grid(
-                row=i, column=1, sticky=tk.W, padx=5)
+                row=row, column=col + 1, sticky=tk.W, padx=5)
 
         # Pruning
         prune_frame = ttk.LabelFrame(scrollable_frame, text="Track Pruning", padding="10")
@@ -1000,14 +997,16 @@ class TrackingParameterConfigGUI:
         current_row += 1
 
         prune_params = [
-            ('min_track_pulses', 'Min Pulses per Track:', 15, int),
+            ('min_track_pulses',     'Min Pulses per Track:',   15,  int),
             ('min_track_duration_s', 'Min Track Duration (s):', 0.5, float),
         ]
         for i, (key, label, default, dtype) in enumerate(prune_params):
-            ttk.Label(prune_frame, text=label).grid(row=i, column=0, sticky=tk.W, pady=2)
+            col = (i % 2) * 3
+            row = i // 2
+            ttk.Label(prune_frame, text=label).grid(row=row, column=col, sticky=tk.W, pady=2)
             self.param_vars[key] = tk.IntVar(value=default) if dtype == int else tk.DoubleVar(value=default)
             ttk.Entry(prune_frame, textvariable=self.param_vars[key], width=10).grid(
-                row=i, column=1, sticky=tk.W, padx=5)
+                row=row, column=col + 1, sticky=tk.W, padx=5)
 
         # Action buttons
         button_frame = ttk.Frame(scrollable_frame, padding="10")
@@ -1100,6 +1099,10 @@ class TrackingParameterConfigGUI:
         w_wf = self.param_vars['waveform_weight'].get()
         if abs(w_loc + w_ipi + w_wf - 1.0) > 0.01:
             errors.append(f"Pass 1 weights must sum to 1.0 (currently {w_loc+w_ipi+w_wf:.2f})")
+        w2_wf = self.param_vars['pass2_waveform_weight'].get()
+        w2_sp = self.param_vars['pass2_spatial_weight'].get()
+        if abs(w2_wf + w2_sp - 1.0) > 0.01:
+            errors.append(f"Pass 2 weights (waveform + spatial) must sum to 1.0 (currently {w2_wf+w2_sp:.2f})")
         if errors:
             messagebox.showerror("Validation Error", "\n".join(errors))
             return False

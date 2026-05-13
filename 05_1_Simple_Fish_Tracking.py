@@ -152,10 +152,10 @@ pass2_waveform_weight    = float(params['pass2_waveform_weight'])
 pass2_spatial_weight     = float(params['pass2_spatial_weight'])
 pass2_cost_threshold     = float(params['pass2_cost_threshold'])
 pass2_max_iterations     = int(params['pass2_max_iterations'])
-pass2_max_frags          = 600
-pass2_overlap_wf_threshold  = 0.4
-pass2_overlap_min_s         = 0.1
-pass2_overlap_max_iterations = 3
+pass2_max_frags          = int(params['pass2_max_frags'])
+pass2_overlap_wf_threshold   = float(params['pass2_overlap_wf_threshold'])
+pass2_overlap_min_s          = float(params['pass2_overlap_min_s'])
+pass2_overlap_max_iterations = int(params['pass2_overlap_max_iterations'])
 
 min_track_pulses     = int(params['min_track_pulses'])
 min_track_duration_s = float(params['min_track_duration_s'])
