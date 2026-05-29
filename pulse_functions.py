@@ -1061,7 +1061,7 @@ def calc_fft_peak(signal, rate, lower_thresh=0, upper_thresh=100000, zero_paddin
 
 def remove_proximity_duplicates(arrays_dict, proximity_threshold=3):
     """
-    Remove duplicates based on proximity: same channel and midpoint within threshold samples.
+    Remove duplicates based on proximity: across channels and midpoint within threshold samples.
     
     Args:
         arrays_dict: Dictionary containing all arrays to filter
@@ -1072,7 +1072,8 @@ def remove_proximity_duplicates(arrays_dict, proximity_threshold=3):
         n_removed: Number of duplicates removed
     """
     final_midpoint_idc = arrays_dict['final_midpoint_idc']
-    eod_chan = arrays_dict['eod_chan']
+    # eod_chan = arrays_dict['eod_chan']
+    eod_amps = arrays_dict['eod_amps']
 
     # Sort by midpoint index so the sliding window can break early.
     # For each pulse i (in sorted order), advance j while the distance is within
@@ -1080,16 +1081,23 @@ def remove_proximity_duplicates(arrays_dict, proximity_threshold=3):
     # Only non-duplicate pulses are used as seeds (checked via unique_mask_sorted[i]).
     sort_order = np.argsort(final_midpoint_idc, kind='stable')
     sorted_midpoints = final_midpoint_idc[sort_order]
-    sorted_channels = eod_chan[sort_order]
+    sorted_amps = eod_amps[sort_order]          # need eod_amps from arrays_dict
 
     unique_mask_sorted = np.ones(len(sorted_midpoints), dtype=bool)
-    for i in range(len(sorted_midpoints)):
-        if unique_mask_sorted[i]:
-            j = i + 1
-            while j < len(sorted_midpoints) and sorted_midpoints[j] - sorted_midpoints[i] <= proximity_threshold:
-                if sorted_channels[j] == sorted_channels[i]:
-                    unique_mask_sorted[j] = False
-                j += 1
+    i = 0
+    while i < len(sorted_midpoints):
+        # Collect all pulses within proximity_threshold of pulse i
+        j = i + 1
+        while j < len(sorted_midpoints) and sorted_midpoints[j] - sorted_midpoints[i] <= proximity_threshold:
+            j += 1
+        # Window is sorted_midpoints[i:j]
+        if j > i + 1:
+            window_amps = sorted_amps[i:j]
+            best_in_window = i + np.argmax(window_amps)
+            for k in range(i, j):
+                if k != best_in_window:
+                    unique_mask_sorted[k] = False
+        i = j   # advance past the whole group
 
     # Map mask back to original (unsorted) order
     unique_mask = np.empty(len(final_midpoint_idc), dtype=bool)
@@ -1945,17 +1953,17 @@ def load_waveforms(base_path, format="csv", length="fixed"):
                         if lengths[i] == 0:
                             waveforms_list.append(np.array([]))
                         else:
-                            waveform_length = lengths[i]
-                            waveform = concatenated[concatenated_idx:concatenated_idx + waveform_length]
+                            length = lengths[i]
+                            waveform = concatenated[concatenated_idx:concatenated_idx + length]
                             waveforms_list.append(waveform)
-                            concatenated_idx += waveform_length
+                            concatenated_idx += length
                 else:
                     # Original format - all waveforms were non-empty
                     start_indices = metadata['start_indices']
                     for i in range(metadata['total_waveforms']):
                         start_idx = start_indices[i]
-                        waveform_length = lengths[i]
-                        waveform = concatenated[start_idx:start_idx + waveform_length]
+                        length = lengths[i]
+                        waveform = concatenated[start_idx:start_idx + length]
                         waveforms_list.append(waveform)
                 
         return waveforms_list
@@ -3278,7 +3286,7 @@ def create_tracking_plot(event_id, event_eods, event_data, event_start_time, sam
                     plt.plot(midpoint_timestamps, ch_eods['pulse_location'].values[valid_midpoints] * offset_diff, 
                             '-', linewidth=0.5, color=id_colors[fish_id], alpha=0.8, 
                             label='Peak Loc' if i == 0 else "")
-
+                    
                     plt.plot(midpoint_timestamps, ch_eods['pulse_location'].values[valid_midpoints] * offset_diff, 
                             'x', markersize=3, color=id_colors[fish_id], alpha=0.8, 
                             label='Peak Loc' if i == 0 else "")
