@@ -227,6 +227,20 @@ class PulseDiagnosticTool:
             entry.pack(side=tk.RIGHT)
             entry.bind('<Return>', lambda e: self.detect_pulses())
             self.param_vars[param] = var
+
+        # Add differential/non-differential detection mode as dropdown at the right column
+        diff_return_frame = ttk.Frame(right_param_frame)
+        diff_return_frame.pack(fill=tk.X, pady=1)
+        ttk.Label(diff_return_frame, text="return_diff", width=18).pack(side=tk.LEFT)
+        self.return_diff_var = tk.StringVar(value=str(self.parameters['return_diff']))
+        return_diff_dropdown = ttk.Combobox(
+            diff_return_frame,
+            textvariable=self.return_diff_var,
+            values=['True', 'False'],
+            state='readonly',
+            width=12
+        )
+        return_diff_dropdown.pack(side=tk.RIGHT)
         
         # Add length_extraction as a dropdown at the bottom of right column
         length_extr_frame = ttk.Frame(right_param_frame)
@@ -993,7 +1007,7 @@ class PulseDiagnosticTool:
             for param, var in self.param_vars.items():
                 value_str = var.get().strip()
                 
-                if param in ['save_filtered_out', 'return_diff', 'use_pca']:
+                if param in ['save_filtered_out', 'return_diff','use_pca']:
                     self.parameters[param] = value_str.lower() in ['true', '1', 'yes', 'on']
                 elif param in ['interp_factor', 'min_width_us', 'max_width_us', 'peak_fft_freq_min', 
                                'peak_fft_freq_max', 'length', 'length_factor', 'search_window', 
@@ -1002,6 +1016,9 @@ class PulseDiagnosticTool:
                 else:
                     self.parameters[param] = float(value_str)
             
+            # Update return_diff from dropdown
+            self.parameters['return_diff'] = self.return_diff_var.get() == 'True'
+
             # Update length_extraction from dropdown
             self.parameters['length_extraction'] = self.length_extraction_var.get()
                     
@@ -1121,6 +1138,9 @@ class PulseDiagnosticTool:
 
                 if self.parameters['return_diff'] and not self.parameters['use_pca']:
                     return_diff = True
+                    use_pca = False
+                elif not self.parameters['return_diff'] and not self.parameters['use_pca']:
+                    return_diff = False
                     use_pca = False
                 elif not self.parameters['return_diff'] and self.parameters['use_pca']:
                     return_diff = False
