@@ -908,8 +908,8 @@ class TrackingParameterConfigGUI:
         current_row += 1
 
         norm_params = [
-            ('waveform_target_length', 'Target Length (samples):', 150, int),
-            ('crop_factor', 'Crop Factor:', 4, int),
+            ('waveform_target_length', 'Target Length (samples):', 300, int),
+            ('crop_factor', 'Crop Factor:', 7, int),
         ]
         for i, (key, label, default, dtype) in enumerate(norm_params):
             col = (i % 2) * 3  # 0 for left column, 3 for right column
@@ -925,13 +925,13 @@ class TrackingParameterConfigGUI:
         current_row += 1
 
         cluster_params = [
-            ('width_min_separation_us', 'Min Width Peak Sep. (µs):',   15,   float),
+            ('width_min_separation_us', 'Min Width Peak Sep. (µs):',   13.24,   float),
             ('shape_dbscan_min_samples', 'DBSCAN Min Samples:',          5,   int),
-            ('knn_percentile',           'KNN Percentile for Epsilon:', 80,   int),
-            ('min_shape_eps',            'Min Epsilon Floor:',          0.1,  float),
-            ('fft_artifact_threshold',   'FFT Artifact Threshold:',     0.75, float),
-            ('dbscan_max_direct',        'DBSCAN Max Direct:',          3000, int),
-            ('dbscan_sample_size',       'DBSCAN Sample Size:',         2000, int),
+            ('knn_percentile',           'KNN Percentile for Epsilon:', 60,   int),
+            ('min_shape_eps',            'Min Epsilon Floor:',          0.218,  float),
+            ('fft_artifact_threshold',   'FFT Artifact Threshold:',     0.767, float),
+            ('dbscan_max_direct',        'DBSCAN Max Direct:',          30000, int),
+            ('dbscan_sample_size',       'DBSCAN Sample Size:',         20000, int),
         ]
         for i, (key, label, default, dtype) in enumerate(cluster_params):
             col = (i % 2) * 3
@@ -947,17 +947,17 @@ class TrackingParameterConfigGUI:
         current_row += 1
 
         p1_params = [
-            ('max_track_gap_s',         'Max Track Gap (s):',       5.0,   float),
-            ('location_weight',         'Location Weight:',          0.2,  float),
-            ('max_location_jump_per_s', 'Max Location Jump/s:',    400.0,  float),
-            ('ipi_weight',              'IPI Weight:',               0.4,  float),
-            ('location_tolerance',      'Location Tolerance:',      20.0,  float),
-            ('waveform_weight',         'Waveform Weight:',          0.4,  float),
-            ('ipi_tolerance_fraction',  'IPI Tolerance Fraction:',   0.4,  float),
+            ('max_track_gap_s',         'Max Track Gap (s):',       11.47,   float),
+            ('location_weight',         'Location Weight:',          0.7,  float),
+            ('max_location_jump_per_s', 'Max Location Jump/s:',    260.05,  float),
+            ('ipi_weight',              'IPI Weight:',               0.1,  float),
+            ('location_tolerance',      'Location Tolerance:',      10.19,  float),
+            ('waveform_weight',         'Waveform Weight:',          0.2,  float),
+            ('ipi_tolerance_fraction',  'IPI Tolerance Fraction:',   0.497,  float),
             ('n_recent_for_ipi',        'Recent IPIs for Median:',     8,  int),
-            ('ipi_tolerance_min_s',     'IPI Tolerance Min (s):',   0.05,  float),
-            ('pass1_new_frag_cost',     'New Fragment Cost:',        2.0,  float),
-            ('min_ipi_s',               'Min IPI (s):',            0.002,  float),
+            ('ipi_tolerance_min_s',     'IPI Tolerance Min (s):',   0.069,  float),
+            ('pass1_new_frag_cost',     'New Fragment Cost:',        4.03,  float),
+            ('min_ipi_s',               'Min IPI (s):',            0.00626,  float),
         ]
         for i, (key, label, default, dtype) in enumerate(p1_params):
             col = (i % 2) * 3
@@ -973,15 +973,15 @@ class TrackingParameterConfigGUI:
         current_row += 1
 
         p2_params = [
-            ('pass2_max_gap_s',              'Max Gap (s):',                2.0,  float),
-            ('pass2_waveform_weight',        'Waveform Weight:',             0.8,  float),
-            ('pass2_cost_threshold',         'Cost Threshold:',              4.0,  float),
-            ('pass2_spatial_weight',         'Spatial Weight:',              0.2,  float),
-            ('pass2_max_iterations',         'Max Iterations:',                3,  int),
+            ('pass2_max_gap_s',              'Max Gap (s):',                8.79,  float),
+            ('pass2_waveform_weight',        'Waveform Weight:',             0.5,  float),
+            ('pass2_cost_threshold',         'Cost Threshold:',              7.61,  float),
+            ('pass2_spatial_weight',         'Spatial Weight:',              0.5,  float),
+            ('pass2_max_iterations',         'Max Iterations:',                10,  int),
             ('pass2_max_frags',              'Max Fragments for LAP:',      1200,  int),
-            ('pass2_overlap_wf_threshold',   'Overlap Merge WF Threshold:',  0.4,  float),
-            ('pass2_overlap_min_s',          'Overlap Merge Min (s):',       0.1,  float),
-            ('pass2_overlap_max_iterations', 'Overlap Merge Max Iter:',        3,  int),
+            ('pass2_overlap_wf_threshold',   'Overlap Merge WF Threshold:',  0.896,  float),
+            ('pass2_overlap_min_s',          'Overlap Merge Min (s):',       0.258,  float),
+            ('pass2_overlap_max_iterations', 'Overlap Merge Max Iter:',        2,  int),
         ]
         for i, (key, label, default, dtype) in enumerate(p2_params):
             col = (i % 2) * 3
