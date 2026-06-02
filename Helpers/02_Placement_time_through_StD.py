@@ -45,7 +45,7 @@ for recording in file_set['filename'][0:n_files-1]:
     print(recording)
 
     with aio.AudioLoader(recording, 60) as sf:
-        rate = sf.samplerate
+        rate = sf.rate
         data = sf[int(tmin*rate):int(tmax*rate), :]
         # extract number of channels
         n_channels = len(data[0,:])
@@ -68,6 +68,6 @@ plt.title('Standard deviations for the first %s files Relative to channel 1'%(st
 plt.savefig('%s\\SDs relative.png'%(input_path))
 plt.show(block=False)
 
-print('Input file number to display filename')
-fnum = int(input())
-print(file_set['filename'][fnum])
+# print('Input file number to display filename')
+# fnum = int(input())
+# print(file_set['filename'][fnum])
