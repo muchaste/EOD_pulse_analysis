@@ -632,30 +632,45 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
 
         n_clusters = next_merged_id
 
-        # Assign DBSCAN noise points to nearest cluster centroid (waveform space).
-        # Prevents each noise point becoming a singleton shape class that explodes fragment count.
-        # shape_source='noise' is preserved as a diagnostic label.
+        # Assign DBSCAN noise points: if within min_shape_eps of the nearest cluster centroid,
+        # fold into that cluster (mark 'noise'); otherwise isolate as an artifact singleton
+        # so genuinely outlying pulses do not contaminate real shape classes.
         if n_clusters > 0:
             noise_mask = (final_labels == -1)
-            n_noise_forced = int(noise_mask.sum())
-            if n_noise_forced > 0:
+            n_noise_assigned = 0
+            n_singletons = 0
+            if noise_mask.any():
                 merged_centroids = np.array(
                     [wc_waveforms_p1[final_labels == c].mean(axis=0) for c in range(n_clusters)]
                 )
                 d_noise = np.linalg.norm(
                     wc_waveforms_p1[noise_mask][:, None, :] - merged_centroids[None, :, :], axis=2
                 )
-                final_labels[noise_mask] = np.argmin(d_noise, axis=1)
-                source_labels[noise_mask] = 'noise'
+                best_dist  = np.min(d_noise, axis=1)
+                best_clust = np.argmin(d_noise, axis=1)
+                noise_idxs = np.where(noise_mask)[0]
+                for ni in range(len(noise_idxs)):
+                    idx = noise_idxs[ni]
+                    if best_dist[ni] < min_shape_eps:
+                        final_labels[idx]  = best_clust[ni]
+                        source_labels[idx] = 'noise'
+                        n_noise_assigned  += 1
+                    else:
+                        final_labels[idx]  = n_clusters + n_singletons
+                        source_labels[idx] = 'artifact'
+                        n_singletons      += 1
+                n_clusters += n_singletons
         else:
             # All pulses were noise → single shared class
             final_labels[:] = 0
             source_labels[:] = 'noise'
             n_clusters = 1
-            n_noise_forced = n_wc
+            n_noise_assigned = n_wc
+            n_singletons = 0
 
         print(f"  Width class {wc}: {n_clusters} shape cluster(s) "
-              f"(P1 eps={eps_p1:.3f}, P2 eps={eps_p2:.3f}), {n_noise_forced} noise\u2192assigned "
+              f"(P1 eps={eps_p1:.3f}, P2 eps={eps_p2:.3f}), "
+              f"{n_noise_assigned} noise→assigned, {n_singletons} artifact singletons "
               f"[{'subsampled' if n_wc > dbscan_max_direct else 'direct'} {n_sample}/{n_wc}]")
 
         # Assign globally unique shape class IDs
@@ -976,12 +991,21 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
                 cost = pass2_waveform_weight * wf_cost + pass2_spatial_weight * spatial_cost
                 cost_matrix[i, j] = cost
 
-        row_ind, col_ind = linear_sum_assignment(cost_matrix)
+        # Jaqaman (2008, Nat Methods 5:695) augmented matrix:
+        # "stay unlinked" is a first-class option at cost = pass2_cost_threshold,
+        # so the LAP solver itself decides whether to link or leave fragments isolated.
+        aug = np.full((2 * n_frags, 2 * n_frags), INF)
+        aug[:n_frags, :n_frags] = cost_matrix
+        np.fill_diagonal(aug[:n_frags, n_frags:], pass2_cost_threshold)
+        np.fill_diagonal(aug[n_frags:, :n_frags], pass2_cost_threshold)
+        aug[n_frags:, n_frags:] = 0.0
+        row_ind, col_ind = linear_sum_assignment(aug)
 
-        merges = []
-        for r, c in zip(row_ind, col_ind):
-            if cost_matrix[r, c] < pass2_cost_threshold:
-                merges.append((frag_ids[r], frag_ids[c]))
+        merges = [
+            (frag_ids[r], frag_ids[c])
+            for r, c in zip(row_ind, col_ind)
+            if r < n_frags and c < n_frags and cost_matrix[r, c] < INF
+        ]
 
         if not merges:
             print(f"  Iteration {stitch_iter + 1}: no merges, stopping")
@@ -1074,7 +1098,7 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
                 track_lda_coord = lda.transform(track_pca_s)[0]  # (n_lda_axes,)
                 lda_dist = float(np.linalg.norm(track_lda_coord - lda_sp_centroids[sp_pred]))
                 dist_threshold = lda_sp_dist_thresholds[sp_pred]
-                eod_data.loc[fid_mask, 'species_assigned'] = sp_pred
+                # eod_data.loc[fid_mask, 'species_assigned'] = sp_pred
                 eod_data.loc[fid_mask, 'lda_dist_centroid'] = lda_dist
                 eod_data.loc[fid_mask, 'lda_dist_threshold'] = dist_threshold
                 for sp, p in zip(lda.classes_, sp_proba):
@@ -1086,6 +1110,7 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
                 dist_flag = f", LDA_d={lda_dist:.3f}/>{dist_threshold:.3f}" if lda_dist > dist_threshold else f", LDA_d={lda_dist:.3f}"
                 print(f"  Fish {fid:2d}: {sp_pred}{uncertain_flag} (p={assigned_proba:.3f}{dist_flag}, "
                       f"nearest: {ref_ids[nn_idx]}, dist={nn_dist:.4f}, margin={margin:.4f})")
+                eod_data.loc[fid_mask, 'species_assigned'] =  f'{sp_pred}?' if uncertain else sp_pred
 
             else:
                 # 1-NN fallback when only 1 species in reference library
@@ -1123,7 +1148,7 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
     # -------------------------------------------------------------------------
     # Consolidated output figure (3 rows)
     # -------------------------------------------------------------------------
-    print("\nGenerating consolidated tracking figure...")
+    print("\nGenerating tracking figure...")
     fish_ids_assigned = sorted([fid for fid in eod_data['fish_id'].unique() if fid >= 0])
     n_assigned = len(fish_ids_assigned)
     fish_colors = plt.cm.tab10(np.linspace(0, 1, max(n_assigned, 1)))
@@ -1176,11 +1201,12 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
         assigned_data['t_bin'] = assigned_data['t_bin'].clip(0, n_bins_fish - 1)
 
         if use_species_matching and 'species_assigned' in eod_data.columns:
-            sp_list_fish = sorted(assigned_data['species_assigned'].unique())
+            assigned_data['species_code'] = assigned_data['species_assigned'].str.rstrip('?')
+            sp_list_fish = sorted(assigned_data['species_code'].unique())
             sp_pal_fish = plt.cm.Set1(np.linspace(0, 0.8, max(len(sp_list_fish), 1)))
             sp_color_fish = {sp: sp_pal_fish[i] for i, sp in enumerate(sp_list_fish)}
             for sp in sp_list_fish:
-                sp_data = assigned_data[assigned_data['species_assigned'] == sp]
+                sp_data = assigned_data[assigned_data['species_code'] == sp]
                 counts = sp_data.groupby('t_bin')['fish_id'].nunique().reindex(
                     range(n_bins_fish), fill_value=0
                 ).values
@@ -1252,7 +1278,7 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
             track_lda = lda.transform(track_pca_s)
             tx = float(track_lda[0, 0])
             ty = float(track_lda[0, 1]) if n_lda_axes >= 2 else float(track_pca_s[0, 0])
-            sp_assigned = eod_data.loc[fid_mask_pca, 'species_assigned'].iloc[0]
+            sp_assigned = eod_data.loc[fid_mask_pca, 'species_assigned'].iloc[0].rstrip('?')
             proba_col = f'lda_proba_{sp_assigned}'
             assigned_p = (
                 float(eod_data.loc[fid_mask_pca, proba_col].iloc[0])
@@ -1386,7 +1412,7 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
                         eod_data.loc[fid_mask_sum, f'lda_proba_{sp}'].iloc[0]
                     )
                 fish_rec['lda_proba_assigned'] = fish_rec[
-                    f'lda_proba_{fish_rec["species_assigned"]}'
+                    f'lda_proba_{fish_rec["species_assigned"].rstrip("?")}'
                 ]
             else:
                 for sp in all_species_codes:
