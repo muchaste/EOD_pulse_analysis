@@ -11,13 +11,13 @@ import subprocess
 ROOT_FOLDER    = r'E:\\'
 
 # Folder where results CSVs, proposals, and plots are saved
-OUTPUT_FOLDER  = r'E:\track_tuning\output_greedy_lap\lap'
+OUTPUT_FOLDER  = r'E:\track_tuning\output_combined_greedy'
 
 # Maximum number of optimization iterations to run
-MAX_ITERATIONS = 5
+MAX_ITERATIONS = 3
 
 # Optional pass1 override for 05_2: '', 'greedy', or 'lap'.
-PASS1_MODE_OVERRIDE = 'lap'
+PASS1_MODE_OVERRIDE = 'greedy'
 
 # Python interpreter to use (current interpreter by default)
 PYTHON_EXE     = sys.executable

@@ -21,10 +21,18 @@ from pulse_functions import load_waveforms, normalize_waveforms
 # CONFIGURATION — edit before running
 # ============================================================
 
-N_WORKERS        = 16     # parallel worker processes
-N_RANDOM_SAMPLES = 1   # max combos to evaluate; 0 = exhaustive
+N_WORKERS        = 32     # parallel worker processes
+N_RANDOM_SAMPLES = 10000   # max combos to evaluate; 0 = exhaustive
 RANDOM_SEED      = 42
-BATCH_SIZE       = 200    # combos per incremental save
+BATCH_SIZE       = 320    # combos per incremental save
+
+# When set to a proposals_iter*.csv path from 05_5, skips grid/random generation
+# and evaluates exactly those combos. Set to '' to use normal grid/random mode.
+# PROPOSALS_CSV    = ''     # e.g. r'C:\...\proposals_iter01.csv'
+PROPOSALS_CSV    = r'E:\track_tuning\output_combined_greedy\proposals_iter01.csv'     # e.g. r'C:\...\proposals_iter01.csv'
+
+# Optional pass1 override for A/B testing: '', 'greedy', or 'lap'.
+PASS1_MODE_OVERRIDE = ''
 
 # Fixed parameters (not tuned)
 _DBSCAN_MIN_SAMPLES = 5
@@ -81,6 +89,213 @@ _worker_events_data = None
 def _worker_init(events_data):
     global _worker_events_data
     _worker_events_data = events_data
+
+
+def _pass1_greedy(eod_data, wf_l2, shape_groups, p):
+    fragments = {}
+    next_fid  = 0
+    loc_tol   = p['location_tolerance']
+    ipi_tf    = p['ipi_tolerance_fraction']
+    ipi_tmin  = p['ipi_tolerance_min_s']
+    lw        = p['location_weight']
+    iw        = p['ipi_weight']
+    ww        = p['waveform_weight']
+    max_gap   = p['max_track_gap_s']
+    min_ipi   = p['min_ipi_s']
+    max_jps   = p['max_location_jump_per_s']
+    new_cost  = p['pass1_new_frag_cost']
+
+    for wc, sc in shape_groups:
+        grp_mask    = (eod_data['width_class'] == wc) & (eod_data['shape_class'] == sc)
+        grp_indices = np.where(grp_mask)[0]
+
+        for pulse_idx in grp_indices:
+            pulse_ts  = eod_data.at[pulse_idx, 'timestamp']
+            pulse_loc = eod_data.at[pulse_idx, 'pulse_location']
+
+            candidate_ids = []
+            for fid, f in fragments.items():
+                if f['shape_class'] != sc or f['width_class'] != wc:
+                    continue
+                dt = (pulse_ts - f['last_timestamp']).total_seconds()
+                if dt > max_gap or dt < min_ipi:
+                    continue
+                if abs(pulse_loc - f['last_location']) > max_jps * max(dt, 0.001):
+                    continue
+                candidate_ids.append(fid)
+
+            if not candidate_ids:
+                fragments[next_fid] = {
+                    'history': [pulse_idx], 'ipi_history': [],
+                    'last_timestamp': pulse_ts, 'last_location': pulse_loc,
+                    'width_class': wc, 'shape_class': sc,
+                    'waveform_signature': wf_l2[pulse_idx].copy(),
+                }
+                eod_data.at[pulse_idx, 'fragment_id'] = next_fid
+                next_fid += 1
+                continue
+
+            best_fid  = None
+            best_cost = np.inf
+            for fid in candidate_ids:
+                f  = fragments[fid]
+                dt = (pulse_ts - f['last_timestamp']).total_seconds()
+                if len(f['history']) >= 2:
+                    prev_idx = f['history'][-2]
+                    dt_prev  = (f['last_timestamp'] -
+                                eod_data.at[prev_idx, 'timestamp']).total_seconds()
+                    vel      = ((f['last_location'] - eod_data.at[prev_idx, 'pulse_location'])
+                                / max(dt_prev, 1e-6))
+                    pred_loc = f['last_location'] + vel * dt
+                else:
+                    pred_loc = f['last_location']
+                loc_cost = abs(pulse_loc - pred_loc) / loc_tol
+                if f['ipi_history']:
+                    med_ipi  = np.median(f['ipi_history'][-_N_RECENT_IPI:])
+                    ipi_tol  = max(med_ipi * ipi_tf, ipi_tmin)
+                    ipi_cost = abs(dt - med_ipi) / ipi_tol
+                else:
+                    ipi_cost = 0.0
+                wf_cost = float(np.linalg.norm(wf_l2[pulse_idx] - f['waveform_signature']))
+                cost    = lw * loc_cost + iw * ipi_cost + ww * wf_cost
+                if cost < best_cost:
+                    best_cost = cost
+                    best_fid  = fid
+
+            if best_cost < new_cost:
+                f = fragments[best_fid]
+                dt = (pulse_ts - f['last_timestamp']).total_seconds()
+                f['ipi_history'].append(dt)
+                f['history'].append(pulse_idx)
+                f['last_timestamp'] = pulse_ts
+                f['last_location']  = pulse_loc
+                f['waveform_signature'] = np.median(wf_l2[f['history'][-10:]], axis=0)
+                eod_data.at[pulse_idx, 'fragment_id'] = best_fid
+            else:
+                fragments[next_fid] = {
+                    'history': [pulse_idx], 'ipi_history': [],
+                    'last_timestamp': pulse_ts, 'last_location': pulse_loc,
+                    'width_class': wc, 'shape_class': sc,
+                    'waveform_signature': wf_l2[pulse_idx].copy(),
+                }
+                eod_data.at[pulse_idx, 'fragment_id'] = next_fid
+                next_fid += 1
+
+    return fragments
+
+
+def _pass1_window_lap(eod_data, wf_l2, shape_groups, p):
+    fragments = {}
+    next_fid  = 0
+    loc_tol   = p['location_tolerance']
+    ipi_tf    = p['ipi_tolerance_fraction']
+    ipi_tmin  = p['ipi_tolerance_min_s']
+    lw        = p['location_weight']
+    iw        = p['ipi_weight']
+    ww        = p['waveform_weight']
+    max_gap   = p['max_track_gap_s']
+    min_ipi   = p['min_ipi_s']
+    max_jps   = p['max_location_jump_per_s']
+    new_cost  = p['pass1_new_frag_cost']
+    inf_cost  = 1e6
+
+    for wc, sc in shape_groups:
+        grp_mask    = (eod_data['width_class'] == wc) & (eod_data['shape_class'] == sc)
+        grp_indices = np.where(grp_mask)[0]
+        if len(grp_indices) == 0:
+            continue
+
+        grp_indices = sorted(grp_indices, key=lambda idx: eod_data.at[idx, 'timestamp'])
+        g_pos = 0
+        while g_pos < len(grp_indices):
+            win_start_ts = eod_data.at[grp_indices[g_pos], 'timestamp']
+            win_end_ts   = win_start_ts + pd.to_timedelta(min_ipi, unit='s')
+
+            win_indices = []
+            while g_pos < len(grp_indices):
+                pidx = grp_indices[g_pos]
+                if eod_data.at[pidx, 'timestamp'] < win_end_ts:
+                    win_indices.append(pidx)
+                    g_pos += 1
+                else:
+                    break
+
+            active_fids = [
+                fid for fid, f in fragments.items()
+                if f['shape_class'] == sc and f['width_class'] == wc
+            ]
+
+            n_pulses = len(win_indices)
+            n_active = len(active_fids)
+            if n_pulses == 0:
+                continue
+
+            cost = np.full((n_pulses, n_active + n_pulses), inf_cost, dtype=float)
+
+            for r, pulse_idx in enumerate(win_indices):
+                pulse_ts  = eod_data.at[pulse_idx, 'timestamp']
+                pulse_loc = eod_data.at[pulse_idx, 'pulse_location']
+
+                # Per-pulse new-fragment option with fixed penalty.
+                cost[r, n_active + r] = new_cost
+
+                for c, fid in enumerate(active_fids):
+                    f  = fragments[fid]
+                    dt = (pulse_ts - f['last_timestamp']).total_seconds()
+                    if dt > max_gap or dt < min_ipi:
+                        continue
+                    if abs(pulse_loc - f['last_location']) > max_jps * max(dt, 0.001):
+                        continue
+
+                    if len(f['history']) >= 2:
+                        prev_idx = f['history'][-2]
+                        dt_prev  = (f['last_timestamp'] -
+                                    eod_data.at[prev_idx, 'timestamp']).total_seconds()
+                        vel      = ((f['last_location'] -
+                                     eod_data.at[prev_idx, 'pulse_location'])
+                                    / max(dt_prev, 1e-6))
+                        pred_loc = f['last_location'] + vel * dt
+                    else:
+                        pred_loc = f['last_location']
+
+                    loc_cost = abs(pulse_loc - pred_loc) / loc_tol
+                    if f['ipi_history']:
+                        med_ipi  = np.median(f['ipi_history'][-_N_RECENT_IPI:])
+                        ipi_tol  = max(med_ipi * ipi_tf, ipi_tmin)
+                        ipi_cost = abs(dt - med_ipi) / ipi_tol
+                    else:
+                        ipi_cost = 0.0
+                    wf_cost = float(np.linalg.norm(wf_l2[pulse_idx] - f['waveform_signature']))
+                    cost[r, c] = lw * loc_cost + iw * ipi_cost + ww * wf_cost
+
+            row_ind, col_ind = linear_sum_assignment(cost)
+
+            for r, c in zip(row_ind, col_ind):
+                pulse_idx = win_indices[r]
+                pulse_ts  = eod_data.at[pulse_idx, 'timestamp']
+                pulse_loc = eod_data.at[pulse_idx, 'pulse_location']
+
+                if c < n_active and cost[r, c] < inf_cost:
+                    fid = active_fids[c]
+                    f   = fragments[fid]
+                    dt  = (pulse_ts - f['last_timestamp']).total_seconds()
+                    f['ipi_history'].append(dt)
+                    f['history'].append(pulse_idx)
+                    f['last_timestamp'] = pulse_ts
+                    f['last_location']  = pulse_loc
+                    f['waveform_signature'] = np.median(wf_l2[f['history'][-10:]], axis=0)
+                    eod_data.at[pulse_idx, 'fragment_id'] = fid
+                else:
+                    fragments[next_fid] = {
+                        'history': [pulse_idx], 'ipi_history': [],
+                        'last_timestamp': pulse_ts, 'last_location': pulse_loc,
+                        'width_class': wc, 'shape_class': sc,
+                        'waveform_signature': wf_l2[pulse_idx].copy(),
+                    }
+                    eod_data.at[pulse_idx, 'fragment_id'] = next_fid
+                    next_fid += 1
+
+    return fragments
 
 
 # ============================================================
@@ -247,10 +462,22 @@ def _track_event(ev, p):
             if noise_mask.any():
                 m_cents = np.array([wc_wf_p1[final_labels == c].mean(axis=0)
                                     for c in range(n_clusters)])
-                d_noise = np.linalg.norm(
+                d_noise    = np.linalg.norm(
                     wc_wf_p1[noise_mask][:, None, :] - m_cents[None, :, :], axis=2)
-                final_labels[noise_mask]  = np.argmin(d_noise, axis=1)
-                source_labels[noise_mask] = 'noise'
+                best_dist  = np.min(d_noise, axis=1)
+                best_clust = np.argmin(d_noise, axis=1)
+                noise_idxs = np.where(noise_mask)[0]
+                n_singletons = 0
+                for ni in range(len(noise_idxs)):
+                    idx = noise_idxs[ni]
+                    if best_dist[ni] < p['min_shape_eps']:
+                        final_labels[idx]  = best_clust[ni]
+                        source_labels[idx] = 'noise'
+                    else:
+                        final_labels[idx]  = n_clusters + n_singletons
+                        source_labels[idx] = 'artifact'
+                        n_singletons      += 1
+                n_clusters += n_singletons
         else:
             final_labels[:] = 0
             source_labels[:] = 'noise'
@@ -268,95 +495,16 @@ def _track_event(ev, p):
         .values.tolist()
     )
 
-    # Step 3: Pass 1 — sequential assignment within shape groups
-    fragments = {}
-    next_fid  = 0
-    loc_tol   = p['location_tolerance']
-    ipi_tf    = p['ipi_tolerance_fraction']
-    ipi_tmin  = p['ipi_tolerance_min_s']
-    lw        = p['location_weight']
-    iw        = p['ipi_weight']
-    ww        = p['waveform_weight']
-    max_gap   = p['max_track_gap_s']
-    min_ipi   = p['min_ipi_s']
-    max_jps   = p['max_location_jump_per_s']
-    new_cost  = p['pass1_new_frag_cost']
+    # Step 3: Pass 1 — assignment mode dispatch
+    pass1_mode = str(p.get('pass1_mode', 'greedy')).lower()
+    if pass1_mode == 'lap':
+        fragments = _pass1_window_lap(eod_data, wf_l2, shape_groups, p)
+    else:
+        fragments = _pass1_greedy(eod_data, wf_l2, shape_groups, p)
 
-    for wc, sc in shape_groups:
-        grp_mask    = (eod_data['width_class'] == wc) & (eod_data['shape_class'] == sc)
-        grp_indices = np.where(grp_mask)[0]
-
-        for pulse_idx in grp_indices:
-            pulse_ts  = eod_data.at[pulse_idx, 'timestamp']
-            pulse_loc = eod_data.at[pulse_idx, 'pulse_location']
-
-            candidate_ids = []
-            for fid, f in fragments.items():
-                if f['shape_class'] != sc or f['width_class'] != wc:
-                    continue
-                dt = (pulse_ts - f['last_timestamp']).total_seconds()
-                if dt > max_gap or dt < min_ipi:
-                    continue
-                if abs(pulse_loc - f['last_location']) > max_jps * max(dt, 0.001):
-                    continue
-                candidate_ids.append(fid)
-
-            if not candidate_ids:
-                fragments[next_fid] = {
-                    'history': [pulse_idx], 'ipi_history': [],
-                    'last_timestamp': pulse_ts, 'last_location': pulse_loc,
-                    'width_class': wc, 'shape_class': sc,
-                    'waveform_signature': wf_l2[pulse_idx].copy(),
-                }
-                eod_data.at[pulse_idx, 'fragment_id'] = next_fid
-                next_fid += 1
-                continue
-
-            best_fid  = None
-            best_cost = np.inf
-            for fid in candidate_ids:
-                f  = fragments[fid]
-                dt = (pulse_ts - f['last_timestamp']).total_seconds()
-                if len(f['history']) >= 2:
-                    prev_idx = f['history'][-2]
-                    dt_prev  = (f['last_timestamp'] -
-                                eod_data.at[prev_idx, 'timestamp']).total_seconds()
-                    vel      = ((f['last_location'] - eod_data.at[prev_idx, 'pulse_location'])
-                                / max(dt_prev, 1e-6))
-                    pred_loc = f['last_location'] + vel * dt
-                else:
-                    pred_loc = f['last_location']
-                loc_cost = abs(pulse_loc - pred_loc) / loc_tol
-                if f['ipi_history']:
-                    med_ipi  = np.median(f['ipi_history'][-_N_RECENT_IPI:])
-                    ipi_tol  = max(med_ipi * ipi_tf, ipi_tmin)
-                    ipi_cost = abs(dt - med_ipi) / ipi_tol
-                else:
-                    ipi_cost = 0.0
-                wf_cost = float(np.linalg.norm(wf_l2[pulse_idx] - f['waveform_signature']))
-                cost    = lw * loc_cost + iw * ipi_cost + ww * wf_cost
-                if cost < best_cost:
-                    best_cost = cost
-                    best_fid  = fid
-
-            if best_cost < new_cost:
-                f = fragments[best_fid]
-                dt = (pulse_ts - f['last_timestamp']).total_seconds()
-                f['ipi_history'].append(dt)
-                f['history'].append(pulse_idx)
-                f['last_timestamp'] = pulse_ts
-                f['last_location']  = pulse_loc
-                f['waveform_signature'] = np.median(wf_l2[f['history'][-10:]], axis=0)
-                eod_data.at[pulse_idx, 'fragment_id'] = best_fid
-            else:
-                fragments[next_fid] = {
-                    'history': [pulse_idx], 'ipi_history': [],
-                    'last_timestamp': pulse_ts, 'last_location': pulse_loc,
-                    'width_class': wc, 'shape_class': sc,
-                    'waveform_signature': wf_l2[pulse_idx].copy(),
-                }
-                eod_data.at[pulse_idx, 'fragment_id'] = next_fid
-                next_fid += 1
+    loc_tol = p['location_tolerance']
+    min_ipi = p['min_ipi_s']
+    max_jps = p['max_location_jump_per_s']
 
     # Step 4a: Pass 2a — overlap merge
     p2_ovlp_wft = p['pass2_overlap_wf_threshold']
@@ -472,9 +620,21 @@ def _track_event(ev, p):
                 spatial_cost     = loc_diff / max(loc_tol, 0.01)
                 cost_matrix[i, j] = p2_wfw * wf_cost + p2_sw * spatial_cost
 
-        row_ind, col_ind = linear_sum_assignment(cost_matrix)
-        merges = [(frag_ids[r], frag_ids[c]) for r, c in zip(row_ind, col_ind)
-                  if cost_matrix[r, c] < p2_thresh]
+        # Jaqaman (2008, Nat Methods 5:695) augmented cost matrix.
+        # Dummy diagonal blocks make "unlinked" a first-class assignment option,
+        # so the LAP globally decides whether to link or leave unlinked instead
+        # of solving the wrong complete-assignment problem then thresholding.
+        aug = np.full((2 * n_frags, 2 * n_frags), INF)
+        aug[:n_frags, :n_frags] = cost_matrix
+        np.fill_diagonal(aug[:n_frags, n_frags:], p2_thresh)   # cost of unlinked end
+        np.fill_diagonal(aug[n_frags:, :n_frags], p2_thresh)   # cost of unlinked start
+        aug[n_frags:, n_frags:] = 0.0                          # dummy-to-dummy (free)
+        row_ind, col_ind = linear_sum_assignment(aug)
+        merges = [
+            (frag_ids[r], frag_ids[c])
+            for r, c in zip(row_ind, col_ind)
+            if r < n_frags and c < n_frags and cost_matrix[r, c] < INF
+        ]
         if not merges:
             break
 
@@ -537,12 +697,26 @@ if __name__ == '__main__':
 
     tk_root = tk.Tk()
     tk_root.withdraw()
-    root_folder   = filedialog.askdirectory(title="Select root folder (e.g. E:\\)")
-    output_folder = filedialog.askdirectory(title="Select output folder for tuning results")
+    root_folder   = os.environ.get('TUNING_ROOT_FOLDER', '')
+    output_folder = os.environ.get('TUNING_OUTPUT_FOLDER', '')
+    proposals_env = os.environ.get('TUNING_PROPOSALS_CSV', '')
+    pass1_mode_env = os.environ.get('TUNING_PASS1_MODE', '')
+    if proposals_env:
+        PROPOSALS_CSV = proposals_env
+    if pass1_mode_env:
+        PASS1_MODE_OVERRIDE = pass1_mode_env
+    if not root_folder:
+        root_folder   = filedialog.askdirectory(title="Select root folder (e.g. E:\\)")
+    if not output_folder:
+        output_folder = filedialog.askdirectory(title="Select output folder for tuning results")
     tk_root.destroy()
 
     if not root_folder or not output_folder:
         raise ValueError("Folder selection cancelled")
+
+    PASS1_MODE_OVERRIDE = str(PASS1_MODE_OVERRIDE).strip().lower()
+    if PASS1_MODE_OVERRIDE not in ('', 'greedy', 'lap'):
+        raise ValueError("PASS1_MODE_OVERRIDE must be '', 'greedy', or 'lap'")
 
     os.makedirs(output_folder, exist_ok=True)
 
@@ -586,10 +760,18 @@ if __name__ == '__main__':
     if not ground_truth:
         raise ValueError("No qualifying events found in annotation files")
 
-    # Pre-load all event data; normalize for each (wt, cf) combination once
-    wt_cf_combos = [(wt, cf)
-                    for wt in GRID['waveform_target_length']
-                    for cf in GRID['crop_factor']]
+    # Pre-load all event data; normalize for each (wt, cf) combination once.
+    # If running from proposals, read the proposals CSV early to pick up any
+    # (wt, cf) values not in GRID (future-proofing against expanded DISCRETE_ONLY).
+    wt_cf_set = {(wt, cf)
+                 for wt in GRID['waveform_target_length']
+                 for cf in GRID['crop_factor']}
+    if PROPOSALS_CSV and os.path.isfile(PROPOSALS_CSV):
+        _prop_preview = pd.read_csv(PROPOSALS_CSV,
+                                    usecols=['waveform_target_length', 'crop_factor'])
+        for _, _r in _prop_preview.iterrows():
+            wt_cf_set.add((int(_r['waveform_target_length']), int(_r['crop_factor'])))
+    wt_cf_combos = sorted(wt_cf_set)
     events_data = []
     n_skipped   = 0
 
@@ -688,45 +870,68 @@ if __name__ == '__main__':
     print(f"  1-fish events: {n_1fish},  2-fish events: {n_2fish}")
 
     # Generate parameter combinations
-    grid_keys    = list(GRID.keys())
-    grid_vals    = [GRID[k] for k in grid_keys]
-    total_indep  = 1
-    for v in grid_vals:
-        total_indep *= len(v)
-    total_combos = total_indep * len(WEIGHT_TRIPLETS) * len(WEIGHT_PAIRS)
-    print(f"\nTotal possible combinations: {total_combos:,}  |  weight triplets: {len(WEIGHT_TRIPLETS)}  |  weight pairs: {len(WEIGHT_PAIRS)}")
-
-    rng_combo = random.Random(RANDOM_SEED)
-    if N_RANDOM_SAMPLES <= 0 or total_combos <= N_RANDOM_SAMPLES:
-        param_combos = []
-        for indep in itertools.product(*grid_vals):
-            d = dict(zip(grid_keys, indep))
-            for lw, iw, ww in WEIGHT_TRIPLETS:
-                for p2ww, p2sw in WEIGHT_PAIRS:
-                    c = dict(d)
-                    c['location_weight']       = lw
-                    c['ipi_weight']            = iw
-                    c['waveform_weight']       = ww
-                    c['pass2_waveform_weight'] = p2ww
-                    c['pass2_spatial_weight']  = p2sw
-                    param_combos.append(c)
-        print(f"Mode: exhaustive ({len(param_combos)} combinations)")
+    if PROPOSALS_CSV and os.path.isfile(PROPOSALS_CSV):
+        prop_df      = pd.read_csv(PROPOSALS_CSV)
+        param_combos = prop_df.to_dict(orient='records')
+        # ensure int params are correct type
+        int_params = ['pass2_max_iterations', 'pass2_overlap_max_iterations',
+                      'crop_factor', 'waveform_target_length', 'knn_percentile']
+        for combo in param_combos:
+            for k in int_params:
+                if k in combo:
+                    combo[k] = int(round(combo[k]))
+        print(f"Mode: proposals from {os.path.basename(PROPOSALS_CSV)} ({len(param_combos)} combos)")
     else:
-        param_combos = []
-        for _ in range(N_RANDOM_SAMPLES):
-            d = {k: rng_combo.choice(v) for k, v in GRID.items()}
-            lw, iw, ww           = rng_combo.choice(WEIGHT_TRIPLETS)
-            p2ww, p2sw           = rng_combo.choice(WEIGHT_PAIRS)
-            d['location_weight']       = lw
-            d['ipi_weight']            = iw
-            d['waveform_weight']       = ww
-            d['pass2_waveform_weight'] = p2ww
-            d['pass2_spatial_weight']  = p2sw
-            param_combos.append(d)
-        print(f"Mode: random search ({len(param_combos)} of {total_combos:,} combinations)")
+        grid_keys    = list(GRID.keys())
+        grid_vals    = [GRID[k] for k in grid_keys]
+        total_indep  = 1
+        for v in grid_vals:
+            total_indep *= len(v)
+        total_combos = total_indep * len(WEIGHT_TRIPLETS) * len(WEIGHT_PAIRS)
+        print(f"\nTotal possible combinations: {total_combos:,}  |  weight triplets: {len(WEIGHT_TRIPLETS)}  |  weight pairs: {len(WEIGHT_PAIRS)}")
+
+        rng_combo = random.Random(RANDOM_SEED)
+        if N_RANDOM_SAMPLES <= 0 or total_combos <= N_RANDOM_SAMPLES:
+            param_combos = []
+            for indep in itertools.product(*grid_vals):
+                d = dict(zip(grid_keys, indep))
+                for lw, iw, ww in WEIGHT_TRIPLETS:
+                    for p2ww, p2sw in WEIGHT_PAIRS:
+                        c = dict(d)
+                        c['location_weight']       = lw
+                        c['ipi_weight']            = iw
+                        c['waveform_weight']       = ww
+                        c['pass2_waveform_weight'] = p2ww
+                        c['pass2_spatial_weight']  = p2sw
+                        param_combos.append(c)
+            print(f"Mode: exhaustive ({len(param_combos)} combinations)")
+        else:
+            param_combos = []
+            for _ in range(N_RANDOM_SAMPLES):
+                d = {k: rng_combo.choice(v) for k, v in GRID.items()}
+                lw, iw, ww           = rng_combo.choice(WEIGHT_TRIPLETS)
+                p2ww, p2sw           = rng_combo.choice(WEIGHT_PAIRS)
+                d['location_weight']       = lw
+                d['ipi_weight']            = iw
+                d['waveform_weight']       = ww
+                d['pass2_waveform_weight'] = p2ww
+                d['pass2_spatial_weight']  = p2sw
+                param_combos.append(d)
+            print(f"Mode: random search ({len(param_combos)} of {total_combos:,} combinations)")
 
     # Parallel evaluation with incremental CSV saves
-    out_csv        = os.path.join(output_folder, 'parameter_tuning_results.csv')
+    if PASS1_MODE_OVERRIDE:
+        for combo in param_combos:
+            combo['pass1_mode'] = PASS1_MODE_OVERRIDE
+
+    # In proposals mode, save to a separate file named after the proposals CSV
+    # so 05_5 can glob all parameter_tuning_results*.csv and load every iteration.
+    if PROPOSALS_CSV and os.path.isfile(PROPOSALS_CSV):
+        prop_stem = os.path.splitext(os.path.basename(PROPOSALS_CSV))[0]  # e.g. proposals_iter01
+        iter_tag  = prop_stem.replace('proposals_', '')                    # e.g. iter01
+        out_csv   = os.path.join(output_folder, f'parameter_tuning_results_{iter_tag}.csv')
+    else:
+        out_csv   = os.path.join(output_folder, 'parameter_tuning_results.csv')
     header_written = os.path.exists(out_csv)
     n_done         = 0
 
