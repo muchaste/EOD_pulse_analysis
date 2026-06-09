@@ -55,6 +55,7 @@ class PulseDiagnosticTool:
         self.calibrated_data = None
         self.data_source = 'multich_linear'  # 'multich_linear', '1ch_diff'
         self.file_name = None
+        self.dead_ch_0idx = np.array([], dtype=int)  # 0-indexed dead channel indices
         
         # File metadata for reloading
         self.source_file_path = None
@@ -545,20 +546,18 @@ class PulseDiagnosticTool:
             
             # Apply calibration if needed (for 'audio' type with calibration file)
             if self.source_file_type == 'audio' and self.calibration_file_path is not None:
-                # Load calibration factors
-                self.calibration_factors = np.array(pd.read_csv(self.calibration_file_path))
-                print(f"Loaded calibration: {self.calibration_file_path}")
+                cf_values = self._load_calibration_factors(self.calibration_file_path)
+                self.calibration_factors = cf_values  # store as 1-D array
                 
-                # Apply calibration
-                self.calibrated_data = audio_data.copy()
-                n_channels = self.calibrated_data.shape[1]
-                for i in range(n_channels):
-                    self.calibrated_data[:, i] *= self.calibration_factors[i, 1]
+                self.dead_ch_0idx = np.where(np.isnan(cf_values) | (cf_values == 0))[0]
+                if len(self.dead_ch_0idx) > 0:
+                    print("*** DEAD CHANNEL(S): %s — correction factor NaN/0, skipping calibration for these channels ***" %
+                          ", ".join("ch%d" % (c + 1) for c in self.dead_ch_0idx))
                 
-                # Also calibrate full_data cache
+                self.calibrated_data = self._apply_calibration(audio_data, cf_values, self.dead_ch_0idx)
+                
                 if self.full_data is not None:
-                    for i in range(n_channels):
-                        self.full_data[:, i] *= self.calibration_factors[i, 1]
+                    self.full_data = self._apply_calibration(self.full_data, cf_values, self.dead_ch_0idx)
                 
                 self.data_source = 'multich_linear'
                 print("Applied calibration to audio data")
@@ -567,6 +566,7 @@ class PulseDiagnosticTool:
                 # No calibration needed (precalibrated or 1ch_diff)
                 self.calibrated_data = audio_data.copy()
                 self.calibration_factors = None
+                self.dead_ch_0idx = np.array([], dtype=int)
                 
                 # Set data source based on type
                 if self.source_file_type == '1ch_diff':
@@ -746,6 +746,8 @@ class PulseDiagnosticTool:
             else:
                 source_desc = self.data_source
             info += f"Source: {source_desc}"
+            if len(self.dead_ch_0idx) > 0:
+                info += "\n*** DEAD: %s ***" % ", ".join("ch%d" % (c + 1) for c in self.dead_ch_0idx)
         elif self.source_file_path is not None:
             info += "\n[Click 'Load Data' to load]"
         
@@ -823,22 +825,47 @@ class PulseDiagnosticTool:
                 self.classifier_label.configure(text="sklearn N/A", foreground="red")
                 self.use_ml_filtering.set(False)
     
+    def _load_calibration_factors(self, filepath):
+        """Load correction factors from either all_files or median-per-channel CSV.
+        Returns 1-D float array of length n_channels, NaN for dead channels."""
+        df = pd.read_csv(filepath)
+        ch_cols = [c for c in df.columns if c.startswith('ch_')]
+        if ch_cols:
+            # all_files CSV: ch_1..ch_8, file_id, dead_channels — take nanmedian across rows
+            cf_values = np.nanmedian(df[ch_cols].values.astype(float), axis=0)
+            print(f"Calibration: detected all_files format ({len(df)} file(s), {len(ch_cols)} channels)")
+        elif 'median_correction_factor' in df.columns:
+            cf_values = df['median_correction_factor'].values.astype(float)
+            print(f"Calibration: detected median-per-channel format ({len(cf_values)} channels)")
+        else:
+            cf_values = np.array(df)[:, 1].astype(float)
+            print("Calibration: using positional column 1 (legacy format)")
+        return cf_values
+
+    def _apply_calibration(self, audio_data, cf_values, dead_ch_0idx):
+        """Apply correction factors to live channels in-place on a copy."""
+        calibrated = audio_data.copy()
+        for i in range(calibrated.shape[1]):
+            if i not in dead_ch_0idx:
+                calibrated[:, i] *= cf_values[i]
+        return calibrated
+
     def calibrate_data(self):
         """Apply calibration exactly like Script 03"""
         if self.raw_data is None or self.calibration_factors is None:
             return
-            
-        self.calibrated_data = self.raw_data.copy()
-        n_channels = self.calibrated_data.shape[1]
         
-        # Apply calibration factors (Script 03 logic)
-        for i in range(n_channels):
-            self.calibrated_data[:, i] *= self.calibration_factors[i, 1]
+        cf_values = self.calibration_factors  # already 1-D after _load_calibration_factors
+        self.dead_ch_0idx = np.where(np.isnan(cf_values) | (cf_values == 0))[0]
+        if len(self.dead_ch_0idx) > 0:
+            print("*** DEAD CHANNEL(S): %s — skipping calibration for these channels ***" %
+                  ", ".join("ch%d" % (c + 1) for c in self.dead_ch_0idx))
+            
+        self.calibrated_data = self._apply_calibration(self.raw_data, cf_values, self.dead_ch_0idx)
         
         # Also update full_data cache if it exists
         if self.full_data is not None:
-            for i in range(n_channels):
-                self.full_data[:, i] *= self.calibration_factors[i, 1]
+            self.full_data = self._apply_calibration(self.full_data, cf_values, self.dead_ch_0idx)
         
         # Set data source to multi-channel linear (calibrated data)
         self.data_source = 'multich_linear'
@@ -939,17 +966,16 @@ class PulseDiagnosticTool:
             offset_diff = np.max(np.abs(data_diff)) * 1.2
 
             for ch in range(n_channels - 1):  # Differential channels
-                # Create differential signal for this channel pair
-                # data_diff = np.diff(data[:, i:i+2], axis=1).flatten()
-                
-                # # Downsample for plotting
-                # step = max(1, len(data_diff[:,i]) // 1500000)
-                # x_coords = np.arange(0, len(data_diff), step)
-                
-                # Plot differential signal
-                self.ax.plot((x_coords / rate) + start_sec, 
-                           data_diff[::step, ch] + ((ch + 0.5) * offset_diff), 
-                           linewidth=0.5, label=f'Ch{ch}-{ch+1}')
+                is_dead_pair = int(ch) in self.dead_ch_0idx or int(ch + 1) in self.dead_ch_0idx
+                if is_dead_pair:
+                    self.ax.plot((x_coords / rate) + start_sec,
+                                 data_diff[::step, ch] + ((ch + 0.5) * offset_diff),
+                                 linewidth=0.5, color='red', linestyle='--',
+                                 label=f'Ch{ch}-{ch+1} DEAD')
+                else:
+                    self.ax.plot((x_coords / rate) + start_sec,
+                                 data_diff[::step, ch] + ((ch + 0.5) * offset_diff),
+                                 linewidth=0.5, label=f'Ch{ch}-{ch+1}')
             
             # self.ax.set_ylim(bottom=np.min(data_diff)*1.2, top=(n_channels-1.5)*offset_diff)
             self.ax.set_ylim(bottom=-0.5*offset_diff, top=(n_channels-0.5)*offset_diff)
@@ -1069,30 +1095,39 @@ class PulseDiagnosticTool:
             if self.data_source == 'multich_linear' and self.plot_mode.get() == 'differential':
                 data_detect = np.diff(data, axis=1)
                 n_detect_channels = n_channels - 1
+                detect_pair_indices = [i for i in range(n_detect_channels)
+                                       if i not in self.dead_ch_0idx and (i + 1) not in self.dead_ch_0idx]
+                if len(self.dead_ch_0idx) > 0:
+                    dead_pairs = [i for i in range(n_detect_channels) if i not in detect_pair_indices]
+                    print("    *** DEAD CHANNEL(S) %s — skipping detection pairs: %s ***" %
+                          (", ".join("ch%d" % (c + 1) for c in self.dead_ch_0idx),
+                           ", ".join(str(p) for p in dead_pairs)))
             elif self.data_source == 'multich_linear' and self.plot_mode.get() == 'single_ended':
                 data_detect = data  # Use single-ended data for detection
                 n_detect_channels = n_channels
+                detect_pair_indices = list(range(n_detect_channels))
             elif self.data_source == '1ch_diff':
                 # Single-channel differential - data is already differential
                 data_detect = data
                 n_detect_channels = 1
+                detect_pair_indices = [0]
 
             # Detect pulses on each channel
             all_peaks = []
             all_troughs = []
             all_widths = []
             
-            for i in range(n_detect_channels):
+            for pair_idx in detect_pair_indices:
                 if self.use_bandpass_filter.get():
                     # Apply bandpass filter before detection
                     ch_data = bandpass_filter(
-                        data_detect[:, i], rate, 
+                        data_detect[:, pair_idx], rate, 
                         lowcut=float(self.bandpass_lowcut.get()), 
                         highcut=float(self.bandpass_highcut.get()), 
                         order=int(self.bandpass_order.get())
                     )
                 else:
-                    ch_data = data_detect[:, i]
+                    ch_data = data_detect[:, pair_idx]
 
                 ch_peaks, ch_troughs, _, ch_pulse_widths = pulses.detect_pulses(
                     ch_data, 
