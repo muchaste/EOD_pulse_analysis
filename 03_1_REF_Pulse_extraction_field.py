@@ -199,20 +199,35 @@ except Exception as e:
     exit()
 
 # Apply calibration factors
-cor_factors = np.array(cor_factors_all.iloc[np.where(cor_factors_all['file_id']==os.path.basename(file_set['filename'][0]).split('.')[0])[0][0]])
-for i in range(n_channels):
-    data[:, i] *= cor_factors[i]
+_preview_file_id = os.path.basename(file_set['filename'][0]).split('.')[0]
+_ch_cols = [c for c in cor_factors_all.columns if c.startswith('ch_')]
+_preview_row = cor_factors_all.loc[cor_factors_all['file_id'] == _preview_file_id].iloc[0]
+_preview_cf = _preview_row[_ch_cols].values.astype(float)
+_preview_dead_0idx = np.where(np.isnan(_preview_cf))[0]
+_preview_live_0idx = np.where(~np.isnan(_preview_cf))[0]
+for i in _preview_live_0idx:
+    data[:, i] *= _preview_cf[i]
+if len(_preview_dead_0idx) > 0:
+    print("\n*** WARNING: dead channel(s) in preview file %s: %s — those channels uncalibrated ***" %
+          (_preview_file_id, ", ".join("ch%d" % (c + 1) for c in _preview_dead_0idx)))
 
 # Plot raw data
 offset = np.max(abs(data))#*1.5
 plt.figure(figsize=(40,12))
 for i in range(n_channels):
-    plt.plot(data[0:int(60*rate-1), i] + i*offset, label=str(i+1))
+    if i in _preview_dead_0idx:
+        plt.plot(data[0:int(60*rate-1), i] + i*offset, color='red', linestyle='--',
+                 linewidth=1.5, label='ch%d DEAD' % (i + 1))
+    else:
+        plt.plot(data[0:int(60*rate-1), i] + i*offset, label=str(i+1))
     plt.hlines(y=parameters['thresh'] + i*offset, xmin=0, xmax=int(60*rate-1))
 
 plt.legend(loc='upper right')
 plt.xlabel('Sample')
 plt.ylabel('Voltage')
+if len(_preview_dead_0idx) > 0:
+    plt.title('Preview — DEAD CHANNEL(S): %s' % ", ".join("ch%d" % (c + 1) for c in _preview_dead_0idx),
+              color='red', fontweight='bold')
 plt.savefig('%s\\%s_one_minute_raw.png'%(output_path, file_set['filename'][0].split('\\')[-1][:-4]))
 plt.show(block=False)
 
@@ -226,6 +241,8 @@ del data
 
 #%%
 # Initialize cross-file continuation variables
+_ch_cols = [c for c in cor_factors_all.columns if c.startswith('ch_')]
+_dead_channel_log = []  # accumulates per-file dead channel entries
 retained_data = None
 retained_data_start_time = None
 retained_eod_table = None
@@ -266,10 +283,29 @@ for n, filepath in enumerate(file_set['filename']):
     file_duration = len(data) / rate
     print(f"    Loaded file: {file_duration:.1f}s, {n_channels} channels, {len(data)} samples")
     
-    # Calibrate with correction factor
-    cor_factors = np.array(cor_factors_all.iloc[np.where(cor_factors_all['file_id']==fname.split('.')[0])[0][0]])
-    for i in range(n_channels):
-        data[:, i] *= cor_factors[i]
+    # Calibrate with correction factor — live channels only, preserve physical channel space
+    _file_id_str = fname.split('.')[0]
+    _row_cf = cor_factors_all.loc[cor_factors_all['file_id'] == _file_id_str].iloc[0]
+    _cf_values = _row_cf[_ch_cols].values.astype(float)  # NaN for dead channels
+    _dead_ch_0idx = np.where(np.isnan(_cf_values))[0]    # 0-indexed dead channel indices
+    _live_ch_0idx = np.where(~np.isnan(_cf_values))[0]
+    # pairs where BOTH endpoints are live — preserves physical pair numbering
+    _live_pair_indices = [i for i in range(n_channels - 1)
+                          if i not in _dead_ch_0idx and (i + 1) not in _dead_ch_0idx]
+    _dead_pair_indices = [i for i in range(n_channels - 1) if i not in _live_pair_indices]
+    for i in _live_ch_0idx:
+        data[:, i] *= _cf_values[i]
+    if len(_dead_ch_0idx) > 0:
+        _dead_str = ", ".join("ch%d" % (c + 1) for c in _dead_ch_0idx)
+        _dead_pair_str = ", ".join("pair%d" % (p + 1) for p in _dead_pair_indices)
+        print(f"    *** DEAD CHANNEL(S): {_dead_str} — skipping detection pairs: {_dead_pair_str} ***")
+        _dead_channel_log.append({
+            'file_id': _file_id_str,
+            'dead_channels': ",".join(str(c + 1) for c in _dead_ch_0idx),
+            'dead_pairs': ",".join(str(p + 1) for p in _dead_pair_indices),
+            'n_live_pairs': len(_live_pair_indices)
+        })
+    _dead_channels_file_str = ",".join("ch%d" % (c + 1) for c in _dead_ch_0idx)
     
     # EOD detection and waveform extraction run on the new file only.
     # Audio is still concatenated with the retained tail for event WAV export.
@@ -295,10 +331,11 @@ for n, filepath in enumerate(file_set['filename']):
     # Create differential data and determine detection channels
     if parameters['source'] == 'multich_linear':
         data_diff = np.diff(detection_data, axis=1)
-        n_detect_channels = n_channels - 1  # Differential pairs
+        # Use only live adjacent pairs; _live_pair_indices preserves physical channel numbering
+        detect_pair_indices = _live_pair_indices
     elif parameters['source'] == '1ch_diff':
         data_diff = detection_data
-        n_detect_channels = 1  # Only first channel for single-channel differential
+        detect_pair_indices = [0]
     else:
         raise ValueError(f"Unknown source: {parameters['source']}")
 
@@ -315,15 +352,15 @@ for n, filepath in enumerate(file_set['filename']):
     if enable_bp:
         print(f"    Applying bandpass filter ({bp_low}-{bp_high} Hz) for detection")
 
-    for i in range(n_detect_channels):
+    for pair_idx in detect_pair_indices:
         # Prepare signal for detection (optionally filtered)
-        detection_signal = data_diff[:, i]
+        detection_signal = data_diff[:, pair_idx]
         if enable_bp:
             detection_signal = bandpass_filter(detection_signal, rate, bp_low, bp_high)
 
         ch_peaks, ch_troughs, _, ch_pulse_widths = \
-            pulses.detect_pulses(detection_signal, rate, 
-                                    thresh=parameters['thresh'], 
+            pulses.detect_pulses(detection_signal, rate,
+                                    thresh=parameters['thresh'],
                                     min_rel_slope_diff=parameters['min_rel_slope_diff'],
                                     min_width=parameters['min_width_us'] / 1e6,
                                     max_width=parameters['max_width_us'] / 1e6,
@@ -444,7 +481,8 @@ for n, filepath in enumerate(file_set['filename']):
             'pulse_orientation': pulse_orientations,
             'fft_freq_max': fft_peak_freqs,
             'snippet_p3_idx': snippet_p3_idc,
-            'p3_idx': final_p3_idc
+            'p3_idx': final_p3_idc,
+            'dead_channels_file': [_dead_channels_file_str] * len(raw_midpoint_idc)
         })
         filteredout_eod_table = pre_filter_table.iloc[filtered_out_indices].copy().reset_index(drop=True)
         del pre_filter_table
@@ -507,7 +545,8 @@ for n, filepath in enumerate(file_set['filename']):
             'pulse_orientation': pulse_orientations,
             'fft_freq_max': fft_peak_freqs,
             'snippet_p3_idx': snippet_p3_idc,
-            'p3_idx': final_p3_idc
+            'p3_idx': final_p3_idc,
+            'dead_channels_file': [_dead_channels_file_str] * len(raw_midpoint_idc)
         })
         filtered_eod_waveforms = eod_snippets
 
@@ -890,7 +929,8 @@ for n, filepath in enumerate(file_set['filename']):
                     'max_amplitude': event_eods['eod_amplitude'].max(),
                     'mean_width_ms': event_eods['eod_width_us'].mean() / 1000 if 'eod_width_us' in event_eods.columns else 0,
                     'n_files': event_eods['file_index'].nunique() if 'file_index' in event_eods.columns else 1,
-                    'file_names': ','.join(event_eods['filename'].unique()) if 'filename' in event_eods.columns else 'unknown'
+                    'file_names': ','.join(event_eods['filename'].unique()) if 'filename' in event_eods.columns else 'unknown',
+                    'dead_channels_file': event_eods['dead_channels_file'].iloc[0] if 'dead_channels_file' in event_eods.columns else ''
                 }
                 
                 event_summaries.append(summary)
@@ -1014,6 +1054,15 @@ if parameters['create_events'] and len(event_summaries) > 0:
     event_summary_file = os.path.join(output_path, 'all_event_summaries.csv')
     event_summary_df.to_csv(event_summary_file, index=False)
     print(f"\nSaved all event summaries to: {event_summary_file}")
+
+# Save dead channel log
+if len(_dead_channel_log) > 0:
+    dead_log_df = pd.DataFrame(_dead_channel_log)
+    dead_log_file = os.path.join(output_path, 'dead_channel_log.csv')
+    dead_log_df.to_csv(dead_log_file, index=False)
+    print(f"\n*** Dead channels were detected in {len(_dead_channel_log)} file(s). Log saved to: {dead_log_file} ***")
+else:
+    print("\nNo dead channels detected across all files.")
 
 # Save session metadata
 session_metadata = {
