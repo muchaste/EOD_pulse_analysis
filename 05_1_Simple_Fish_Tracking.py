@@ -19,7 +19,7 @@ from sklearn.model_selection import LeaveOneOut
 from pulse_functions import (
     load_waveforms,
     normalize_waveforms,
-    create_tracking_plot
+    save_waveforms,
 )
 from parameter_gui import TrackingParameterConfigGUI
 
@@ -60,18 +60,6 @@ waveform_npz_files = glob.glob(os.path.join(input_folder, "*_waveforms_concatena
 if not waveform_npz_files:
     raise ValueError(f"No waveform NPZ files found in {input_folder}")
 print(f"✓ Found {len(waveform_npz_files)} waveform NPZ file(s)")
-# prune "_waveforms_concatenated.npz" to get base names
-# waveform_bases = set(os.path.basename(f).replace("_waveforms_concatenated.npz", "") for f in waveform_npz_files)
-
-# waveform_metadata_files = glob.glob(os.path.join(input_folder, "*_waveforms_metadata.json"))
-# if not waveform_metadata_files:
-#     raise ValueError(f"No waveform metadata files found in {input_folder}")
-# print(f"✓ Found {len(waveform_metadata_files)} waveform metadata file(s)")
-
-audio_files = glob.glob(os.path.join(input_folder, "*.wav"))
-if not audio_files:
-    raise ValueError(f"No audio files found in {input_folder}")
-print(f"✓ Found {len(audio_files)} audio file(s)")
 
 event_summary_file = os.path.join(input_folder, "all_event_summaries.csv")
 if os.path.exists(event_summary_file):
@@ -85,19 +73,13 @@ file_sets_list = []
 for eod_file in eod_files:
     base_name = os.path.basename(eod_file).replace("_eod_table.csv", "")
     event_id = np.int64(base_name.split("event_")[1])
-    
     waveform_base = os.path.join(input_folder, f"{base_name}_waveforms")
-    # waveform_meta = os.path.join(input_folder, f"{base_name}_waveforms_metadata.json")
-    audio_file = os.path.join(input_folder, f"{base_name}.wav")
-    
-    if os.path.exists(waveform_base+"_concatenated.npz") and os.path.exists(audio_file):
+    if os.path.exists(waveform_base + "_concatenated.npz"):
         file_sets_list.append({
             'base_name': base_name,
             'event_id': event_id,
             'eod_file': eod_file,
             'waveform_base': waveform_base,
-            # 'waveform_meta': waveform_meta,
-            'audio_file': audio_file
         })
     else:
         print(f"⚠ Incomplete file set for {base_name}")
@@ -163,7 +145,7 @@ min_track_duration_s = float(params['min_track_duration_s'])
 width_min_separation_us = float(params['width_min_separation_us'])
 use_species_matching    = bool(params['use_species_matching'])
 lda_min_probability       = float(params.get('lda_min_probability', 0.0))
-lda_dist_uncertainty_pct  = int(params.get('lda_dist_uncertainty_pct', 95))
+lda_max_dist_factor       = float(params.get('lda_max_dist_factor', 1.5))
 
 # Load interp_factor from analysis_parameters.csv for physics-based KDE bandwidth
 _ap_file = os.path.join(input_folder, "analysis_parameters.csv")
@@ -281,11 +263,11 @@ if use_species_matching:
                 _centroid = _sp_coords.mean(axis=0)
                 _dists = np.linalg.norm(_sp_coords - _centroid, axis=1)
                 lda_sp_centroids[_sp] = _centroid
-                lda_sp_dist_thresholds[_sp] = float(np.percentile(_dists, lda_dist_uncertainty_pct)) if len(_dists) > 1 else np.inf
+                lda_sp_dist_thresholds[_sp] = float(np.max(_dists) * lda_max_dist_factor) if len(_dists) > 0 else np.inf
             print(f"\u2713 LDA fitted on {len(ref_matrix)} control mean waveforms "
                   f"({len(all_species_codes)} species, {n_pca_cls} PCA components)")
             for _sp in all_species_codes:
-                print(f"  {_sp}: LDA dist threshold (p{lda_dist_uncertainty_pct}) = {lda_sp_dist_thresholds[_sp]:.4f}")
+                print(f"  {_sp}: LDA dist threshold ({lda_max_dist_factor:.1f}× max ctrl scatter) = {lda_sp_dist_thresholds[_sp]:.4f}")
             # Leave-one-individual-out CV (each ref_matrix row = one individual mean waveform)
             sp_counts_loo = {sp: int((ref_species_arr == sp).sum()) for sp in all_species_codes}
             loo_feasible = all(c >= 2 for c in sp_counts_loo.values())
@@ -351,25 +333,13 @@ if use_species_matching:
             print("⚠ Only 1 species in reference library — LDA disabled, using 1-NN fallback")
             print("\u26a0 Only 1 species in reference library \u2014 LDA disabled, using 1-NN fallback")
 
-# # Pre-sort events by estimated fish count (from event summaries if available)
-# if event_summaries is not None and 'mean_ipi_seconds' in file_sets.columns:
-#     single_fish_threshold = 0.03
-#     single_fish_files = file_sets[file_sets['mean_ipi_seconds'] >= single_fish_threshold]
-#     multiple_fish_files = file_sets[file_sets['mean_ipi_seconds'] < single_fish_threshold]
-#     print(f"\n✓ Pre-sorting based on mean IPI:")
-#     print(f"  - Single fish candidates: {len(single_fish_files)}")
-#     print(f"  - Multiple fish candidates: {len(multiple_fish_files)}")
-# else:
-#     single_fish_files = file_sets
-#     multiple_fish_files = pd.DataFrame()
 #%%
 # =============================================================================
 # PER-FILE PROCESSING LOOP
 # =============================================================================
 
 all_tracked_data = []
-
-# NOTE: RENAME FILE_SET AND FILE_SETS TO SOMETHING BETTER - EVENT_DATA OR SOMETHING
+session_ts_rows = []  # accumulates 1-second presence records across all events
 
 for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
     print(f"\n{'='*70}")
@@ -1386,21 +1356,41 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
         fish_id = fid_to_fish[fid]
         f = fragments[fid]
         n_p = len(f['history'])
-        dur = (eod_data.loc[f['history'][-1], 'timestamp'] -
-               eod_data.loc[f['history'][0], 'timestamp']).total_seconds()
-        mean_loc = eod_data.loc[f['history'], 'pulse_location'].mean()
-        mean_width_val = eod_data.loc[f['history'], 'eod_width_us'].mean()
-        mean_rate_val = 1.0 / np.median(f['ipi_history']) if f['ipi_history'] else float('nan')
+        entry_time = eod_data.loc[f['history'][0], 'timestamp']
+        exit_time  = eod_data.loc[f['history'][-1], 'timestamp']
+        dur = (exit_time - entry_time).total_seconds()
+        fid_mask_sum = eod_data['fish_id'] == fish_id
+        frag_locs   = eod_data.loc[f['history'], 'pulse_location'].values
+        frag_widths = eod_data.loc[f['history'], 'eod_width_us'].values
+        frag_amps   = eod_data.loc[f['history'], 'eod_amplitude'].values
+        ipi_arr     = np.array(f['ipi_history']) if f['ipi_history'] else np.array([np.nan])
+        inst_rates  = 1.0 / ipi_arr
+        mean_loc       = float(frag_locs.mean())
+        mean_width_val = float(frag_widths.mean())
+        mean_rate_val  = float(1.0 / np.median(ipi_arr)) if f['ipi_history'] else float('nan')
+        mean_wf_l2 = waveforms_l2[fid_mask_sum].mean(axis=0)
+        sp_code = ''
+        if use_species_matching and 'species_assigned' in eod_data.columns:
+            sp_code = eod_data.loc[fid_mask_sum, 'species_assigned'].iloc[0].rstrip('?')
         fish_rec = {
+            'fish_key':      f"{file_set['base_name']}_fish_{fish_id}",
             'fish_id':       fish_id,
+            'entry_time':    entry_time,
+            'exit_time':     exit_time,
             'n_pulses':      n_p,
             'duration_s':    dur,
             'mean_rate_hz':  mean_rate_val,
+            'std_rate_hz':   float(np.nanstd(inst_rates)),
+            'cv_ipi':        float(np.nanstd(ipi_arr) / np.nanmean(ipi_arr)) if np.nanmean(ipi_arr) > 0 else float('nan'),
             'mean_location': mean_loc,
+            'std_location':  float(np.std(frag_locs)),
             'mean_width_us': mean_width_val,
+            'std_width_us':  float(np.std(frag_widths)),
+            'cv_amplitude':  float(np.std(frag_amps) / np.mean(frag_amps)) if np.mean(frag_amps) > 0 else float('nan'),
+            'species_code':  sp_code,
+            'mean_waveform': mean_wf_l2,
         }
         if use_species_matching and 'species_assigned' in eod_data.columns:
-            fid_mask_sum = eod_data['fish_id'] == fish_id
             fish_rec['species_assigned']   = eod_data.loc[fid_mask_sum, 'species_assigned'].iloc[0]
             fish_rec['species_uncertain']  = bool(eod_data.loc[fid_mask_sum, 'species_uncertain'].iloc[0])
             fish_rec['nearest_individual'] = eod_data.loc[fid_mask_sum, 'nearest_individual'].iloc[0]
@@ -1420,6 +1410,22 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
                         eod_data.loc[fid_mask_sum, f'dist_{sp}'].iloc[0]
                     )
         fish_details.append(fish_rec)
+
+    # Accumulate per-second time series rows for session-level CSV
+    for fid in sorted(fid_to_fish):
+        fish_id = fid_to_fish[fid]
+        fid_mask_ts = eod_data['fish_id'] == fish_id
+        sp_code_ts = fish_details[fid_to_fish[fid]]['species_code'] or 'fish'
+        fish_pulses = eod_data.loc[fid_mask_ts, ['timestamp', 'pulse_location']].copy()
+        fish_pulses['bin_dt'] = fish_pulses['timestamp'].dt.floor('s')
+        for bin_dt, grp in fish_pulses.groupby('bin_dt', sort=False):
+            int_ch = int(round(float(grp['pulse_location'].mean())))
+            int_ch = max(0, min(7, int_ch))
+            session_ts_rows.append({
+                'datetime_bin': bin_dt,
+                'species_code': sp_code_ts,
+                'int_channel':  int_ch,
+            })
 
     all_tracked_data.append({
         'base_name':       file_set['base_name'],
@@ -1504,3 +1510,85 @@ event_summary_out_path = os.path.join(output_folder, 'tracked_event_summary.csv'
 event_out_df.to_csv(event_summary_out_path, index=False)
 print(f"\u2713 Saved event summary: {os.path.basename(event_summary_out_path)} "
       f"({len(event_out_df)} rows)")
+
+# --- 4: Session-level mean waveforms per species ---
+all_fish_details = [fd for entry in all_tracked_data for fd in entry['fish_details']]
+if all_fish_details and any('mean_waveform' in fd for fd in all_fish_details):
+    sp_wf_map = {}
+    sp_key_map = {}
+    for fd in all_fish_details:
+        sp = fd.get('species_code', '') or 'unknown'
+        wf = fd.get('mean_waveform')
+        if wf is None:
+            continue
+        sp_wf_map.setdefault(sp, []).append(wf)
+        sp_key_map.setdefault(sp, []).append({
+            'fish_key':      fd['fish_key'],
+            'mean_location': fd['mean_location'],
+            'mean_rate_hz':  fd['mean_rate_hz'],
+            'entry_time':    fd['entry_time'],
+            'exit_time':     fd['exit_time'],
+        })
+    for sp, wf_list in sp_wf_map.items():
+        wf_out_base = os.path.join(output_folder, f'session_{sp}_mean_waveforms')
+        save_waveforms(wf_list, wf_out_base, format='npz', length='fixed')
+        keys_df = pd.DataFrame(sp_key_map[sp])
+        keys_df.to_csv(wf_out_base + '_keys.csv', index=False)
+        print(f"\u2713 Saved mean waveforms: {os.path.basename(wf_out_base)}.npz ({len(wf_list)} fish)")
+
+# --- 5: Session time series CSV (1-second bins, fish count per species per channel) ---
+if session_ts_rows:
+    ts_df = pd.DataFrame(session_ts_rows)
+    ts_df['col'] = ts_df['species_code'] + '_ch' + ts_df['int_channel'].astype(str)
+    ts_grouped = ts_df.groupby(['datetime_bin', 'col']).size().reset_index(name='n')
+    ts_wide = ts_grouped.pivot(index='datetime_bin', columns='col', values='n').fillna(0).astype(int)
+    t_min_ts = ts_wide.index.min()
+    t_max_ts = ts_wide.index.max()
+    full_grid = pd.date_range(start=t_min_ts, end=t_max_ts, freq='s')
+    ts_wide = ts_wide.reindex(full_grid, fill_value=0)
+    ts_wide.index.name = 'datetime'
+    ts_path = os.path.join(output_folder, 'session_fish_timeseries.csv')
+    ts_wide.to_csv(ts_path)
+    print(f"\u2713 Saved session time series: {os.path.basename(ts_path)} "
+          f"({len(ts_wide)} rows \u00d7 {len(ts_wide.columns)} columns)")
+
+# --- 6: Session summary figure (location + time histograms) ---
+if all_fish_details:
+    all_species_in_summ = sorted(set(fd.get('species_code', '') or 'unknown' for fd in all_fish_details))
+    sp_pal_summ = plt.cm.Set1(np.linspace(0, 0.8, max(len(all_species_in_summ), 1)))
+    sp_color_summ = {sp: sp_pal_summ[i] for i, sp in enumerate(all_species_in_summ)}
+
+    fig_sess, (ax_loc_s, ax_time_s) = plt.subplots(2, 1, figsize=(12, 8))
+    fig_sess.suptitle('Session summary', fontsize=11)
+
+    loc_bins = np.arange(-0.25, 8.25, 0.5)
+    for sp in all_species_in_summ:
+        sp_locs = [fd['mean_location'] for fd in all_fish_details
+                   if (fd.get('species_code', '') or 'unknown') == sp]
+        ax_loc_s.hist(sp_locs, bins=loc_bins, alpha=0.6,
+                      color=sp_color_summ[sp], label=sp, edgecolor='none')
+    ax_loc_s.set_xlabel('Mean location (electrode units)')
+    ax_loc_s.set_ylabel('Fish count')
+    ax_loc_s.set_title('Fish location distribution (0.5-unit bins)')
+    ax_loc_s.legend(fontsize=8)
+
+    time_bins_h = np.arange(0, 24.5, 0.5)
+    for sp in all_species_in_summ:
+        sp_entries = [fd['entry_time'] for fd in all_fish_details
+                      if (fd.get('species_code', '') or 'unknown') == sp
+                      and pd.notnull(fd['entry_time'])]
+        if sp_entries:
+            entry_hours = [(t.hour + t.minute / 60.0 + t.second / 3600.0) for t in sp_entries]
+            ax_time_s.hist(entry_hours, bins=time_bins_h, alpha=0.6,
+                           color=sp_color_summ[sp], label=sp, edgecolor='none')
+    ax_time_s.set_xlabel('Hour of day')
+    ax_time_s.set_ylabel('Fish arrivals')
+    ax_time_s.set_title('Fish arrival time distribution (0.5-hour bins)')
+    ax_time_s.set_xlim(0, 24)
+    ax_time_s.legend(fontsize=8)
+
+    plt.tight_layout()
+    sess_fig_path = os.path.join(output_folder, 'session_summary.png')
+    plt.savefig(sess_fig_path, dpi=120, bbox_inches='tight')
+    plt.close()
+    print(f"\u2713 Saved session summary figure: {os.path.basename(sess_fig_path)}")
