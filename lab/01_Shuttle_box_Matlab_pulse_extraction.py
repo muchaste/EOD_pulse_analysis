@@ -103,7 +103,6 @@ peak_fft_freq_max = parameters['peak_fft_freq_max']
 extraction_window_length_us = parameters['extraction_window_length_us']
 extraction_window_factor = parameters['extraction_window_factor']
 search_window = int(parameters['search_window'])
-return_diff = parameters['return_diff']
 
 
 # ============================================================================
