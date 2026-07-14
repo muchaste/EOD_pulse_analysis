@@ -29,7 +29,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Import EOD functions
 from pulse_functions import (
     load_waveforms,
-    normalize_waveforms
+    normalize_waveforms,
+    save_waveforms
 )
 from parameter_gui import TrackingParameterConfigGUI
 
