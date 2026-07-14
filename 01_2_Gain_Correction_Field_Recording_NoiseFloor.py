@@ -59,17 +59,12 @@ for fidx, fname in enumerate(file_list):
     knee_thresholds = np.full(channels, np.nan)
     knee_valid = np.zeros(channels, dtype=bool)
     peak_counts_all = np.zeros((channels, N_THRESHOLDS), dtype=int)
+    dead_mask = np.zeros(channels, dtype=bool)
 
     for i in range(channels):
         channel_raw = data_window[:, i]
         channel_abs = np.abs(channel_raw)
         max_amp = np.max(channel_abs)
-
-        if max_amp == 0:
-            print("  Channel %d: zero amplitude, skipping (fallback)" % (i + 1))
-            rms[i] = np.std(channel_raw) * np.sqrt(2)
-            continue
-
         channel_norm = channel_abs / max_amp
 
         peak_counts = np.zeros(N_THRESHOLDS, dtype=int)
@@ -110,10 +105,22 @@ for fidx, fname in enumerate(file_list):
             rms[i] = np.std(channel_raw[mask]) * np.sqrt(2)
         else:
             rms[i] = np.std(channel_raw) * np.sqrt(2)
+            
+        if rms[i] == 0:
+            print("  *** DEAD CHANNEL: ch%d — zero amplitude, excluding from calibration ***" % (i + 1))
+            dead_mask[i] = True
+            rms[i] = np.nan
+            continue
 
-    rms_norm = rms / np.max(np.abs(rms))
-    cor_factors = 1.0 / rms_norm
-    cor_factors /= np.max(cor_factors)
+    live = ~dead_mask
+    rms_norm = np.full(channels, np.nan)
+    rms_norm[live] = rms[live] / np.max(rms[live])
+    cor_factors = np.full(channels, np.nan)
+    cor_factors[live] = 1.0 / rms_norm[live]
+    cor_factors[live] /= np.max(cor_factors[live])
+    if np.any(dead_mask):
+        dead_1idx = np.where(dead_mask)[0] + 1
+        print("  *** Dead channel(s) this file: %s — correction factor set to NaN ***" % ", ".join("ch%d" % c for c in dead_1idx))
 
     cf_all_files.append(cor_factors)
 
@@ -124,6 +131,12 @@ for fidx, fname in enumerate(file_list):
         axes = axes.flatten()
 
         for i in range(channels):
+            if dead_mask[i]:
+                axes[i].set_facecolor('#ffdddd')
+                axes[i].text(0.5, 0.5, 'DEAD', transform=axes[i].transAxes,
+                             fontsize=18, color='red', ha='center', va='center', fontweight='bold')
+                axes[i].set_title("Ch %d — DEAD" % (i + 1), fontsize=9, color='red')
+                continue
             axes[i].plot(thresholds, peak_counts_all[i, :], color='steelblue')
             if knee_valid[i]:
                 axes[i].axvline(knee_thresholds[i], color='red', linestyle='--', linewidth=1.5)
@@ -155,9 +168,22 @@ cf_df.columns = col_names
 file_ids = [fname.split('/')[-1].split('.')[0] for fname in file_list]
 cf_df['file_id'] = file_ids
 
+# Add dead_channels column: comma-joined 1-indexed channel numbers where cf is NaN, else empty string
+def _dead_ch_str(row):
+    dead = [c for c in col_names if pd.isna(row[c])]
+    return ",".join(str(int(c.split('_')[1])) for c in dead)
+cf_df['dead_channels'] = cf_df.apply(_dead_ch_str, axis=1)
+
+any_dead = cf_df['dead_channels'].str.len() > 0
+if any_dead.any():
+    print("\n*** FILES WITH DEAD CHANNELS DETECTED:")
+    for _, r in cf_df[any_dead].iterrows():
+        print("    %s  —  dead: ch%s" % (r['file_id'], r['dead_channels']))
+    print("***\n")
+
 cf_df.to_csv('%s\\%s_correction_factors_all_files.csv' % (output_path, logger_id), index=False)
 
-medians = np.median(cf_all_files, axis=0)
+medians = np.nanmedian(cf_all_files, axis=0)
 med_df = pd.DataFrame({'channel': np.arange(1, channels + 1), 'median_correction_factor': medians})
 med_df.to_csv('%s\\%s_correction_factors_median_per_channel.csv' % (output_path, logger_id), index=False)
 
