@@ -398,14 +398,13 @@ for fname, logfname in file_pairs:
         sex = logtext[2].split(':')[1][1:-1]
         rate = int(logtext[8].split(':')[1][1:-1])
         gain = float(logtext[12].split(':')[1][1:-1])
-        seglength = int(parameters['seg_length_min']) * 60 * rate
 
         data_dict = mat73.loadmat(fname)
         data_raw = pd.DataFrame(data_dict['data']) / gain
         del data_dict
         gc.collect()
 
-
+    seglength = int(parameters['seg_length_min']) * 60 * rate
     no_segments = math.ceil(len(data_raw) / seglength)
     left_v = detrend(data_raw.iloc[:, 0])
     left_h = detrend(data_raw.iloc[:, 1])
