@@ -29,11 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Import EOD functions
 from pulse_functions import (
     load_waveforms,
-    normalize_waveforms,
-<<<<<<< HEAD:05_1_Simple_Fish_Tracking.py
-    save_waveforms,
-=======
->>>>>>> dee32769a006117b067a741cf0c4fbb9a3e7ed50:eod_logger_4/04_1_Track_Fish.py
+    normalize_waveforms
 )
 from parameter_gui import TrackingParameterConfigGUI
 
