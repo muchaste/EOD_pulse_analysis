@@ -336,6 +336,18 @@ while not tuned:
     plt.savefig(os.path.join(output_path, f'{tune_stem}_EOD_analysis.png'), dpi=300)
     plt.show()
 
+    # Update parameters dictionary with tuned values
+    parameters.update({
+        'thresh': thresh,
+        'min_width_us': min_width_us,
+        'max_width_us': max_width_us,
+        'amplitude_ratio_min': amplitude_ratio_min,
+        'amplitude_ratio_max': amplitude_ratio_max,
+        'peak_fft_freq_min': peak_fft_freq_min,
+        'peak_fft_freq_max': peak_fft_freq_max,
+        'bp_low_cutoff': bp_low_cutoff,
+        'bp_high_cutoff': bp_high_cutoff
+    })
     # Popup message box to inform user of tuned parameters and to ask if they want to proceed
     message = "Tuned parameters:\n"
     for k, v in parameters.items():
@@ -352,18 +364,6 @@ while not tuned:
         parameters = config_gui.result['parameters']
 
 
-
-parameters.update({
-    'thresh': thresh,
-    'min_width_us': min_width_us,
-    'max_width_us': max_width_us,
-    'amplitude_ratio_min': amplitude_ratio_min,
-    'amplitude_ratio_max': amplitude_ratio_max,
-    'peak_fft_freq_min': peak_fft_freq_min,
-    'peak_fft_freq_max': peak_fft_freq_max,
-    'bp_low_cutoff': bp_low_cutoff,
-    'bp_high_cutoff': bp_high_cutoff
-})
 
 print(f"\nTuned parameters:")
 for k, v in parameters.items():
