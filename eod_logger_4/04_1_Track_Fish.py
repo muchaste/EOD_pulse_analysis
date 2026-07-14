@@ -1553,6 +1553,10 @@ if session_ts_rows:
     ts_df['col'] = ts_df['species_code'] + '_ch' + ts_df['int_channel'].astype(str)
     ts_grouped = ts_df.groupby(['datetime_bin', 'col']).size().reset_index(name='n')
     ts_wide = ts_grouped.pivot(index='datetime_bin', columns='col', values='n').fillna(0).astype(int)
+    # Ensure all 8 channels (0-7) appear for every species, even if unobserved
+    obs_species_ts = sorted(ts_df['species_code'].unique())
+    all_expected_cols = [f'{sp}_ch{ch}' for sp in obs_species_ts for ch in range(8)]
+    ts_wide = ts_wide.reindex(columns=sorted(set(ts_wide.columns) | set(all_expected_cols)), fill_value=0)
     t_min_ts = ts_wide.index.min()
     t_max_ts = ts_wide.index.max()
     full_grid = pd.date_range(start=t_min_ts, end=t_max_ts, freq='s')
@@ -1563,40 +1567,89 @@ if session_ts_rows:
     print(f"\u2713 Saved session time series: {os.path.basename(ts_path)} "
           f"({len(ts_wide)} rows \u00d7 {len(ts_wide.columns)} columns)")
 
-# --- 6: Session summary figure (location + time histograms) ---
+# --- 6: Session summary figure (location histogram + 2 stacked time bar plots) ---
 if all_fish_details:
     all_species_in_summ = sorted(set(fd.get('species_code', '') or 'unknown' for fd in all_fish_details))
     sp_pal_summ = plt.cm.Set1(np.linspace(0, 0.8, max(len(all_species_in_summ), 1)))
     sp_color_summ = {sp: sp_pal_summ[i] for i, sp in enumerate(all_species_in_summ)}
 
-    fig_sess, (ax_loc_s, ax_time_s) = plt.subplots(2, 1, figsize=(12, 8))
+    all_int_channels = list(range(8))  # always include all 8 electrode positions (0-7)
+    ch_pal = plt.cm.tab10(np.linspace(0, 0.9, 8))
+    ch_color_summ = {ch: ch_pal[ch] for ch in all_int_channels}
+
+    time_bins_h = np.arange(0, 24.5, 0.5)
+    bin_centers = time_bins_h[:-1] + 0.25
+    n_bins = len(bin_centers)
+
+    # For each fish, determine which 0.5h bins it is active in (entry_hour to exit_hour, mod 24)
+    # counts_by_sp[sp][bin] and counts_by_ch[ch][bin]
+    counts_by_sp = {sp: np.zeros(n_bins, dtype=float) for sp in all_species_in_summ}
+    counts_by_ch = {ch: np.zeros(n_bins, dtype=float) for ch in all_int_channels}
+
+    for fd in all_fish_details:
+        if not pd.notnull(fd.get('entry_time')) or not pd.notnull(fd.get('exit_time')):
+            continue
+        sp = fd.get('species_code', '') or 'unknown'
+        int_ch = max(0, min(7, int(round(fd['mean_location'])))) if pd.notnull(fd['mean_location']) else 0
+        entry_h = (fd['entry_time'].hour + fd['entry_time'].minute / 60.0 + fd['entry_time'].second / 3600.0) % 24
+        exit_h  = (fd['exit_time'].hour  + fd['exit_time'].minute  / 60.0 + fd['exit_time'].second  / 3600.0) % 24
+        for b_idx, b_start in enumerate(time_bins_h[:-1]):
+            b_end = b_start + 0.5
+            # overlap: entry < bin_end AND exit > bin_start (handles wrap-around via simple comparison)
+            if exit_h >= entry_h:
+                active = entry_h < b_end and exit_h > b_start
+            else:
+                # spans midnight
+                active = b_start < exit_h or b_end > entry_h
+            if active:
+                counts_by_sp[sp][b_idx] += 1
+                counts_by_ch[int_ch][b_idx] += 1
+
+    fig_sess, (ax_loc_s, ax_time_ch, ax_time_sp) = plt.subplots(3, 1, figsize=(14, 11))
     fig_sess.suptitle('Session summary', fontsize=11)
 
+    # Panel 1: location histogram
     loc_bins = np.arange(-0.25, 8.25, 0.5)
     for sp in all_species_in_summ:
         sp_locs = [fd['mean_location'] for fd in all_fish_details
-                   if (fd.get('species_code', '') or 'unknown') == sp]
-        ax_loc_s.hist(sp_locs, bins=loc_bins, alpha=0.6,
-                      color=sp_color_summ[sp], label=sp, edgecolor='none')
+                   if (fd.get('species_code', '') or 'unknown') == sp
+                   and pd.notnull(fd.get('mean_location'))]
+        if sp_locs:
+            ax_loc_s.hist(sp_locs, bins=loc_bins, alpha=0.6,
+                          color=sp_color_summ[sp], label=sp, edgecolor='none')
     ax_loc_s.set_xlabel('Mean location (electrode units)')
     ax_loc_s.set_ylabel('Fish count')
     ax_loc_s.set_title('Fish location distribution (0.5-unit bins)')
     ax_loc_s.legend(fontsize=8)
 
-    time_bins_h = np.arange(0, 24.5, 0.5)
+    # Panel 2: stacked bar by location (channel)
+    bottom_ch = np.zeros(n_bins)
+    bar_width = 0.5
+    for ch in all_int_channels:
+        ax_time_ch.bar(bin_centers, counts_by_ch[ch], width=bar_width,
+                       bottom=bottom_ch, color=ch_color_summ[ch],
+                       label=f'Ch{ch}', edgecolor='none', alpha=0.85)
+        bottom_ch += counts_by_ch[ch]
+    ax_time_ch.set_xlabel('Hour of day')
+    ax_time_ch.set_ylabel('Active fish count')
+    ax_time_ch.set_title('Active fish over time — stacked by location (0.5-hour bins)')
+    ax_time_ch.set_xlim(0, 24)
+    ax_time_ch.set_xticks(np.arange(0, 25, 2))
+    ax_time_ch.legend(fontsize=7, ncol=min(len(all_int_channels), 8), loc='upper right')
+
+    # Panel 3: stacked bar by species
+    bottom_sp = np.zeros(n_bins)
     for sp in all_species_in_summ:
-        sp_entries = [fd['entry_time'] for fd in all_fish_details
-                      if (fd.get('species_code', '') or 'unknown') == sp
-                      and pd.notnull(fd['entry_time'])]
-        if sp_entries:
-            entry_hours = [(t.hour + t.minute / 60.0 + t.second / 3600.0) for t in sp_entries]
-            ax_time_s.hist(entry_hours, bins=time_bins_h, alpha=0.6,
-                           color=sp_color_summ[sp], label=sp, edgecolor='none')
-    ax_time_s.set_xlabel('Hour of day')
-    ax_time_s.set_ylabel('Fish arrivals')
-    ax_time_s.set_title('Fish arrival time distribution (0.5-hour bins)')
-    ax_time_s.set_xlim(0, 24)
-    ax_time_s.legend(fontsize=8)
+        ax_time_sp.bar(bin_centers, counts_by_sp[sp], width=bar_width,
+                       bottom=bottom_sp, color=sp_color_summ[sp],
+                       label=sp, edgecolor='none', alpha=0.85)
+        bottom_sp += counts_by_sp[sp]
+    ax_time_sp.set_xlabel('Hour of day')
+    ax_time_sp.set_ylabel('Active fish count')
+    ax_time_sp.set_title('Active fish over time — stacked by species (0.5-hour bins)')
+    ax_time_sp.set_xlim(0, 24)
+    ax_time_sp.set_xticks(np.arange(0, 25, 2))
+    ax_time_sp.legend(fontsize=8, loc='upper right')
 
     plt.tight_layout()
     sess_fig_path = os.path.join(output_folder, 'session_summary.png')
