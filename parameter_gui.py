@@ -893,12 +893,12 @@ class TrackingParameterConfigGUI:
         self._lda_prob_entry.grid(row=2, column=1, sticky=tk.W, padx=5)
 
         self._lda_dist_label = ttk.Label(species_frame,
-                                         text="LDA Distance Uncertainty Percentile (ctrl scatter):",
+                                         text="Max LDA distance factor (× ctrl max scatter):",
                                          state='disabled')
         self._lda_dist_label.grid(row=3, column=0, sticky=tk.W, pady=2)
-        self.param_vars['lda_dist_uncertainty_pct'] = tk.IntVar(value=95)
+        self.param_vars['lda_max_dist_factor'] = tk.DoubleVar(value=1.5)
         self._lda_dist_entry = ttk.Entry(species_frame,
-                                         textvariable=self.param_vars['lda_dist_uncertainty_pct'],
+                                         textvariable=self.param_vars['lda_max_dist_factor'],
                                          width=10, state='disabled')
         self._lda_dist_entry.grid(row=3, column=1, sticky=tk.W, padx=5)
 
