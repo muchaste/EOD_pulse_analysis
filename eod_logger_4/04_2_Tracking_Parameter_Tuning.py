@@ -1,4 +1,15 @@
-import os
+# -*- coding: utf-8 -*-
+"""
+04_2_Tracking_Parameter_Tuning.py
+
+This script performs tracking parameter tuning for fish tracking on EOD events extracted from field recordings. 
+It evaluates different parameter combinations to optimize tracking performance (parameter grid search).
+
+Authors: Stefan Mucha with Claude Sonnet 4.6
+
+"""
+
+
 import glob
 import json
 import random
@@ -14,6 +25,8 @@ from scipy.signal import find_peaks
 from sklearn.cluster import DBSCAN
 from sklearn.decomposition import PCA
 from sklearn.metrics import pairwise_distances
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from pulse_functions import load_waveforms, normalize_waveforms
 

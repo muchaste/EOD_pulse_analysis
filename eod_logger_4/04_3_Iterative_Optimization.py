@@ -1,3 +1,16 @@
+# -*- coding: utf-8 -*-
+"""
+04_3_Iterative_Optimization.py
+
+This script performs iterative optimization of EOD pulse extraction parameters using a surrogate model (Random Forest) 
+and Expected Improvement acquisition function. 
+It generates new parameter proposals based on previous results and evaluates convergence.
+
+Authors: Stefan Mucha with Claude Sonnet 4.6
+
+"""
+
+
 import os
 import glob
 import numpy as np

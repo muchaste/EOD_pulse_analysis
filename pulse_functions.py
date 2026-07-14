@@ -133,6 +133,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
         Source of data:
         - '1ch_diff' : single-channel differential data (control recordings)
         - 'multich_linear' : multi-channel data with linear electrode arrangement (field recordings)
+        - 'shuttlebox_matlab' : multi-channel data from shuttlebox experiments (MATLAB format)
     return_differential : bool
         Whether to keep only differential pulses (default True, ignored if use_pca=True)
     interp_factor : int
@@ -240,6 +241,14 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
             n_pulses = len(peaks)
             eod_chans = np.zeros(n_pulses, dtype=int)
             is_differential = np.zeros(n_pulses, dtype=int)  # All single-ended
+    elif source == 'shuttlebox_matlab':
+        n_channels = data.shape[1]
+        print("    Shuttlebox MATLAB data source detected...")
+        # Shuttlebox data is multi-channel and all channels are differential -> only extract the largest-amplitude channel for each pulse
+        eod_chans, amps, cor_coefs = _select_best_channel_shuttlebox(
+            data, n_channels, peaks, troughs)
+        n_pulses = len(eod_chans)
+        is_differential = np.ones(n_pulses, dtype=int)  # 1 - all differential
 
 
     if return_differential and not use_pca:
@@ -341,6 +350,14 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
                     location_appended = True
                 else:
                     pulse_locations[-1] = diff_location
+            elif source == 'shuttlebox_matlab':
+                snippet = data[start_idx:end_idx, filtered_eod_chans[i]]
+                diff_location = filtered_eod_chans[i] 
+                if attempt == 0:
+                    pulse_locations.append(diff_location)
+                    location_appended = True
+                else:
+                    pulse_locations[-1] = diff_location
 
             if snippet.shape[0] == 0:
                 eod_waveforms.append(np.array([]))
@@ -366,7 +383,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
                 snippet_peak_idx = peak_idx - start_idx
                 snippet_trough_idx = trough_idx - start_idx
                 break
-
+            
             # Verify that snippet_peak_idx is the actual maximum and snippet_trough_idx the actual
             # minimum. The differential extraction can invert polarity relative to the raw detection,
             # so the translated raw indices may point to the wrong extremum.
@@ -399,19 +416,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
 
             # Search for missed third phase in triphasic pulses.
             amp_thr_tri = min(abs(snippet[snippet_peak_idx]), abs(snippet[snippet_trough_idx])) * 0.5
-            # # Case A1: P3 was detected as the peak (pulse appears HN but is actually HP triphasic).
-            # # detect_pulses returned (P3, P2); since P3 is temporally after P2, snippet_peak_idx > snippet_trough_idx.
-            # # Search before P2 for the missed P1.
-            # if snippet_peak_idx > snippet_trough_idx:
-            #     before_region = snippet[:snippet_trough_idx]
-            #     if len(before_region) > 0:
-            #         p1_candidates, _ = find_peaks(before_region, height=amp_thr_tri)
-            #         if len(p1_candidates) > 0:
-            #             p1_new = int(p1_candidates[-1])  # rightmost candidate, closest to P2
-            #             snippet_p3_idx = snippet_peak_idx  # old detected peak was P3
-            #             snippet_peak_idx = p1_new
-            #             filtered_peak_idc[i] = start_idx + p1_new
-
+          
             # Case A: Trough detected before peak -- HP triphasic where P3_peak was wrongly
             # returned by detect_pulses instead of P1_peak.
             # A1: search before P2 (trough) for missed P1 (positive peak).
@@ -699,6 +704,57 @@ def _select_differential_channel_pointwise(data, n_channels, peaks, troughs, sym
             is_differential[i] = 0
         
     return eod_chan, is_differential, amps, cor_coeffs
+
+def _select_best_channel_shuttlebox(data, n_channels, peaks, troughs):
+    """
+    Select the best differential channel from multi-channel shuttle-box recordings (all differential channels).
+    Best channel = highest amplitude channel for each pulse, with no polarity flip detection.
+    
+    Parameters
+    ----------
+    data : 2-D array
+        Multi-channel data
+    n_channels : int
+        Number of channels
+    peaks : 1-D array
+        Peak indices of pulses
+    troughs : 1-D array
+        Trough indices of pulses
+    
+    Returns
+    -------
+    eod_chan : 1-D array
+        Selected channel index
+    amps : 1-D array
+        Amplitudes for each channel
+    cor_coeffs : 2-D array
+        Correlation coefficients between adjacent channels
+    """
+    n_pulses = len(peaks)
+    amps = np.zeros((n_pulses, n_channels))  # Initialize 2D array
+    cor_coeffs = np.zeros((n_pulses, n_channels - 1))
+    eod_chan = np.zeros(n_pulses, dtype=int)
+
+    for i in range(n_pulses):
+        if peaks[i] < 0 or troughs[i] < 0:
+            continue  # Skip invalid indices
+        
+        # Extract 2-point snippet = data at peak and trough
+        snippet = data[[peaks[i], troughs[i]], :]  # Peak first, trough second
+
+        # Calculate amplitudes for each channel using correct peak/trough rows
+        amps[i, :] = abs(np.diff(snippet, axis = 0)[0])  # Store in 2D array
+
+        if snippet.shape[0] > 1:  # Need at least 2 samples for correlation
+            for j in range(n_channels - 1):
+                if np.var(snippet[:, j]) > 0 and np.var(snippet[:, j+1]) > 0:
+                    cor_coeffs[i, j] = np.corrcoef(snippet[:, j], snippet[:, j+1])[0, 1]
+    
+        # Find highest amplitude channel for each pulse
+        eod_chan[i] = np.argmax(amps[i,:])
+
+        
+    return eod_chan, amps, cor_coeffs
 
 
 def _estimate_differential_pulse_location(data, peak_idx, trough_idx, channel_idx, n_channels):

@@ -1,9 +1,18 @@
+# -*- coding: utf-8 -*-
+"""
+04_1_Track_Fish.py
+
+This script performs fish tracking on EOD events extracted from field recordings. 
+It uses waveform shape, inter-pulse interval (IPI), and spatial location to cluster pulses into individual fish tracks.
+
+Authors: Stefan Mucha with Claude Sonnet 4.6
+
+"""
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import tkinter as tk
-from tkinter import filedialog
-import os
 import json
 import glob
 from scipy.optimize import linear_sum_assignment
@@ -14,12 +23,17 @@ from sklearn.decomposition import PCA
 from sklearn.metrics import pairwise_distances
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.model_selection import LeaveOneOut
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import EOD functions
 from pulse_functions import (
     load_waveforms,
     normalize_waveforms,
+<<<<<<< HEAD:05_1_Simple_Fish_Tracking.py
     save_waveforms,
+=======
+>>>>>>> dee32769a006117b067a741cf0c4fbb9a3e7ed50:eod_logger_4/04_1_Track_Fish.py
 )
 from parameter_gui import TrackingParameterConfigGUI
 

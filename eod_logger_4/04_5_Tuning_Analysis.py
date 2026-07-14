@@ -1,3 +1,13 @@
+# -*- coding: utf-8 -*-
+"""
+04_5_Tuning_Analysis.py
+
+This script analyzes the results of the tuning process, generating plots and summaries.
+
+Authors: Stefan Mucha with Claude Sonnet 4.6
+"""
+
+
 import os
 import numpy as np
 import pandas as pd

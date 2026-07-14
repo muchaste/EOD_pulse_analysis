@@ -1135,3 +1135,234 @@ class TrackingParameterConfigGUI:
         self.result = None
         self.parent.quit()
         self.parent.destroy()
+
+
+class ShuttleboxConfigGUI:
+    """
+    GUI for configuring analysis parameters for shuttlebox Matlab EOD extraction.
+
+    Output folder only (recording file and logfile are selected via in-script dialogs).
+    Includes segment settings, detection/filter parameters, and processing options.
+    No calibration, ML filtering, or event creation.
+    """
+
+    def __init__(self, parent):
+        self.parent = parent
+        self.parent.title("Shuttlebox Matlab EOD Extraction - Parameter Configuration")
+
+        main_frame = ttk.Frame(parent, padding="10")
+        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(0, weight=1)
+        main_frame.columnconfigure(0, weight=1)
+
+        canvas = tk.Canvas(main_frame, height=700, width=700)
+        scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        main_frame.rowconfigure(0, weight=1)
+
+        self.param_vars = {}
+        self.path_vars = {}
+        current_row = 0
+
+        # ===== CONFIG FILE MANAGEMENT =====
+        config_frame = ttk.LabelFrame(scrollable_frame, text="Configuration File", padding="10")
+        config_frame.grid(row=current_row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
+        current_row += 1
+
+        ttk.Button(config_frame, text="Load Config", command=self.load_config).grid(row=0, column=0, padx=5)
+        ttk.Button(config_frame, text="Save Config", command=self.save_config).grid(row=0, column=1, padx=5)
+
+        # ===== PATH SETTINGS =====
+        path_frame = ttk.LabelFrame(scrollable_frame, text="Output Folder", padding="10")
+        path_frame.grid(row=current_row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
+        current_row += 1
+
+
+        ttk.Label(path_frame, text="Root Folder:").grid(row=0, column=0, sticky=tk.W)
+        self.path_vars['root_folder'] = tk.StringVar()
+        ttk.Entry(path_frame, textvariable=self.path_vars['root_folder'], width=60).grid(
+            row=0, column=1, padx=5)
+        ttk.Button(path_frame, text="Browse",
+                   command=lambda: self.browse_folder('root_folder')).grid(row=0, column=2)
+        
+        ttk.Label(path_frame, text="Output Folder:").grid(row=1, column=0, sticky=tk.W)
+        self.path_vars['output_path'] = tk.StringVar()
+        ttk.Entry(path_frame, textvariable=self.path_vars['output_path'], width=60).grid(
+            row=1, column=1, padx=5)
+        ttk.Button(path_frame, text="Browse",
+                   command=lambda: self.browse_folder('output_path')).grid(row=1, column=2)
+
+        # ===== SEGMENT SETTINGS =====
+        seg_frame = ttk.LabelFrame(scrollable_frame, text="Segment Settings", padding="10")
+        seg_frame.grid(row=current_row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
+        current_row += 1
+
+        for i, (key, label, default) in enumerate([
+            ('test_seg_length', 'Test Segment Length (s):', 60),
+            ('seg_length_min', 'Processing Segment Length (min):', 10),
+        ]):
+            ttk.Label(seg_frame, text=label).grid(row=i, column=0, sticky=tk.W, pady=2)
+            self.param_vars[key] = tk.IntVar(value=default)
+            ttk.Entry(seg_frame, textvariable=self.param_vars[key], width=12).grid(
+                row=i, column=1, sticky=tk.W, padx=5)
+
+        # ===== PULSE EXTRACTION PARAMETERS =====
+        pulse_frame = ttk.LabelFrame(scrollable_frame, text="Pulse Extraction", padding="10")
+        pulse_frame.grid(row=current_row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
+        current_row += 1
+
+        # Left column — detection
+        self.param_vars['enable_bp'] = tk.BooleanVar(value=True)
+        ttk.Checkbutton(pulse_frame, text="Bandpass Filter",
+                        variable=self.param_vars['enable_bp']).grid(
+            row=0, column=0, columnspan=2, sticky=tk.W, pady=2)
+
+        detection_params = [
+            ('tuning_thresh', 'Tuning Threshold:', 0.01, float),
+            ('thresh', 'Detection Threshold:', 0.05, float),
+            ('bp_low_cutoff', 'BP Low Cutoff (Hz):', 100.0, float),
+            ('bp_high_cutoff', 'BP High Cutoff (Hz):', 13000.0, float),
+            ('min_rel_slope_diff', 'Min Relative Slope Difference:', 0.25, float),
+            ('min_width_us', 'Min Pulse Width (μs):', 30.0, float),
+            ('max_width_us', 'Max Pulse Width (μs):', 1000.0, float),
+            ('width_fac_detection', 'Width Factor for Detection:', 7.0, float),
+            ('duplicate_samples', 'Duplicate Removal Samples:', 5, int),
+        ]
+
+        for i, (key, label, default, dtype) in enumerate(detection_params):
+            ttk.Label(pulse_frame, text=label).grid(row=i + 1, column=0, sticky=tk.W, pady=2)
+            self.param_vars[key] = tk.DoubleVar(value=default) if dtype == float else tk.IntVar(value=default)
+            ttk.Entry(pulse_frame, textvariable=self.param_vars[key], width=12).grid(
+                row=i + 1, column=1, sticky=tk.W, padx=5)
+
+        ttk.Separator(pulse_frame, orient='vertical').grid(row=0, column=2, rowspan=12, sticky='ns', padx=10)
+
+        # Right column — extraction / filter
+        filter_params = [
+            ('interp_factor', 'Interpolation Factor:', 3, int),
+            ('amplitude_ratio_min', 'Min Amplitude Ratio:', 0.2, float),
+            ('amplitude_ratio_max', 'Max Amplitude Ratio:', 4.0, float),
+            ('peak_fft_freq_min', 'Min FFT Peak Frequency (Hz):', 100.0, float),
+            ('peak_fft_freq_max', 'Max FFT Peak Frequency (Hz):', 13000.0, float),
+            ('extraction_window_length_us', 'Waveform Window Length (μs):', 4000.0, float),
+            ('extraction_window_factor', 'Waveform Window Factor:', 10.0, float),
+            ('search_window', 'Search Window (samples):', 10, int),
+        ]
+
+        for i, (key, label, default, dtype) in enumerate(filter_params):
+            ttk.Label(pulse_frame, text=label).grid(row=i, column=3, sticky=tk.W, pady=2)
+            self.param_vars[key] = tk.DoubleVar(value=default) if dtype == float else tk.IntVar(value=default)
+            ttk.Entry(pulse_frame, textvariable=self.param_vars[key], width=12).grid(
+                row=i, column=4, sticky=tk.W, padx=5)
+
+        # ===== PROCESSING OPTIONS =====
+        options_frame = ttk.LabelFrame(scrollable_frame, text="Processing Options", padding="10")
+        options_frame.grid(row=current_row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
+        current_row += 1
+
+        for i, (key, label, default) in enumerate([
+            ('create_plots', 'Create Diagnostic Plots', True),
+            ('save_filtered_out', 'Save Filtered-Out Pulses', False),
+        ]):
+            self.param_vars[key] = tk.BooleanVar(value=default)
+            ttk.Checkbutton(options_frame, text=label,
+                            variable=self.param_vars[key]).grid(
+                row=i, column=0, sticky=tk.W, pady=2)
+
+        # ===== ACTION BUTTONS =====
+        button_frame = ttk.Frame(scrollable_frame, padding="10")
+        button_frame.grid(row=current_row, column=0, columnspan=3, pady=10)
+
+        ttk.Button(button_frame, text="Start Processing",
+                   command=self.on_ok).grid(row=0, column=0, padx=5)
+        ttk.Button(button_frame, text="Cancel",
+                   command=self.on_cancel).grid(row=0, column=1, padx=5)
+
+        self.result = None
+
+    def browse_folder(self, var_name):
+        folder = filedialog.askdirectory(title=f"Select {var_name.replace('_', ' ').title()}")
+        if folder:
+            self.path_vars[var_name].set(folder)
+
+    def save_config(self):
+        filename = filedialog.asksaveasfilename(
+            title="Save Configuration",
+            defaultextension=".cfg",
+            filetypes=[("Config files", "*.cfg"), ("All files", "*.*")]
+        )
+        if not filename:
+            return
+        config = configparser.ConfigParser()
+        config['Paths'] = {k: v.get() for k, v in self.path_vars.items()}
+        config['Parameters'] = {k: str(v.get()) for k, v in self.param_vars.items()}
+        with open(filename, 'w') as f:
+            config.write(f)
+        messagebox.showinfo("Success", f"Configuration saved to:\n{filename}")
+
+    def load_config(self):
+        filename = filedialog.askopenfilename(
+            title="Load Configuration",
+            filetypes=[("Config files", "*.cfg"), ("All files", "*.*")]
+        )
+        if not filename:
+            return
+        config = configparser.ConfigParser()
+        config.read(filename)
+        if 'Paths' in config:
+            for key in self.path_vars:
+                if key in config['Paths']:
+                    self.path_vars[key].set(config['Paths'][key])
+        if 'Parameters' in config:
+            for key, var in self.param_vars.items():
+                if key in config['Parameters']:
+                    val = config['Parameters'][key]
+                    if isinstance(var, tk.BooleanVar):
+                        var.set(val.lower() in ('true', '1', 'yes'))
+                    elif isinstance(var, tk.IntVar):
+                        var.set(int(float(val)))
+                    elif isinstance(var, tk.DoubleVar):
+                        var.set(float(val))
+                    else:
+                        var.set(val)
+        messagebox.showinfo("Success", f"Configuration loaded from:\n{filename}")
+
+    def on_ok(self):
+        if not self.path_vars['output_path'].get():
+            messagebox.showerror("Validation Error", "Output folder path is required")
+            return
+        self.result = {
+            'root_folder': self.path_vars['root_folder'].get(),
+            'output_path': self.path_vars['output_path'].get(),
+            'parameters': {k: v.get() for k, v in self.param_vars.items()}
+        }
+        # Auto-save config to output folder
+        output_folder = self.path_vars['output_path'].get()
+        if output_folder and os.path.isdir(output_folder):
+            cfg_path = os.path.join(output_folder, "shuttlebox_config.cfg")
+            config = configparser.ConfigParser()
+            config['Paths'] = {k: v.get() for k, v in self.path_vars.items()}
+            config['Parameters'] = {k: str(v.get()) for k, v in self.param_vars.items()}
+            try:
+                with open(cfg_path, 'w') as f:
+                    config.write(f)
+            except Exception:
+                pass
+        self.parent.quit()
+        self.parent.destroy()
+
+    def on_cancel(self):
+        self.result = None
+        self.parent.quit()
+        self.parent.destroy()
