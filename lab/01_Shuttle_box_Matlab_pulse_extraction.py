@@ -145,8 +145,6 @@ test_data_df = pd.DataFrame({
     'all_diff': right_v - right_h - left_v - left_h
 })
 
-
-
 # Detect pulses in test segment across all channels, then unify
 peaks = []
 troughs = []
@@ -196,7 +194,8 @@ plt.savefig(os.path.join(output_path, f'{tune_stem}_test_detection.png'), dpi=15
 plt.show()
 
 # Extract snippets from test segment
-detection_data = np.array(test_data_df)
+# Concatenate left_v, left_h, right_v, right_h into an array for extraction
+detection_data = np.array(test_data_df[['left_v_dt', 'left_h_dt', 'right_v_dt', 'right_h_dt']])
 
 tuned = False
 
@@ -432,7 +431,9 @@ for fname, logfname in file_pairs:
         print(f"  Segment {seg_i + 1}/{no_segments}...")
         start_idx = seg_i * seglength
         end_idx = min((seg_i + 1) * seglength, len(data_df))
-        segment_data = np.array(data_df.iloc[start_idx:end_idx, :])
+
+        # Subset segment and only left_v, left_h, right_v, right_h for detection
+        segment_data = np.array(data_df.iloc[start_idx:end_idx, :][['left_v_dt', 'left_h_dt', 'right_v_dt', 'right_h_dt']])
 
         # Collect detections across all channels
         peaks = []
@@ -458,7 +459,7 @@ for fname, logfname in file_pairs:
             troughs.append(ch_troughs)
             pulse_widths.append(ch_pulse_widths)
 
-        # Unify AFTER all channels are collected
+        # Unify after all channels are collected
         unique_midpoints, unique_peaks, unique_troughs, unique_widths = unify_across_channels(
             peaks, troughs, pulse_widths, proximity_threshold=parameters['duplicate_samples'])
         del peaks, troughs, pulse_widths
@@ -538,8 +539,26 @@ for fname, logfname in file_pairs:
 
         print(f"    {len(eod_snippets)} valid EOD snippets after duplicate removal")
 
+
         raw_midpoint_idc = start_idx + (raw_p1_idc + raw_p2_idc) // 2
         snippet_midpoint_idc = (snippet_p1_idc + snippet_p2_idc) // 2
+
+        # Loop over raw_midpoint_idc and extract amplitudes and orientations for each channel
+        # eod_chan_amps = np.zeros((len(raw_midpoint_idc), 4))  # 4 channels: left_v, left_h, right_v, right_h
+        # eod_chan_orientations = np.zeros((len(raw_midpoint_idc), 4))
+
+        eod_chan_amps = np.abs(segment_data[raw_p1_idc] - segment_data[raw_p2_idc])
+        eod_chan_orientations = np.sign(segment_data[raw_p1_idc] - segment_data[raw_p2_idc]).astype(int)
+
+        # for i, raw_p1_idx in enumerate(raw_p1_idc):
+        #     if raw_p1_idx < 0 or raw_p1_idx >= len(segment_data):
+        #         continue
+        #     p1_dat = segment_data[raw_p1_idx, :]
+        #     p2_dat = segment_data[raw_p2_idc[i], :]
+            
+        #     eod_chan_amps[i, :] = np.abs(p1_dat - p2_dat)
+        #     eod_chan_orientations[i, :] = np.sign(p1_dat - p2_dat)
+
         eod_table_segment = pd.DataFrame({
             'timestamp': [filetime + dt.timedelta(seconds=t) for t in raw_midpoint_idc / rate],
             'file_timestamp': [filetime] * len(raw_midpoint_idc),
@@ -563,6 +582,14 @@ for fname, logfname in file_pairs:
             'fft_freq_max': fft_peak_freqs,
             'snippet_p3_idx': snippet_p3_idc,
             'p3_idx': final_p3_idc,
+            'amp_left_v':     eod_chan_amps[:, 0],
+            'amp_left_h':     eod_chan_amps[:, 1],
+            'amp_right_v':    eod_chan_amps[:, 2],
+            'amp_right_h':    eod_chan_amps[:, 3],
+            'orient_left_v':  eod_chan_orientations[:, 0],
+            'orient_left_h':  eod_chan_orientations[:, 1],
+            'orient_right_v': eod_chan_orientations[:, 2],
+            'orient_right_h': eod_chan_orientations[:, 3]
         })
         eod_table_file = pd.concat([eod_table_file, eod_table_segment], ignore_index=True)
         eod_waveforms_file.extend(eod_snippets)
