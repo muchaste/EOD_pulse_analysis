@@ -83,26 +83,26 @@ print(f"Found {len(file_pairs)} file pair(s)")
 # ============================================================================
 parameters = config_gui.result['parameters']
 
-# Unpack for use in the tuning phase below
-test_seg_length = int(parameters['test_seg_length'])
-enable_bp = parameters['enable_bp']
-tuning_thresh = parameters['tuning_thresh']
-thresh = parameters['thresh']
-bp_low_cutoff = parameters['bp_low_cutoff']
-bp_high_cutoff = parameters['bp_high_cutoff']
-min_rel_slope_diff = parameters['min_rel_slope_diff']
-min_width_us = parameters['min_width_us']
-max_width_us = parameters['max_width_us']
-width_fac_detection = parameters['width_fac_detection']
-duplicate_samples = int(parameters['duplicate_samples'])
-interp_factor = int(parameters['interp_factor'])
-amplitude_ratio_min = parameters['amplitude_ratio_min']
-amplitude_ratio_max = parameters['amplitude_ratio_max']
-peak_fft_freq_min = parameters['peak_fft_freq_min']
-peak_fft_freq_max = parameters['peak_fft_freq_max']
-extraction_window_length_us = parameters['extraction_window_length_us']
-extraction_window_factor = parameters['extraction_window_factor']
-search_window = int(parameters['search_window'])
+# # Unpack for use in the tuning phase below
+# test_seg_length = int(parameters['test_seg_length'])
+# enable_bp = parameters['enable_bp']
+# tuning_thresh = parameters['tuning_thresh']
+# thresh = parameters['thresh']
+# bp_low_cutoff = parameters['bp_low_cutoff']
+# bp_high_cutoff = parameters['bp_high_cutoff']
+# min_rel_slope_diff = parameters['min_rel_slope_diff']
+# min_width_us = parameters['min_width_us']
+# max_width_us = parameters['max_width_us']
+# width_fac_detection = parameters['width_fac_detection']
+# duplicate_samples = int(parameters['duplicate_samples'])
+# interp_factor = int(parameters['interp_factor'])
+# amplitude_ratio_min = parameters['amplitude_ratio_min']
+# amplitude_ratio_max = parameters['amplitude_ratio_max']
+# peak_fft_freq_min = parameters['peak_fft_freq_min']
+# peak_fft_freq_max = parameters['peak_fft_freq_max']
+# extraction_window_length_us = parameters['extraction_window_length_us']
+# extraction_window_factor = parameters['extraction_window_factor']
+# search_window = int(parameters['search_window'])
 
 
 # ============================================================================
@@ -121,15 +121,15 @@ gain = float(logtext[12].split(':')[1][1:-1])
 print(f"\nTuning on: {tune_stem}  (fish: {fish_id}, {sex}, rate: {rate} Hz)")
 
 data_dict = mat73.loadmat(tune_fname)
-data_raw_tune = pd.DataFrame(data_dict['data']) / gain
+data_raw = pd.DataFrame(data_dict['data']) / gain
 del data_dict
 gc.collect()
 
 # Build test segment detection DataFrame
-left_v = detrend(data_raw_tune.iloc[:(test_seg_length * rate), 0])
-left_h = detrend(data_raw_tune.iloc[:(test_seg_length * rate), 1])
-right_v = detrend(data_raw_tune.iloc[:(test_seg_length * rate), 2])
-right_h = detrend(data_raw_tune.iloc[:(test_seg_length * rate), 3])
+left_v = detrend(data_raw.iloc[:(int(parameters['test_seg_length']) * rate), 0])
+left_h = detrend(data_raw.iloc[:(int(parameters['test_seg_length']) * rate), 1])
+right_v = detrend(data_raw.iloc[:(int(parameters['test_seg_length']) * rate), 2])
+right_h = detrend(data_raw.iloc[:(int(parameters['test_seg_length']) * rate), 3])
 
 test_data_df = pd.DataFrame({
     'right_v_dt': right_v,
@@ -154,7 +154,7 @@ pulse_widths = []
 
 for i in range(test_data_df.shape[1]):
     detection_signal = np.array(test_data_df.iloc[:, i])
-    if enable_bp:
+    if parameters['enable_bp']:
         detection_signal = bandpass_filter(detection_signal, rate, parameters['bp_low_cutoff'], parameters['bp_high_cutoff'])
     ch_peaks, ch_troughs, _, ch_pulse_widths = pulses.detect_pulses(
         detection_signal, rate,
@@ -171,7 +171,7 @@ for i in range(test_data_df.shape[1]):
 
 # Unify AFTER collecting all channels
 unique_midpoints, unique_peaks, unique_troughs, unique_widths = unify_across_channels(
-    peaks, troughs, pulse_widths, proximity_threshold=duplicate_samples)
+    peaks, troughs, pulse_widths, proximity_threshold=int(parameters['duplicate_samples']))
 
 del peaks, troughs, pulse_widths
 gc.collect()
@@ -201,6 +201,8 @@ detection_data = np.array(test_data_df)
 tuned = False
 
 while not tuned:
+    parameters = config_gui.result['parameters']
+
 
     (
         eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
@@ -277,7 +279,7 @@ while not tuned:
     fig, ((ax1, ax2), (ax3, ax4), (ax5, ax6)) = plt.subplots(3, 2, figsize=(14, 9))
     n_samples = normalized_waveforms.shape[1]
     # Waveforms are interpolated by interp_factor, so effective sample rate is rate*interp_factor
-    time_axis = (np.arange(n_samples) - n_samples // 2) / (rate * interp_factor) * 1000
+    time_axis = (np.arange(n_samples) - n_samples // 2) / (rate * int(parameters['interp_factor'])) * 1000
 
     for wf in normalized_waveforms:
         ax1.plot(time_axis, wf, 'b-', alpha=0.3, linewidth=0.5)
@@ -320,7 +322,7 @@ while not tuned:
 
     psd_list = []
     for wf in normalized_waveforms:
-        freqs_psd, psd = signal.welch(wf, fs=rate * interp_factor, nperseg=min(len(wf), 1024))
+        freqs_psd, psd = signal.welch(wf, fs=rate * int(parameters['interp_factor']), nperseg=min(len(wf), 1024))
         psd_list.append(psd)
     mean_psd = np.mean(psd_list, axis=0)
     freq_mask = freqs_psd <= 100000
@@ -338,7 +340,6 @@ while not tuned:
 
     # Update parameters dictionary with tuned values
     parameters.update({
-        'thresh': thresh,
         'min_width_us': min_width_us,
         'max_width_us': max_width_us,
         'amplitude_ratio_min': amplitude_ratio_min,
@@ -375,7 +376,7 @@ with open(params_file, 'w') as f:
     for key, value in parameters.items():
         f.write(f"{key}: {value}\n")
 
-del data_raw_tune, test_data_df, detection_data, eod_snippets, normalized_waveforms
+del test_data_df, detection_data, eod_snippets, normalized_waveforms
 gc.collect()
 
 
@@ -389,20 +390,23 @@ for fname, logfname in file_pairs:
     file_stem = os.path.splitext(os.path.basename(fname))[0]
     print(f"\nProcessing: {file_stem}")
 
-    logtext = open(logfname, "r").readlines()
-    filetime = pd.to_datetime(logtext[0], format='%Y\\%m\\%d ; %H:%M:%S.%f\n')
-    fish_id = logtext[1].split(':')[1][1:-1]
-    sex = logtext[2].split(':')[1][1:-1]
-    rate = int(logtext[8].split(':')[1][1:-1])
-    gain = float(logtext[12].split(':')[1][1:-1])
-    seglength = int(parameters['seg_length_min']) * 60 * rate
+    # Skip loading the first file since it was already loaded during tuning
+    if fname is not file_pairs[0][0]:
+        logtext = open(logfname, "r").readlines()
+        filetime = pd.to_datetime(logtext[0], format='%Y\\%m\\%d ; %H:%M:%S.%f\n')
+        fish_id = logtext[1].split(':')[1][1:-1]
+        sex = logtext[2].split(':')[1][1:-1]
+        rate = int(logtext[8].split(':')[1][1:-1])
+        gain = float(logtext[12].split(':')[1][1:-1])
+        seglength = int(parameters['seg_length_min']) * 60 * rate
 
-    data_dict = mat73.loadmat(fname)
-    data_raw = pd.DataFrame(data_dict['data']) / gain
+        data_dict = mat73.loadmat(fname)
+        data_raw = pd.DataFrame(data_dict['data']) / gain
+        del data_dict
+        gc.collect()
+
+
     no_segments = math.ceil(len(data_raw) / seglength)
-    del data_dict
-    gc.collect()
-
     left_v = detrend(data_raw.iloc[:, 0])
     left_h = detrend(data_raw.iloc[:, 1])
     right_v = detrend(data_raw.iloc[:, 2])
