@@ -4,6 +4,8 @@ Gain calibration using noise-floor RMS after masking fish pulses.
 Scans a decreasing amplitude threshold per channel to find the knee where
 peak count jumps sharply (= noise floor). Masks ±MASK_WIDTH_MS around
 detected peaks, computes RMS on the clean baseline only.
+
+Authors: Stefan Mucha with Claude Sonnet 4.6
 """
 import matplotlib.pyplot as plt
 import audioio as aio

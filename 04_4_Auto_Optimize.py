@@ -23,8 +23,8 @@ PASS1_MODE_OVERRIDE = 'greedy'
 PYTHON_EXE     = sys.executable
 
 # Paths to the scripts
-SCRIPT_05_5    = os.path.join(os.path.dirname(__file__), '05_5_Iterative_Optimization.py')
-SCRIPT_05_2    = os.path.join(os.path.dirname(__file__), '05_2_Tracking_Parameter_Tuning.py')
+SCRIPT_04_3    = os.path.join(os.path.dirname(__file__), '04_3_Iterative_Optimization.py')
+SCRIPT_04_2    = os.path.join(os.path.dirname(__file__), '04_2_Tracking_Parameter_Tuning.py')
 
 # ============================================================
 # SETUP
@@ -100,7 +100,7 @@ for loop_i in range(MAX_ITERATIONS):
         print(f"[05_5] proposals_iter{current_iter:02d}.csv already exists, skipping.\n")
     else:
         print(f"[05_5] Generating proposals_iter{current_iter:02d}.csv ...\n")
-        run_script(SCRIPT_05_5)
+        run_script(SCRIPT_04_3)
         print(f"\n[05_5] Done.")
 
     state = read_flag()
@@ -119,8 +119,8 @@ for loop_i in range(MAX_ITERATIONS):
         extra_env = {'TUNING_PROPOSALS_CSV': proposals_path}
         if PASS1_MODE_OVERRIDE:
             extra_env['TUNING_PASS1_MODE'] = PASS1_MODE_OVERRIDE
-        run_script(SCRIPT_05_2, extra_env=extra_env)
-        print(f"\n[05_2] Done.")
+        run_script(SCRIPT_04_2, extra_env=extra_env)
+        print(f"\n[04_2] Done.")
 
     if not os.path.isfile(result_csv):
         print(f"ERROR: expected output {result_csv} was not created. Stopping.")

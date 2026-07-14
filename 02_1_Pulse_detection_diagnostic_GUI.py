@@ -7,7 +7,7 @@ EOD Pulse Detection Diagnostic Tool
 Simple diagnostic tool based on Script 03 logic with adjustable parameters.
 This is essentially Script 03 with a GUI for parameter adjustment and visualization.
 
-Author: AI Assistant & User
+Authors: Stefan Mucha with Claude Sonnet 4.6
 Date: September 2025
 """
 

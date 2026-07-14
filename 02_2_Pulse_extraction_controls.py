@@ -3,6 +3,7 @@
 # Control Recording EOD Pulse Extraction (Script 02)
 
 This script extracts EOD pulses from control/catalogue recordings
+Authors: Stefan Mucha with Claude Sonnet 4.6
 
 """
 
