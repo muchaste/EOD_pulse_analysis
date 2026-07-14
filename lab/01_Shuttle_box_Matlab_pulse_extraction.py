@@ -361,8 +361,10 @@ while not tuned:
         root = tkinter.Tk()
         config_gui = ShuttleboxConfigGUI(root)
         root.mainloop()
-        parameters = config_gui.result['parameters']
-
+        if config_gui.result is None:
+            print("Re-configuration cancelled, keeping previous parameters.")
+        else:
+            parameters = config_gui.result['parameters']
 
 
 print(f"\nTuned parameters:")
@@ -390,7 +392,7 @@ for fname, logfname in file_pairs:
     print(f"\nProcessing: {file_stem}")
 
     # Skip loading the first file since it was already loaded during tuning
-    if fname is not file_pairs[0][0]:
+    if fname != file_pairs[0][0]:
         logtext = open(logfname, "r").readlines()
         filetime = pd.to_datetime(logtext[0], format='%Y\\%m\\%d ; %H:%M:%S.%f\n')
         fish_id = logtext[1].split(':')[1][1:-1]
@@ -432,8 +434,8 @@ for fname, logfname in file_pairs:
         start_idx = seg_i * seglength
         end_idx = min((seg_i + 1) * seglength, len(data_df))
 
-        # Subset segment and only left_v, left_h, right_v, right_h for detection
-        segment_data = np.array(data_df.iloc[start_idx:end_idx, :][['left_v_dt', 'left_h_dt', 'right_v_dt', 'right_h_dt']])
+        # Subset segment 
+        segment_data = np.array(data_df.iloc[start_idx:end_idx, :])
 
         # Collect detections across all channels
         peaks = []
@@ -441,7 +443,7 @@ for fname, logfname in file_pairs:
         pulse_widths = []
 
         for j in range(segment_data.shape[1]):
-            detection_signal = segment_data[:, j]
+            detection_signal = segment_data[:, j].copy()
             if parameters['enable_bp']:
                 detection_signal = bandpass_filter(
                     detection_signal, rate,
@@ -471,13 +473,18 @@ for fname, logfname in file_pairs:
 
         print(f"    Found {len(unique_midpoints)} unique pulses")
 
+        # Subset only physical channels for snippet extraction
+        del segment_data
+        gc.collect()
+        segment_phys = np.array(data_df.iloc[start_idx:end_idx, :][['left_v_dt', 'left_h_dt', 'right_v_dt', 'right_h_dt']])
+
         (
             eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
             snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc,
             pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations,
             wf_lengths, snippet_p3_idc, final_p3_idc
         ) = extract_pulse_snippets(
-            segment_data, unique_peaks, unique_troughs, rate=rate,
+            segment_phys, unique_peaks, unique_troughs, rate=rate,
             source='shuttlebox_matlab', return_differential=True,
             interp_factor=parameters['interp_factor'],
             use_pca=False,
@@ -547,17 +554,8 @@ for fname, logfname in file_pairs:
         # eod_chan_amps = np.zeros((len(raw_midpoint_idc), 4))  # 4 channels: left_v, left_h, right_v, right_h
         # eod_chan_orientations = np.zeros((len(raw_midpoint_idc), 4))
 
-        eod_chan_amps = np.abs(segment_data[raw_p1_idc] - segment_data[raw_p2_idc])
-        eod_chan_orientations = np.sign(segment_data[raw_p1_idc] - segment_data[raw_p2_idc]).astype(int)
-
-        # for i, raw_p1_idx in enumerate(raw_p1_idc):
-        #     if raw_p1_idx < 0 or raw_p1_idx >= len(segment_data):
-        #         continue
-        #     p1_dat = segment_data[raw_p1_idx, :]
-        #     p2_dat = segment_data[raw_p2_idc[i], :]
-            
-        #     eod_chan_amps[i, :] = np.abs(p1_dat - p2_dat)
-        #     eod_chan_orientations[i, :] = np.sign(p1_dat - p2_dat)
+        eod_chan_amps = np.abs(segment_phys[raw_p1_idc] - segment_phys[raw_p2_idc])
+        eod_chan_orientations = np.sign(segment_phys[raw_p1_idc] - segment_phys[raw_p2_idc]).astype(int)
 
         eod_table_segment = pd.DataFrame({
             'timestamp': [filetime + dt.timedelta(seconds=t) for t in raw_midpoint_idc / rate],
