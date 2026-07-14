@@ -1,3 +1,13 @@
+# -*- coding: utf-8 -*-
+"""
+04_3b_Seed_Best_Combo.py
+
+This script seeds the best parameter combination from the Phase-A analysis for iterative optimization.
+It creates a single-row proposal CSV file with the best marginal values.
+
+Authors: Stefan Mucha with Claude Sonnet 4.6
+"""
+
 import os
 import pandas as pd
 import tkinter as tk

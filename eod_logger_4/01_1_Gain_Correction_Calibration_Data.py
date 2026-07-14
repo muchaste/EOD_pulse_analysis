@@ -1,20 +1,20 @@
 # -*- coding: utf-8 -*-
 """
+01_1_Gain_Correction_Calibration_Data.py
+
 Calibrate EOD logger 4.x recordings with calibration recordings (1 kHz sine wave)
+
+Author: Stefan Mucha
 """
 import matplotlib.pyplot as plt
 import audioio as aio
-# from audioio import load_audio
 from scipy import signal
 import numpy as np
 import pandas as pd
 import tkinter as tk
 from tkinter import filedialog
 import sys
-# from scipy.signal import detrend
-# from EOD_analysis_functions import extract_eod, load_wav
-# import gc
-# import re
+
 
 def find_sine_wave_onset_offset(audio_data, target_freq=1000, sample_rate=96000, bandwidth=50,
                                 threshold=0.3):
@@ -60,10 +60,6 @@ def find_sine_wave_onset_offset(audio_data, target_freq=1000, sample_rate=96000,
     # Find the onset and offset indices
     onset_idx = np.argmax(above_threshold)
     offset_idx = len(above_threshold) - 1 - np.argmax(above_threshold[::-1])
-    
-    # # Convert indices to time
-    # onset_time = onset_idx / sample_rate
-    # offset_time = offset_idx / sample_rate
     
     return onset_idx, offset_idx
 

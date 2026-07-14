@@ -1,8 +1,10 @@
+# -*- coding: utf-8 -*-
 """
-# 03_Pulse_extraction_field.py
-# Field Recording EOD Pulse Extraction (Script 03)
+02_3_Pulse_extraction_field.py
 
 This script extracts EOD pulses from multi-channel field recordings
+
+Authors: Stefan Mucha with Claude Sonnet 4.6
 
 """
 
@@ -13,7 +15,6 @@ import numpy as np
 import pandas as pd
 import tkinter as tk
 from tkinter import filedialog
-import os
 import gc
 import glob
 import datetime as dt
@@ -21,6 +22,8 @@ import os
 import json
 import pickle
 from scipy.signal import correlate
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import EOD functions
 from pulse_functions import (
@@ -31,7 +34,6 @@ from pulse_functions import (
     filter_waveforms,
     filter_waveforms_with_classifier,
     save_waveforms,
-    # save_fixed_length_waveforms,
     create_channel_events,
     merge_channel_events,
     filter_events,

@@ -1,3 +1,11 @@
+# -*- coding: utf-8 -*-
+"""
+04_4_Auto_Optimize.py
+This script automates the iterative optimization process by running 04_3 and 04_2
+
+Authors: Stefan Mucha with Claude Sonnet 4.6
+"""
+
 import os
 import sys
 import glob
@@ -7,7 +15,7 @@ import subprocess
 # CONFIGURATION
 # ============================================================
 
-# Folder containing all event data (passed to 05_2 as root folder)
+# Folder containing all event data (passed to 04_2 as root folder)
 ROOT_FOLDER    = r'E:\\'
 
 # Folder where results CSVs, proposals, and plots are saved
@@ -16,7 +24,7 @@ OUTPUT_FOLDER  = r'E:\track_tuning\output_combined_greedy'
 # Maximum number of optimization iterations to run
 MAX_ITERATIONS = 3
 
-# Optional pass1 override for 05_2: '', 'greedy', or 'lap'.
+# Optional pass1 override for 04_2: '', 'greedy', or 'lap'.
 PASS1_MODE_OVERRIDE = 'greedy'
 
 # Python interpreter to use (current interpreter by default)
@@ -82,8 +90,8 @@ if state.get('converged') == '1':
 # AUTOMATION LOOP
 # ============================================================
 # At the start of each outer loop:
-#   - 05_5 generates proposals_iter{N}.csv  (if not already done for this N)
-#   - 05_2 evaluates those proposals → parameter_tuning_results_iter{N}.csv
+#   - 04_3 generates proposals_iter{N}.csv  (if not already done for this N)
+#   - 04_2 evaluates those proposals → parameter_tuning_results_iter{N}.csv
 # We detect which step to start from based on what files exist.
 
 for loop_i in range(MAX_ITERATIONS):
@@ -94,14 +102,14 @@ for loop_i in range(MAX_ITERATIONS):
     print(f"LOOP {loop_i + 1}  —  optimization iteration {current_iter}")
     print("=" * 70)
 
-    # ---- STEP 1: run 05_5 to generate proposals ----
+    # ---- STEP 1: run 04_3 to generate proposals ----
     proposals_path = os.path.join(OUTPUT_FOLDER, f'proposals_iter{current_iter:02d}.csv')
     if os.path.isfile(proposals_path):
-        print(f"[05_5] proposals_iter{current_iter:02d}.csv already exists, skipping.\n")
+        print(f"[04_3] proposals_iter{current_iter:02d}.csv already exists, skipping.\n")
     else:
-        print(f"[05_5] Generating proposals_iter{current_iter:02d}.csv ...\n")
+        print(f"[04_3] Generating proposals_iter{current_iter:02d}.csv ...\n")
         run_script(SCRIPT_04_3)
-        print(f"\n[05_5] Done.")
+        print(f"\n[04_3] Done.")
 
     state = read_flag()
     proposals_path = state.get('proposals_path', proposals_path)
@@ -110,12 +118,12 @@ for loop_i in range(MAX_ITERATIONS):
         print(f"\n*** CONVERGED at iteration {state.get('iteration', current_iter)} ***")
         break
 
-    # ---- STEP 2: run 05_2 to evaluate proposals ----
+    # ---- STEP 2: run 04_2 to evaluate proposals ----
     result_csv = os.path.join(OUTPUT_FOLDER, f'parameter_tuning_results_iter{current_iter:02d}.csv')
     if os.path.isfile(result_csv):
-        print(f"[05_2] parameter_tuning_results_iter{current_iter:02d}.csv already exists, skipping.\n")
+        print(f"[04_2] parameter_tuning_results_iter{current_iter:02d}.csv already exists, skipping.\n")
     else:
-        print(f"[05_2] Evaluating {os.path.basename(proposals_path)} ...\n")
+        print(f"[04_2] Evaluating {os.path.basename(proposals_path)} ...\n")
         extra_env = {'TUNING_PROPOSALS_CSV': proposals_path}
         if PASS1_MODE_OVERRIDE:
             extra_env['TUNING_PASS1_MODE'] = PASS1_MODE_OVERRIDE

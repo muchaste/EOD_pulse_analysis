@@ -1,11 +1,9 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-EOD Pulse Detection Diagnostic Tool
-===================================
+02_1_Pulse_detection_diagnostic_GUI.py
 
-Simple diagnostic tool based on Script 03 logic with adjustable parameters.
-This is essentially Script 03 with a GUI for parameter adjustment and visualization.
+Diagnostic tool based on field pulse extraction logic with adjustable parameters.
+This is essentially Script 02_3 with a GUI for parameter adjustment and visualization.
 
 Authors: Stefan Mucha with Claude Sonnet 4.6
 Date: September 2025
@@ -22,10 +20,10 @@ import audioio as aio
 import json
 import pickle
 from scipy import signal
-
-
-# Import from Script 03
 import thunderfish.pulses as pulses
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from pulse_functions import (extract_pulse_snippets, 
                              remove_duplicates,
                              bandpass_filter,

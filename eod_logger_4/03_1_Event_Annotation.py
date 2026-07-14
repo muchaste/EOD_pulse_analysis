@@ -1,8 +1,6 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Interactive Event Annotation Tool for EOD Analysis
-==================================================
+03_1_Event_Annotation.py
 
 This script provides an interactive GUI for manually annotating extracted events
 to create training data for improved filtering algorithms.
@@ -14,25 +12,19 @@ Features:
 - Extract comprehensive features for each event
 - Save annotated dataset for training filtering models
 
-Author: AI Assistant & User
+Authors: Stefan Mucha with Claude Sonnet 4.6
 Date: September 2025
 """
 
 import os
-import sys
 import gc
-import glob
 import numpy as np
 import pandas as pd
 from pathlib import Path
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-from matplotlib.widgets import Button, RadioButtons, Slider
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import threading
-import queue
 from datetime import datetime
 import json
 
@@ -45,11 +37,6 @@ except ImportError:
     AUDIO_AVAILABLE = False
     print("WARNING: Audio playback not available (install soundfile and sounddevice)")
 
-# # Import EOD functions for loading variable-length waveforms
-# try:
-#     from pulse_functions import load_variable_length_waveforms
-# except ImportError:
-#     print("Warning: Could not import pulse_functions - waveform loading may not work")
 
 # =============================================================================
 # CONFIGURATION

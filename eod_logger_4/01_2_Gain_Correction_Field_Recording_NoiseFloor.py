@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 """
+01_2_Gain_Correction_Field_Recording_NoiseFloor.py
+
 Gain calibration using noise-floor RMS after masking fish pulses.
 Scans a decreasing amplitude threshold per channel to find the knee where
 peak count jumps sharply (= noise floor). Masks ±MASK_WIDTH_MS around
