@@ -191,7 +191,7 @@ for i, channel in enumerate(test_data_df.columns):
     axs[row, col].legend(fontsize=6)
 plt.tight_layout()
 plt.savefig(os.path.join(output_path, f'{tune_stem}_test_detection.png'), dpi=150)
-plt.show()
+plt.close()
 
 # Extract snippets from test segment
 # Concatenate left_v, left_h, right_v, right_h into an array for extraction
@@ -201,7 +201,6 @@ tuned = False
 
 while not tuned:
     parameters = config_gui.result['parameters']
-
 
     (
         eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
@@ -335,7 +334,7 @@ while not tuned:
 
     plt.tight_layout()
     plt.savefig(os.path.join(output_path, f'{tune_stem}_EOD_analysis.png'), dpi=300)
-    plt.show()
+    plt.close()
 
     # Update parameters dictionary with tuned values
     parameters.update({
@@ -348,23 +347,27 @@ while not tuned:
         'bp_low_cutoff': bp_low_cutoff,
         'bp_high_cutoff': bp_high_cutoff
     })
-    # Popup message box to inform user of tuned parameters and to ask if they want to proceed
-    message = "Tuned parameters:\n"
-    for k, v in parameters.items():
-        message += f"{k}: {v}\n"
-    message += "\nDo you want to proceed with these parameters?"
 
-    if messagebox.askyesno("Tuned Parameters", message):
-        tuned = True
+    # Modification to run this script a bit faster through the data - check the waveform analysis and tuning results manually post extraction to see if the parameters are reasonable. If not, re-run the script and adjust the parameters in the GUI.
+    tuned = True  # Set to True to exit the tuning loop after one iteration
 
-    else:
-        root = tkinter.Tk()
-        config_gui = ShuttleboxConfigGUI(root)
-        root.mainloop()
-        if config_gui.result is None:
-            print("Re-configuration cancelled, keeping previous parameters.")
-        else:
-            parameters = config_gui.result['parameters']
+    # # Popup message box to inform user of tuned parameters and to ask if they want to proceed
+    # message = "Tuned parameters:\n"
+    # for k, v in parameters.items():
+    #     message += f"{k}: {v}\n"
+    # message += "\nDo you want to proceed with these parameters?"
+
+    # if messagebox.askyesno("Tuned Parameters", message):
+    #     tuned = True
+
+    # else:
+    #     root = tkinter.Tk()
+    #     config_gui = ShuttleboxConfigGUI(root)
+    #     root.mainloop()
+    #     if config_gui.result is None:
+    #         print("Re-configuration cancelled, keeping previous parameters.")
+    #     else:
+    #         parameters = config_gui.result['parameters']
 
 
 print(f"\nTuned parameters:")
@@ -480,7 +483,7 @@ for fname, logfname in file_pairs:
 
         (
             eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
-            snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc,
+            snippet_p1_idc, snippet_p2_idc, seg_p1_idc, seg_p2_idc,
             pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations,
             wf_lengths, snippet_p3_idc, final_p3_idc
         ) = extract_pulse_snippets(
@@ -518,8 +521,8 @@ for fname, logfname in file_pairs:
         is_differential = is_differential[keep_indices]
         snippet_p1_idc = snippet_p1_idc[keep_indices]
         snippet_p2_idc = snippet_p2_idc[keep_indices]
-        raw_p1_idc = raw_p1_idc[keep_indices]
-        raw_p2_idc = raw_p2_idc[keep_indices]
+        seg_p1_idc = seg_p1_idc[keep_indices]
+        seg_p2_idc = seg_p2_idc[keep_indices]
         pulse_orientations = pulse_orientations[keep_indices]
         amp_ratios = amp_ratios[keep_indices]
         fft_peak_freqs = fft_peak_freqs[keep_indices]
@@ -530,12 +533,12 @@ for fname, logfname in file_pairs:
 
         (
             eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
-            snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc,
+            snippet_p1_idc, snippet_p2_idc, seg_p1_idc, seg_p2_idc,
             pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations, wf_lengths,
             snippet_p3_idc, final_p3_idc
         ) = remove_duplicates(
             eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
-            snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc,
+            snippet_p1_idc, snippet_p2_idc, seg_p1_idc, seg_p2_idc,
             pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations, wf_lengths,
             snippet_p3_idc, final_p3_idc, parameters
         )
@@ -546,27 +549,29 @@ for fname, logfname in file_pairs:
 
         print(f"    {len(eod_snippets)} valid EOD snippets after duplicate removal")
 
-
-        raw_midpoint_idc = start_idx + (raw_p1_idc + raw_p2_idc) // 2
+        # Offset indices by start idx of the segment to get absolute indices in the full file and calculate midpoints
+        abs_p1_idc = start_idx + seg_p1_idc
+        abs_p2_idc = start_idx + seg_p2_idc
+        abs_midpoint_idc = (abs_p1_idc + abs_p2_idc) // 2
         snippet_midpoint_idc = (snippet_p1_idc + snippet_p2_idc) // 2
 
         # Loop over raw_midpoint_idc and extract amplitudes and orientations for each channel
         # eod_chan_amps = np.zeros((len(raw_midpoint_idc), 4))  # 4 channels: left_v, left_h, right_v, right_h
         # eod_chan_orientations = np.zeros((len(raw_midpoint_idc), 4))
 
-        eod_chan_amps = np.abs(segment_phys[raw_p1_idc] - segment_phys[raw_p2_idc])
-        eod_chan_orientations = np.sign(segment_phys[raw_p1_idc] - segment_phys[raw_p2_idc]).astype(int)
+        eod_chan_amps = np.abs(segment_phys[seg_p1_idc] - segment_phys[seg_p2_idc])
+        eod_chan_orientations = np.sign(segment_phys[seg_p1_idc] - segment_phys[seg_p2_idc]).astype(int)
 
         eod_table_segment = pd.DataFrame({
-            'timestamp': [filetime + dt.timedelta(seconds=t) for t in raw_midpoint_idc / rate],
-            'file_timestamp': [filetime] * len(raw_midpoint_idc),
-            'filename': [os.path.basename(fname)] * len(raw_midpoint_idc),
-            'fish_id': [fish_id] * len(raw_midpoint_idc),
-            'sex': [sex] * len(raw_midpoint_idc),
-            'midpoint_idx': raw_midpoint_idc,
-            'relative_time_s': raw_midpoint_idc / rate,
-            'p1_idx': raw_p1_idc,
-            'p2_idx': raw_p2_idc,
+            'timestamp': [filetime + dt.timedelta(seconds=t) for t in abs_midpoint_idc / rate],
+            'file_timestamp': [filetime] * len(abs_midpoint_idc),
+            'filename': [os.path.basename(fname)] * len(abs_midpoint_idc),
+            'fish_id': [fish_id] * len(abs_midpoint_idc),
+            'sex': [sex] * len(abs_midpoint_idc),
+            'midpoint_idx': abs_midpoint_idc,
+            'relative_time_s': abs_midpoint_idc / rate,
+            'p1_idx': abs_p1_idc,
+            'p2_idx': abs_p2_idc,
             'eod_channel': eod_chan,
             'pulse_location': pulse_locations,
             'snippet_p1_idx': snippet_p1_idc,
@@ -592,6 +597,23 @@ for fname, logfname in file_pairs:
         eod_table_file = pd.concat([eod_table_file, eod_table_segment], ignore_index=True)
         eod_waveforms_file.extend(eod_snippets)
 
+        # Create detection plot for current segment
+        fig, axs = plt.subplots(4, 1, figsize=(12, 8), sharex=True)
+        time_axis = np.arange(start_idx, end_idx) / rate
+        for i, channel in enumerate(['left_v_dt', 'left_h_dt', 'right_v_dt', 'right_h_dt']):
+            axs[i].plot(time_axis, segment_phys[:, i], label=channel)
+            axs[i].scatter(eod_table_segment['p1_idx']/rate, segment_phys[eod_table_segment['p1_idx'] - start_idx, i], color='red', s=5, label='Peaks')
+            axs[i].scatter(eod_table_segment['p2_idx']/rate, segment_phys[eod_table_segment['p2_idx'] - start_idx, i], color='blue', s=5, label='Troughs')
+            axs[i].set_ylabel('Amplitude')
+            axs[i].legend(fontsize=6)
+        axs[-1].set_xlabel('Time (s)')
+        plt.tight_layout()
+        plt.title(f'Detection Results for {file_stem} Segment {seg_i + 1}')
+        plot_file = os.path.join(output_path, f'{file_stem}_segment_{seg_i + 1}_detection.png')
+        plt.savefig(plot_file, dpi=150)
+        plt.close(fig)
+
+
     if len(eod_table_file) > 0:
         per_file_csv = os.path.join(output_path, f'{file_stem}_pulse_extraction_results.csv')
         eod_table_file.to_csv(per_file_csv, index=False)
@@ -602,7 +624,23 @@ for fname, logfname in file_pairs:
     eod_table_all = pd.concat([eod_table_all, eod_table_file], ignore_index=True)
     eod_waveforms_all.extend(eod_waveforms_file)
 
-    del data_raw, data_df, eod_table_file, eod_waveforms_file
+    # Save metadata for the current file for later time-series analysis
+    file_metadata = {
+        'filename': os.path.basename(fname),
+        'fish_id': fish_id,
+        'sex': sex,
+        'file_timestamp': filetime,
+        'file_end_timestamp': filetime + dt.timedelta(seconds=len(data_raw) / rate),
+        'file_length_s': len(data_raw) / rate,
+        'file_length_samples': len(data_raw),
+        'sampling_rate': rate
+        }
+    file_metadata_df = pd.DataFrame([file_metadata])
+    file_metadata_path = os.path.join(output_path, f'{file_stem}_metadata.csv')
+    file_metadata_df.to_csv(file_metadata_path, index=False)
+
+    # Cleanup to free memory before processing the next file
+    del data_raw, data_df, eod_table_file, eod_waveforms_file, file_metadata_df, file_metadata
     gc.collect()
 
 
