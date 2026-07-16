@@ -598,17 +598,20 @@ for fname, logfname in file_pairs:
         eod_waveforms_file.extend(eod_snippets)
 
         # Create detection plot for current segment
+        # downsample to 1/2 rate for plotting
+        stepsize = 2
+    
         fig, axs = plt.subplots(4, 1, figsize=(12, 8), sharex=True)
-        time_axis = np.arange(start_idx, end_idx) / rate
+        time_axis = np.arange(start_idx, end_idx, stepsize) / rate
         for i, channel in enumerate(['left_v_dt', 'left_h_dt', 'right_v_dt', 'right_h_dt']):
-            axs[i].plot(time_axis, segment_phys[:, i], label=channel)
-            axs[i].scatter(eod_table_segment['p1_idx']/rate, segment_phys[eod_table_segment['p1_idx'] - start_idx, i], color='red', s=5, label='Peaks')
-            axs[i].scatter(eod_table_segment['p2_idx']/rate, segment_phys[eod_table_segment['p2_idx'] - start_idx, i], color='blue', s=5, label='Troughs')
+            axs[i].plot(time_axis, segment_phys[::stepsize, i], label=channel)
+            axs[i].scatter(eod_table_segment['p1_idx']/rate, segment_phys[eod_table_segment['p1_idx'] - start_idx, i], color='red', s=5, label='P1')
+            axs[i].scatter(eod_table_segment['p2_idx']/rate, segment_phys[eod_table_segment['p2_idx'] - start_idx, i], color='blue', s=5, label='P2')
             axs[i].set_ylabel('Amplitude')
             axs[i].legend(fontsize=6)
         axs[-1].set_xlabel('Time (s)')
+        fig.suptitle(f'Detection Results for {file_stem} Segment {seg_i + 1}')
         plt.tight_layout()
-        plt.title(f'Detection Results for {file_stem} Segment {seg_i + 1}')
         plot_file = os.path.join(output_path, f'{file_stem}_segment_{seg_i + 1}_detection.png')
         plt.savefig(plot_file, dpi=150)
         plt.close(fig)
