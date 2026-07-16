@@ -1229,13 +1229,13 @@ class ShuttleboxConfigGUI:
             row=0, column=0, columnspan=2, sticky=tk.W, pady=2)
 
         detection_params = [
-            ('tuning_thresh', 'Tuning Threshold:', 0.01, float),
-            ('thresh', 'Detection Threshold:', 0.05, float),
-            ('bp_low_cutoff', 'BP Low Cutoff (Hz):', 100.0, float),
-            ('bp_high_cutoff', 'BP High Cutoff (Hz):', 13000.0, float),
+            ('tuning_thresh', 'Tuning Threshold:', 0.02, float),
+            ('thresh', 'Detection Threshold:', 0.005, float),
+            ('bp_low_cutoff', 'BP Low Cutoff (Hz):', 500.0, float),
+            ('bp_high_cutoff', 'BP High Cutoff (Hz):', 10000.0, float),
             ('min_rel_slope_diff', 'Min Relative Slope Difference:', 0.25, float),
-            ('min_width_us', 'Min Pulse Width (μs):', 30.0, float),
-            ('max_width_us', 'Max Pulse Width (μs):', 1000.0, float),
+            ('min_width_us', 'Min Pulse Width (μs):', 25.0, float),
+            ('max_width_us', 'Max Pulse Width (μs):', 100.0, float),
             ('width_fac_detection', 'Width Factor for Detection:', 7.0, float),
             ('duplicate_samples', 'Duplicate Removal Samples:', 5, int),
         ]
@@ -1251,10 +1251,10 @@ class ShuttleboxConfigGUI:
         # Right column — extraction / filter
         filter_params = [
             ('interp_factor', 'Interpolation Factor:', 3, int),
-            ('amplitude_ratio_min', 'Min Amplitude Ratio:', 0.2, float),
-            ('amplitude_ratio_max', 'Max Amplitude Ratio:', 4.0, float),
-            ('peak_fft_freq_min', 'Min FFT Peak Frequency (Hz):', 100.0, float),
-            ('peak_fft_freq_max', 'Max FFT Peak Frequency (Hz):', 13000.0, float),
+            ('amplitude_ratio_min', 'Min Amplitude Ratio:', 0.1, float),
+            ('amplitude_ratio_max', 'Max Amplitude Ratio:', 1.0, float),
+            ('peak_fft_freq_min', 'Min FFT Peak Frequency (Hz):', 500.0, float),
+            ('peak_fft_freq_max', 'Max FFT Peak Frequency (Hz):', 10000.0, float),
             ('extraction_window_length_us', 'Waveform Window Length (μs):', 4000.0, float),
             ('extraction_window_factor', 'Waveform Window Factor:', 10.0, float),
             ('search_window', 'Search Window (samples):', 10, int),
