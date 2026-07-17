@@ -604,9 +604,11 @@ for fname, logfname in file_pairs:
         fig, axs = plt.subplots(4, 1, figsize=(12, 8), sharex=True)
         time_axis = np.arange(start_idx, end_idx, stepsize) / rate
         for i, channel in enumerate(['left_v_dt', 'left_h_dt', 'right_v_dt', 'right_h_dt']):
+            chan_p1 = eod_table_segment['p1_idx'][eod_table_segment['eod_channel'] == i]
+            chan_p2 = eod_table_segment['p2_idx'][eod_table_segment['eod_channel'] == i]
             axs[i].plot(time_axis, segment_phys[::stepsize, i], label=channel)
-            axs[i].scatter(eod_table_segment['p1_idx']/rate, segment_phys[eod_table_segment['p1_idx'] - start_idx, i], color='red', s=5, label='P1')
-            axs[i].scatter(eod_table_segment['p2_idx']/rate, segment_phys[eod_table_segment['p2_idx'] - start_idx, i], color='blue', s=5, label='P2')
+            axs[i].scatter(chan_p1/rate, segment_phys[chan_p1 - start_idx, i], color='red', s=5, label='P1')
+            axs[i].scatter(chan_p2/rate, segment_phys[chan_p2 - start_idx, i], color='blue', s=5, label='P2')
             axs[i].set_ylabel('Amplitude')
             axs[i].legend(fontsize=6)
         axs[-1].set_xlabel('Time (s)')
