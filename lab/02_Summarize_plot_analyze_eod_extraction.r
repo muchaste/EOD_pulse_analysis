@@ -119,7 +119,7 @@ for(sub_trial in unique(eod_file_list$trial)) {
 
         # Build the fixed analysis-window backbone directly on the coverage table ---------
         t_s_analysis <- as.POSIXct(paste(format(min(coverage_id$time), "%Y-%m-%d"), analysis_start_tod), format="%Y-%m-%d %H:%M:%S", tz="CET")
-        t_e_analysis <- t_s_analysis + analysis_duration_min*60
+        t_e_analysis <- t_s_analysis + analysis_duration_min*60 - 1
 
         backbone <- tibble(time = seq(t_s_analysis, t_e_analysis, by = "1 sec"))
         coverage_id <- backbone %>%
