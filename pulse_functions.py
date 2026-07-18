@@ -16,10 +16,74 @@ from scipy.interpolate import interp1d
 from scipy import stats
 from scipy.optimize import curve_fit
 import glob
+import mat73
 from thunderfish import pulses
 import matplotlib.cm as cm
 import matplotlib.dates as mdates
 import matplotlib.patches as mpatches
+
+############################### Recording Loading ######################################
+
+HDF5_MAGIC_BYTES = b'\x89HDF\r\n\x1a\n'
+
+
+def load_shuttlebox_recording(fname, n_cols, gain, analog_start_col=1, n_analog_chans=4):
+    """
+    Load a shuttlebox EOD recording, transparently handling both known .bin file formats
+    produced by the two Matlab logging scripts in lab/:
+
+    - Raw flat binary (older, session-based DAQ toolbox script,
+      background_logging_shuttlebox_4chan.m): a headerless dump of float64 samples,
+      sample-interleaved as [time, ai0, ai1, ai2, ai3, digital_in] repeating per sample.
+      Loaded via np.fromfile and reshaped to (n_samples, n_cols).
+    - Matlab v7.3 / HDF5 container (newer, daq-interface script,
+      background_logging_shuttlebox_4chan_Sarah.m): saved via save(..., "-v7.3"), which
+      stores a 'data' variable containing only the analog channels (no leading time
+      column). Loaded via mat73.loadmat.
+
+    The two formats are told apart automatically from the file's magic bytes (HDF5 files
+    always start with the 8-byte signature b'\\x89HDF\\r\\n\\x1a\\n'), so both formats can
+    be loaded through this single function.
+
+    Parameters
+    ----------
+    fname : str
+        Path to the .bin recording file (raw binary or HDF5/Matlab v7.3, despite the
+        shared .bin extension).
+    n_cols : int
+        Number of columns (channels) per sample in the RAW BINARY format
+        (n_analog_chans + n_digital_chans + 1 for the leading time column).
+        Ignored for HDF5/Matlab v7.3 files, where only the 'data' variable is used.
+    gain : float
+        Amplifier gain; analog channel values are divided by this.
+    analog_start_col : int, optional
+        Column index of the first analog channel in the RAW BINARY format (default 1,
+        i.e. one leading time column at index 0). Ignored for HDF5/Matlab v7.3 files.
+    n_analog_chans : int, optional
+        Number of analog channels to keep, in both formats (default 4).
+
+    Returns
+    -------
+    pandas.DataFrame
+        Gain-corrected analog channel data only, with `n_analog_chans` columns in a
+        consistent column order regardless of source format.
+    """
+    with open(fname, 'rb') as f:
+        magic_bytes = f.read(8)
+
+    if magic_bytes == HDF5_MAGIC_BYTES:
+        data_dict = mat73.loadmat(fname)
+        data_raw = pd.DataFrame(data_dict['data']).iloc[:, :n_analog_chans]
+        del data_dict
+    else:
+        raw = np.fromfile(fname, dtype=np.float64).reshape(-1, n_cols)
+        data_raw = pd.DataFrame(raw[:, analog_start_col:analog_start_col + n_analog_chans])
+        del raw
+
+    data_raw = data_raw / gain
+    gc.collect()
+    return data_raw
+
 
 ############################### Pulse Extraction ######################################
 
