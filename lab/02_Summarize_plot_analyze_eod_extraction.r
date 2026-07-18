@@ -17,9 +17,6 @@ normalize_baseline <- function(vector, time, baseline_start, baseline_end){
 }
 
 # Set root directory (output root of 01_Shuttle_box_Matlab_pulse_extraction.py)
-# first_round_dir <- "F:/P degeni responses to hypoxia/02 Analysis Output/eod_extraction/first_round"
-# second_round_dir <- "F:/P degeni responses to hypoxia/02 Analysis Output/eod_extraction/second_round"
-
 root_dir <- "F:/P degeni responses to hypoxia/02 Analysis Output/eod_extraction"
 processed_dir <- "F:/P degeni responses to hypoxia/02 Analysis Output/eod_extraction/processed"
 plot_dir <- "F:/P degeni responses to hypoxia/02 Analysis Output/eod_extraction/plots/"
