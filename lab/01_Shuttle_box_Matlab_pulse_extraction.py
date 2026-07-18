@@ -122,7 +122,7 @@ n_analog_chans = int(logtext[9].split(':')[1][1:-1])
 n_digital_chans = int(logtext[10].split(':')[1][1:-1])
 n_cols = n_analog_chans + n_digital_chans + 1 # one more channel for time data
 
-names_channels = ['time', 'left', 'right', 'trash_1', 'trash_2', 'LED']  # which data is written to which "channel"? (=rows in .bin file)
+# names_channels = ['time', 'left', 'right', 'trash_1', 'trash_2', 'LED']  # which data is written to which "channel"? (=rows in .bin file)
 
 
 print(f"\nTuning on: {tune_stem}  (fish: {fish_id}, {sex}, rate: {rate} Hz)")
@@ -130,6 +130,10 @@ print(f"\nTuning on: {tune_stem}  (fish: {fish_id}, {sex}, rate: {rate} Hz)")
 # Load data, auto-detecting raw binary (older DAQ toolbox script) vs HDF5/Matlab v7.3
 # (newer daq-interface script) format from the file's magic bytes
 data_raw = load_shuttlebox_recording(tune_fname, n_cols, gain)
+
+
+# data_dict = mat73.loadmat(tune_fname)
+# data_raw = pd.DataFrame(data_dict['data'])/gain
 
 # Build test segment detection DataFrame
 left_v = detrend(data_raw.iloc[:(int(parameters['test_seg_length']) * rate), 0])

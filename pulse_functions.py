@@ -24,7 +24,7 @@ import matplotlib.patches as mpatches
 
 ############################### Recording Loading ######################################
 
-HDF5_MAGIC_BYTES = b'\x89HDF\r\n\x1a\n'
+MAT_HEADER_MAGIC = b'MATLAB'
 
 
 def load_shuttlebox_recording(fname, n_cols, gain, analog_start_col=1, n_analog_chans=4):
@@ -38,12 +38,15 @@ def load_shuttlebox_recording(fname, n_cols, gain, analog_start_col=1, n_analog_
       Loaded via np.fromfile and reshaped to (n_samples, n_cols).
     - Matlab v7.3 / HDF5 container (newer, daq-interface script,
       background_logging_shuttlebox_4chan_Sarah.m): saved via save(..., "-v7.3"), which
-      stores a 'data' variable containing only the analog channels (no leading time
-      column). Loaded via mat73.loadmat.
+      stores a 'data' variable containing the analog + digital channels (no leading
+      time column). Loaded via mat73.loadmat.
 
-    The two formats are told apart automatically from the file's magic bytes (HDF5 files
-    always start with the 8-byte signature b'\\x89HDF\\r\\n\\x1a\\n'), so both formats can
-    be loaded through this single function.
+    The two formats are told apart automatically from the file's header: every .mat file
+    (including v7.3/HDF5-based ones) starts with a text descriptor beginning with the
+    ASCII bytes b'MATLAB' (e.g. "MATLAB 7.3 MAT-file..."), followed by a 128-byte header
+    before the actual HDF5 superblock begins - so the raw HDF5 magic signature is NOT at
+    the start of the file and can't be used directly for detection. Checking for the
+    leading b'MATLAB' text instead works for both formats.
 
     Parameters
     ----------
@@ -69,16 +72,26 @@ def load_shuttlebox_recording(fname, n_cols, gain, analog_start_col=1, n_analog_
         consistent column order regardless of source format.
     """
     with open(fname, 'rb') as f:
-        magic_bytes = f.read(8)
+        header = f.read(128)
 
-    if magic_bytes == HDF5_MAGIC_BYTES:
+    if header[:len(MAT_HEADER_MAGIC)] == MAT_HEADER_MAGIC:
         data_dict = mat73.loadmat(fname)
         data_raw = pd.DataFrame(data_dict['data']).iloc[:, :n_analog_chans]
         del data_dict
     else:
-        raw = np.fromfile(fname, dtype=np.float64).reshape(-1, n_cols)
+        raw_flat = np.fromfile(fname, dtype=np.float64)
+        n_rows = raw_flat.size // n_cols
+        leftover = raw_flat.size % n_cols
+        if leftover != 0:
+            # Recording was likely stopped mid-sample, leaving a trailing partial row.
+            # Drop it rather than failing the reshape.
+            print(f"Warning: {fname} has {leftover} trailing values that don't form a "
+                  f"complete row (out of {n_cols} columns); dropping the incomplete "
+                  f"trailing row.")
+            raw_flat = raw_flat[:n_rows * n_cols]
+        raw = raw_flat.reshape(n_rows, n_cols)
         data_raw = pd.DataFrame(raw[:, analog_start_col:analog_start_col + n_analog_chans])
-        del raw
+        del raw, raw_flat
 
     data_raw = data_raw / gain
     gc.collect()
