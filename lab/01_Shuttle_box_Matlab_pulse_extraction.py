@@ -17,7 +17,7 @@ This script:
 """
 
 import tkinter
-from tkinter import messagebox
+# from tkinter import messagebox
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
@@ -39,12 +39,13 @@ from pulse_functions import (
     unify_across_channels,
     filter_waveforms,
     remove_duplicates,
-    normalize_waveforms)
+    normalize_waveforms,
+    load_shuttlebox_recording)
 
 from parameter_gui import ShuttleboxConfigGUI
 
 tuned = False 
-
+datatype = np.double                            # data format of values stored in .bin
 
 # ============================================================================
 # FILE SELECTION AND PARAMETER CONFIGURATION
@@ -108,7 +109,7 @@ parameters = config_gui.result['parameters']
 # ============================================================================
 # TUNING PHASE: single test segment from the first file
 # ============================================================================
-tune_fname, tune_logfname = file_pairs[0]
+tune_fname, tune_logfname = file_pairs[1]
 tune_stem = os.path.splitext(os.path.basename(tune_fname))[0]
 
 logtext = open(tune_logfname, "r").readlines()
@@ -117,13 +118,18 @@ fish_id = logtext[1].split(':')[1][1:-1]
 sex = logtext[2].split(':')[1][1:-1]
 rate = int(logtext[8].split(':')[1][1:-1])
 gain = float(logtext[12].split(':')[1][1:-1])
+n_analog_chans = int(logtext[9].split(':')[1][1:-1])
+n_digital_chans = int(logtext[10].split(':')[1][1:-1])
+n_cols = n_analog_chans + n_digital_chans + 1 # one more channel for time data
+
+names_channels = ['time', 'left', 'right', 'trash_1', 'trash_2', 'LED']  # which data is written to which "channel"? (=rows in .bin file)
+
 
 print(f"\nTuning on: {tune_stem}  (fish: {fish_id}, {sex}, rate: {rate} Hz)")
 
-data_dict = mat73.loadmat(tune_fname)
-data_raw = pd.DataFrame(data_dict['data']) / gain
-del data_dict
-gc.collect()
+# Load data, auto-detecting raw binary (older DAQ toolbox script) vs HDF5/Matlab v7.3
+# (newer daq-interface script) format from the file's magic bytes
+data_raw = load_shuttlebox_recording(tune_fname, n_cols, gain)
 
 # Build test segment detection DataFrame
 left_v = detrend(data_raw.iloc[:(int(parameters['test_seg_length']) * rate), 0])
@@ -403,9 +409,7 @@ for fname, logfname in file_pairs:
         rate = int(logtext[8].split(':')[1][1:-1])
         gain = float(logtext[12].split(':')[1][1:-1])
 
-        data_dict = mat73.loadmat(fname)
-        data_raw = pd.DataFrame(data_dict['data']) / gain
-        del data_dict
+        data_raw = load_shuttlebox_recording(fname, n_cols, gain)
         gc.collect()
 
     seglength = int(parameters['seg_length_min']) * 60 * rate
