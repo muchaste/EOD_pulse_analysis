@@ -369,6 +369,9 @@ for(sub_trial in unique(eod_file_list$trial)) {
         eods_1s_all <- bind_rows(eods_1s_all, eods_1s_id)
         eods_1m_all <- bind_rows(eods_1m_all, eods_1m_id)
         eods_10m_all <- bind_rows(eods_10m_all, eods_10m_id)
+        
+        # Navigate back to root
+        setwd(root_dir)
 
       }, error = function(e){
         message(paste0("Skipping ", sub_id, "/", sub_trial, ": ", conditionMessage(e)))
