@@ -136,10 +136,17 @@ data_raw = load_shuttlebox_recording(tune_fname, n_cols, gain)
 # data_raw = pd.DataFrame(data_dict['data'])/gain
 
 # Build test segment detection DataFrame
-left_v = detrend(data_raw.iloc[:(int(parameters['test_seg_length']) * rate), 0])
-left_h = detrend(data_raw.iloc[:(int(parameters['test_seg_length']) * rate), 1])
-right_v = detrend(data_raw.iloc[:(int(parameters['test_seg_length']) * rate), 2])
-right_h = detrend(data_raw.iloc[:(int(parameters['test_seg_length']) * rate), 3])
+# If MV in fish_id, right_v is channel 0, right_h ch 1, left_v ch 2, left_h ch 3
+if 'MV' in fish_id:
+    left_v = detrend(data_raw.iloc[:(int(parameters['test_seg_length']) * rate), 2])
+    left_h = detrend(data_raw.iloc[:(int(parameters['test_seg_length']) * rate), 3])
+    right_v = detrend(data_raw.iloc[:(int(parameters['test_seg_length']) * rate), 0])
+    right_h = detrend(data_raw.iloc[:(int(parameters['test_seg_length']) * rate), 1])
+elif 'PD' in fish_id:
+    left_v = detrend(data_raw.iloc[:(int(parameters['test_seg_length']) * rate), 0])
+    left_h = detrend(data_raw.iloc[:(int(parameters['test_seg_length']) * rate), 1])
+    right_v = detrend(data_raw.iloc[:(int(parameters['test_seg_length']) * rate), 2])
+    right_h = detrend(data_raw.iloc[:(int(parameters['test_seg_length']) * rate), 3])
 
 test_data_df = pd.DataFrame({
     'right_v_dt': right_v,
