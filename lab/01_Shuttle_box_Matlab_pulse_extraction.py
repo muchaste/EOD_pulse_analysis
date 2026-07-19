@@ -63,13 +63,25 @@ output_path = config_gui.result['output_path']
 os.makedirs(output_path, exist_ok=True)
 
 bin_files = sorted(glob.glob(os.path.join(root_folder, '*.bin')))
+led_blink_file = glob.glob(os.path.join(root_folder, '*_ledblinks_python.csv'))
+
+if led_blink_file and os.path.exists(led_blink_file[0]):
+    print(f"Found LED blink file: {led_blink_file[0]}")
+    led_blink_data = pd.read_csv(led_blink_file[0])
+else:
+    print("No LED blink file found. Please run lab/00_read_ledblink.py first.")
+    sys.exit()
+
+
 file_sets = []
 for bf in bin_files:
     # lf = os.path.dirname(bf) + '/log_' + os.path.basename(bf).replace('.bin', '.txt')
     lf = os.path.join(os.path.dirname(bf), 'log_' + os.path.basename(bf).replace('.bin', '.txt'))
     if os.path.exists(lf):
         logtext = open(lf, "r").readlines()
-        filetime = pd.to_datetime(logtext[0], format='%Y\\%m\\%d ; %H:%M:%S.%f\n')
+        # vid_start_time = pd.to_datetime(logtext[0], format='%Y\\%m\\%d ; %H:%M:%S.%f\n')
+        # get real start time from led_blink_data['blink_start'] for this file
+        start_time = pd.to_datetime(led_blink_data.loc[led_blink_data['file_basenames'].str.contains(os.path.basename(bf).replace('.bin', '')), 'blink_start'].values[0])
         fish_id = logtext[1].split(':')[1][1:-1]
         sex = logtext[2].split(':')[1][1:-1]
         rate = int(logtext[8].split(':')[1][1:-1])
@@ -77,9 +89,11 @@ for bf in bin_files:
         n_analog_chans = int(logtext[9].split(':')[1][1:-1])
         n_digital_chans = int(logtext[10].split(':')[1][1:-1])
         n_cols = n_analog_chans + n_digital_chans + 1 # one more channel for time data
-        file_sets.append((bf, lf, filetime, fish_id, sex, rate, gain, n_analog_chans, n_digital_chans, n_cols))
+        file_sets.append((bf, lf, start_time, fish_id, sex, rate, gain, n_analog_chans, n_digital_chans, n_cols))
     else:
-        print(f"Warning: no logfile found for {os.path.basename(bf)}, skipping")
+        print(f"Warning: no logfile found for {os.path.basename(bf)}, exiting")
+        sys.exit()
+
 
 if not file_sets:
     print("No valid .bin/.txt file pairs found. Exiting.")
@@ -87,9 +101,10 @@ if not file_sets:
 
 print(f"Found {len(file_sets)} file pair(s)")
 
-# Sort file_sets by filetime
-file_sets.sort(key=lambda x: x[2])  # Sort by filetime
+# Sort file_sets by start_time
+file_sets.sort(key=lambda x: x[2])  # Sort by start_time
 
+#%%
 # ============================================================================
 # INITIAL DETECTION PARAMETERS (from GUI, tuned on first file's test segment)
 # ============================================================================
@@ -120,11 +135,11 @@ parameters = config_gui.result['parameters']
 # ============================================================================
 # TUNING PHASE: single test segment from the first file
 # ============================================================================
-tune_fname, tune_logfname, filetime, fish_id, sex, rate, gain, n_analog_chans, n_digital_chans, n_cols = file_sets[0]
+tune_fname, tune_logfname, start_time, fish_id, sex, rate, gain, n_analog_chans, n_digital_chans, n_cols = file_sets[0]
 tune_stem = os.path.splitext(os.path.basename(tune_fname))[0]
 
 # logtext = open(tune_logfname, "r").readlines()
-# filetime = pd.to_datetime(logtext[0], format='%Y\\%m\\%d ; %H:%M:%S.%f\n')
+# start_time = pd.to_datetime(logtext[0], format='%Y\\%m\\%d ; %H:%M:%S.%f\n')
 # fish_id = logtext[1].split(':')[1][1:-1]
 # sex = logtext[2].split(':')[1][1:-1]
 # rate = int(logtext[8].split(':')[1][1:-1])
@@ -418,14 +433,14 @@ gc.collect()
 eod_waveforms_all = []
 eod_table_all = pd.DataFrame()
 
-for fname, logfname, filetime, fish_id, sex, rate, gain, n_analog_chans, n_digital_chans, n_cols in file_sets:
+for fname, logfname, start_time, fish_id, sex, rate, gain, n_analog_chans, n_digital_chans, n_cols in file_sets:
     file_stem = os.path.splitext(os.path.basename(fname))[0]
     print(f"\nProcessing: {file_stem}")
 
     # Skip loading the first file since it was already loaded during tuning
     if fname != tune_fname:
         # logtext = open(logfname, "r").readlines()
-        # filetime = pd.to_datetime(logtext[0], format='%Y\\%m\\%d ; %H:%M:%S.%f\n')
+        # start_time = pd.to_datetime(logtext[0], format='%Y\\%m\\%d ; %H:%M:%S.%f\n')
         # fish_id = logtext[1].split(':')[1][1:-1]
         # sex = logtext[2].split(':')[1][1:-1]
         # rate = int(logtext[8].split(':')[1][1:-1])
@@ -595,8 +610,8 @@ for fname, logfname, filetime, fish_id, sex, rate, gain, n_analog_chans, n_digit
         eod_chan_orientations = np.sign(segment_phys[seg_p1_idc] - segment_phys[seg_p2_idc]).astype(int)
 
         eod_table_segment = pd.DataFrame({
-            'timestamp': [filetime + dt.timedelta(seconds=t) for t in abs_midpoint_idc / rate],
-            'file_timestamp': [filetime] * len(abs_midpoint_idc),
+            'timestamp': [start_time + dt.timedelta(seconds=t) for t in abs_midpoint_idc / rate],
+            'file_timestamp': [start_time] * len(abs_midpoint_idc),
             'filename': [os.path.basename(fname)] * len(abs_midpoint_idc),
             'fish_id': [fish_id] * len(abs_midpoint_idc),
             'sex': [sex] * len(abs_midpoint_idc),
@@ -666,8 +681,8 @@ for fname, logfname, filetime, fish_id, sex, rate, gain, n_analog_chans, n_digit
         'filename': os.path.basename(fname),
         'fish_id': fish_id,
         'sex': sex,
-        'file_timestamp': filetime,
-        'file_end_timestamp': filetime + dt.timedelta(seconds=len(data_raw) / rate),
+        'file_timestamp': start_time,
+        'file_end_timestamp': start_time + dt.timedelta(seconds=len(data_raw) / rate),
         'file_length_s': len(data_raw) / rate,
         'file_length_samples': len(data_raw),
         'sampling_rate': rate
