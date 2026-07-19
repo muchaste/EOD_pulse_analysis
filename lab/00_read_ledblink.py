@@ -7,6 +7,7 @@ from tkinter import filedialog
 import glob
 import pandas as pd
 import re
+import os
 
 
 # LED pixelcoordinates
@@ -24,21 +25,31 @@ frames = 60*fps
 # Pick a directory
 root = tkinter.Tk()
 root.withdraw()
-vidpath = filedialog.askdirectory(title = "Select folder with video files")
-output_path = filedialog.askdirectory(title = 'Select folder for output of results')
-logpath = filedialog.askdirectory(title = "Select folder with log .txt files")
-vidlist = glob.glob(vidpath+'/*.avi')          # List all .avi files in data directory
-loglist = glob.glob(logpath+'/*[0-9].txt')          # List all .txt files in data directory
 
-fish_id = open(loglist[0], "r").readlines(30)[1][9:-1]
+root_dir = filedialog.askdirectory(title = "Select root folder with data")
+vid_files = sorted(glob.glob(os.path.join(root_dir, '*.bin')))
+log_files = sorted(glob.glob(os.path.join(root_dir, 'log_*.txt')))
+
+# vidpath = filedialog.askdirectory(title = "Select folder with video files")
+# output_path = filedialog.askdirectory(title = 'Select folder for output of results')
+# logpath = filedialog.askdirectory(title = "Select folder with log .txt files")
+# vidlist = glob.glob(vidpath+'/*.avi')          # List all .avi files in data directory
+# loglist = glob.glob(logpath+'/*[0-9].txt')          # List all .txt files in data directory
+
+# fish_id = open(loglist[0], "r").readlines(30)[1][9:-1]
+
+logtext = open(log_files[0], "r").readlines()
+fish_id = logtext[1].split(':')[1][1:-1]
+
 #%%
 # Preallocate empty lists
 firstframe = []
 lastframe = []
 blinkduration = []
-timecol = []
+log_start = []
+blink_start = []
     
-for fname in vidlist:
+for fname in vid_files:
     # Path to video file 
     vidObj = cv2.VideoCapture(fname) 
     fps = int(vidObj.get(cv2.CAP_PROP_FPS))
@@ -71,18 +82,21 @@ for fname in vidlist:
     blinkduration.append(len(blinkframes))
     
     # New: read time from .txt log file
-    logfile = [i for i in loglist if re.split("\\\\", fname)[-1][0:-8] in i][0]
+    logfile = [i for i in log_files if re.split("\\\\", fname)[-1][0:-8] in i][0]
     logtext = open(logfile, "r").readline()
-    time_start = pd.to_datetime(logtext, format='%Y\\%m\\%d ; %H:%M:%S.%f\n')
-    timecol.append(time_start)
+    time_start_log = pd.to_datetime(logtext, format='%Y\\%m\\%d ; %H:%M:%S.%f\n')
+    time_start_blink = time_start_log + pd.to_timedelta(firstframe[-1]/fps, unit='s')
+    log_start.append(time_start_log)
+    blink_start.append(time_start_blink)
     print(fname)
+
 
     
 
 df = pd.DataFrame(
-    {'videoname':vidlist, 'firstframe': firstframe, 'lastframe': lastframe, \
-     'blinkduration': blinkduration, 'timestamp': timecol, 'id': fish_id, 'fps': fps}
+    {'videoname':vid_files, 'firstframe': firstframe, 'lastframe': lastframe, \
+     'blinkduration': blinkduration, 'log_start': log_start, 'blink_start': blink_start, 'id': fish_id, 'fps': fps}
     )
 
-csv_name = output_path+fish_id+"_ledblinks_python.csv"
+csv_name = os.path.join(root_dir, fish_id+"_ledblinks_python.csv")
 df.to_csv(csv_name, index = False)
