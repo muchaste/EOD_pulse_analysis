@@ -81,7 +81,11 @@ for bf in bin_files:
         logtext = open(lf, "r").readlines()
         # vid_start_time = pd.to_datetime(logtext[0], format='%Y\\%m\\%d ; %H:%M:%S.%f\n')
         # get real start time from led_blink_data['blink_start'] for this file
-        start_time = pd.to_datetime(led_blink_data.loc[led_blink_data['file_basenames'].str.contains(os.path.basename(bf).replace('.bin', '')), 'blink_start'].values[0])
+        blink_match = led_blink_data.loc[led_blink_data['file_basenames'] == os.path.basename(bf).replace('.bin', ''), 'blink_start']
+        if blink_match.empty:
+            print(f"Warning: no LED blink match found for {os.path.basename(bf)}, exiting")
+            sys.exit()
+        start_time = pd.to_datetime(blink_match.values[0])
         fish_id = logtext[1].split(':')[1][1:-1]
         sex = logtext[2].split(':')[1][1:-1]
         rate = int(logtext[8].split(':')[1][1:-1])
