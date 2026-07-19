@@ -56,6 +56,7 @@ for fname in vid_files:
     vidObj = cv2.VideoCapture(fname) 
     fps = int(vidObj.get(cv2.CAP_PROP_FPS))
     n_frames = int(vidObj.get(cv2.CAP_PROP_FRAME_COUNT))
+    frames = 60*fps  # recompute window length in frames using this video's actual fps
     
     # Used as counter variable 
     count = 0
@@ -70,12 +71,15 @@ for fname in vid_files:
     while success and count < frames: 
       
         success, image = vidObj.read() 
+        if not success:
+            break
         crop_img = image[y_s:y_e, x_s:x_e]   
         brightness.append(np.mean(crop_img))
         frame.append(count+1)
         count += 1
             
             
+    brightness = np.array(brightness)
     threshold = (np.median(brightness) + max(brightness))/2
     
     blinkframes = np.argwhere(brightness > threshold)
