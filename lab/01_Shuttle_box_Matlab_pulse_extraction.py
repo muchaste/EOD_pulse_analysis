@@ -63,21 +63,32 @@ output_path = config_gui.result['output_path']
 os.makedirs(output_path, exist_ok=True)
 
 bin_files = sorted(glob.glob(os.path.join(root_folder, '*.bin')))
-file_pairs = []
+file_sets = []
 for bf in bin_files:
-    lf = os.path.dirname(bf) + '/log_' + os.path.basename(bf).replace('.bin', '.txt')
+    # lf = os.path.dirname(bf) + '/log_' + os.path.basename(bf).replace('.bin', '.txt')
+    lf = os.path.join(os.path.dirname(bf), 'log_' + os.path.basename(bf).replace('.bin', '.txt'))
     if os.path.exists(lf):
-        file_pairs.append((bf, lf))
+        logtext = open(lf, "r").readlines()
+        filetime = pd.to_datetime(logtext[0], format='%Y\\%m\\%d ; %H:%M:%S.%f\n')
+        fish_id = logtext[1].split(':')[1][1:-1]
+        sex = logtext[2].split(':')[1][1:-1]
+        rate = int(logtext[8].split(':')[1][1:-1])
+        gain = float(logtext[12].split(':')[1][1:-1])
+        n_analog_chans = int(logtext[9].split(':')[1][1:-1])
+        n_digital_chans = int(logtext[10].split(':')[1][1:-1])
+        n_cols = n_analog_chans + n_digital_chans + 1 # one more channel for time data
+        file_sets.append((bf, lf, filetime, fish_id, sex, rate, gain, n_analog_chans, n_digital_chans, n_cols))
     else:
         print(f"Warning: no logfile found for {os.path.basename(bf)}, skipping")
 
-if not file_pairs:
+if not file_sets:
     print("No valid .bin/.txt file pairs found. Exiting.")
     sys.exit()
 
-print(f"Found {len(file_pairs)} file pair(s)")
+print(f"Found {len(file_sets)} file pair(s)")
 
-
+# Sort file_sets by filetime
+file_sets.sort(key=lambda x: x[2])  # Sort by filetime
 
 # ============================================================================
 # INITIAL DETECTION PARAMETERS (from GUI, tuned on first file's test segment)
@@ -109,18 +120,18 @@ parameters = config_gui.result['parameters']
 # ============================================================================
 # TUNING PHASE: single test segment from the first file
 # ============================================================================
-tune_fname, tune_logfname = file_pairs[1]
+tune_fname, tune_logfname, filetime, fish_id, sex, rate, gain, n_analog_chans, n_digital_chans, n_cols = file_sets[0]
 tune_stem = os.path.splitext(os.path.basename(tune_fname))[0]
 
-logtext = open(tune_logfname, "r").readlines()
-filetime = pd.to_datetime(logtext[0], format='%Y\\%m\\%d ; %H:%M:%S.%f\n')
-fish_id = logtext[1].split(':')[1][1:-1]
-sex = logtext[2].split(':')[1][1:-1]
-rate = int(logtext[8].split(':')[1][1:-1])
-gain = float(logtext[12].split(':')[1][1:-1])
-n_analog_chans = int(logtext[9].split(':')[1][1:-1])
-n_digital_chans = int(logtext[10].split(':')[1][1:-1])
-n_cols = n_analog_chans + n_digital_chans + 1 # one more channel for time data
+# logtext = open(tune_logfname, "r").readlines()
+# filetime = pd.to_datetime(logtext[0], format='%Y\\%m\\%d ; %H:%M:%S.%f\n')
+# fish_id = logtext[1].split(':')[1][1:-1]
+# sex = logtext[2].split(':')[1][1:-1]
+# rate = int(logtext[8].split(':')[1][1:-1])
+# gain = float(logtext[12].split(':')[1][1:-1])
+# n_analog_chans = int(logtext[9].split(':')[1][1:-1])
+# n_digital_chans = int(logtext[10].split(':')[1][1:-1])
+# n_cols = n_analog_chans + n_digital_chans + 1 # one more channel for time data
 
 # names_channels = ['time', 'left', 'right', 'trash_1', 'trash_2', 'LED']  # which data is written to which "channel"? (=rows in .bin file)
 
@@ -138,10 +149,10 @@ data_raw = load_shuttlebox_recording(tune_fname, n_cols, gain)
 # Build test segment detection DataFrame
 # If MV in fish_id, right_v is channel 0, right_h ch 1, left_v ch 2, left_h ch 3
 if 'MV' in fish_id:
-    left_v = detrend(data_raw.iloc[:(int(parameters['test_seg_length']) * rate), 2])
-    left_h = detrend(data_raw.iloc[:(int(parameters['test_seg_length']) * rate), 3])
-    right_v = detrend(data_raw.iloc[:(int(parameters['test_seg_length']) * rate), 0])
-    right_h = detrend(data_raw.iloc[:(int(parameters['test_seg_length']) * rate), 1])
+    left_h = detrend(data_raw.iloc[:(int(parameters['test_seg_length']) * rate), 2])
+    left_v = detrend(data_raw.iloc[:(int(parameters['test_seg_length']) * rate), 3])
+    right_h = detrend(data_raw.iloc[:(int(parameters['test_seg_length']) * rate), 0])
+    right_v = detrend(data_raw.iloc[:(int(parameters['test_seg_length']) * rate), 1])
 elif 'PD' in fish_id:
     left_v = detrend(data_raw.iloc[:(int(parameters['test_seg_length']) * rate), 0])
     left_h = detrend(data_raw.iloc[:(int(parameters['test_seg_length']) * rate), 1])
@@ -407,28 +418,34 @@ gc.collect()
 eod_waveforms_all = []
 eod_table_all = pd.DataFrame()
 
-for fname, logfname in file_pairs:
+for fname, logfname, filetime, fish_id, sex, rate, gain, n_analog_chans, n_digital_chans, n_cols in file_sets:
     file_stem = os.path.splitext(os.path.basename(fname))[0]
     print(f"\nProcessing: {file_stem}")
 
     # Skip loading the first file since it was already loaded during tuning
-    if fname != file_pairs[0][0]:
-        logtext = open(logfname, "r").readlines()
-        filetime = pd.to_datetime(logtext[0], format='%Y\\%m\\%d ; %H:%M:%S.%f\n')
-        fish_id = logtext[1].split(':')[1][1:-1]
-        sex = logtext[2].split(':')[1][1:-1]
-        rate = int(logtext[8].split(':')[1][1:-1])
-        gain = float(logtext[12].split(':')[1][1:-1])
+    if fname != tune_fname:
+        # logtext = open(logfname, "r").readlines()
+        # filetime = pd.to_datetime(logtext[0], format='%Y\\%m\\%d ; %H:%M:%S.%f\n')
+        # fish_id = logtext[1].split(':')[1][1:-1]
+        # sex = logtext[2].split(':')[1][1:-1]
+        # rate = int(logtext[8].split(':')[1][1:-1])
+        # gain = float(logtext[12].split(':')[1][1:-1])
 
         data_raw = load_shuttlebox_recording(fname, n_cols, gain)
         gc.collect()
 
     seglength = int(parameters['seg_length_min']) * 60 * rate
     no_segments = math.ceil(len(data_raw) / seglength)
-    left_v = detrend(data_raw.iloc[:, 0])
-    left_h = detrend(data_raw.iloc[:, 1])
-    right_v = detrend(data_raw.iloc[:, 2])
-    right_h = detrend(data_raw.iloc[:, 3])
+    if 'MV' in fish_id:
+        left_h = detrend(data_raw.iloc[:, 2])
+        left_v = detrend(data_raw.iloc[:, 3])
+        right_h = detrend(data_raw.iloc[:, 0])
+        right_v = detrend(data_raw.iloc[:, 1])
+    elif 'PD' in fish_id:
+        left_v = detrend(data_raw.iloc[:, 0])
+        left_h = detrend(data_raw.iloc[:, 1])
+        right_v = detrend(data_raw.iloc[:, 2])
+        right_h = detrend(data_raw.iloc[:, 3])
 
     data_df = pd.DataFrame({
         'right_v_dt': right_v,
