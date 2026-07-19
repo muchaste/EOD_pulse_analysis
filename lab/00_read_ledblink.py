@@ -27,8 +27,9 @@ root = tkinter.Tk()
 root.withdraw()
 
 root_dir = filedialog.askdirectory(title = "Select root folder with data")
-vid_files = sorted(glob.glob(os.path.join(root_dir, '*.avi')))
-log_files = sorted(glob.glob(os.path.join(root_dir, 'log_*.txt')))
+# find vid_files recursively
+vid_files = sorted(glob.glob(os.path.join(root_dir, '**', '*.avi'), recursive=True))
+log_files = sorted(glob.glob(os.path.join(root_dir, '**', 'log_*.txt'), recursive=True))
 
 # vidpath = filedialog.askdirectory(title = "Select folder with video files")
 # output_path = filedialog.askdirectory(title = 'Select folder for output of results')
@@ -43,6 +44,7 @@ fish_id = logtext[1].split(':')[1][1:-1]
 
 #%%
 # Preallocate empty lists
+file_basenames = []
 firstframe = []
 lastframe = []
 blinkduration = []
@@ -83,20 +85,25 @@ for fname in vid_files:
     
     # New: read time from .txt log file
     logfile = [i for i in log_files if re.split("\\\\", fname)[-1][0:-8] in i][0]
-    logtext = open(logfile, "r").readline()
-    time_start_log = pd.to_datetime(logtext, format='%Y\\%m\\%d ; %H:%M:%S.%f\n')
+    logtext = open(logfile, "r").readlines()
+    time_start_log = pd.to_datetime(logtext[0], format='%Y\\%m\\%d ; %H:%M:%S.%f\n')
     time_start_blink = time_start_log + pd.to_timedelta(firstframe[-1]/fps, unit='s')
     log_start.append(time_start_log)
     blink_start.append(time_start_blink)
+    # get the basename of the video file without the path and extension
+    file_basenames.append(os.path.splitext(os.path.basename(fname))[0])
     print(fname)
 
 
     
 
 df = pd.DataFrame(
-    {'videoname':vid_files, 'firstframe': firstframe, 'lastframe': lastframe, \
+    {'videoname':vid_files, 'file_basenames': file_basenames, 'firstframe': firstframe, 'lastframe': lastframe, \
      'blinkduration': blinkduration, 'log_start': log_start, 'blink_start': blink_start, 'id': fish_id, 'fps': fps}
     )
+
+# Sort df by log_start
+df = df.sort_values(by='log_start')
 
 csv_name = os.path.join(root_dir, fish_id+"_ledblinks_python.csv")
 df.to_csv(csv_name, index = False)
