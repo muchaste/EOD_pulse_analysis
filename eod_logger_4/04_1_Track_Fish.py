@@ -441,32 +441,38 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
     # Step 2a: Width-based pre-sorting into classes
     # -------------------------------------------------------------------------
     print("\nWidth-based pre-sorting...")
-    width_range = np.linspace(widths.min(), widths.max(), 1000)
-    width_std = np.std(widths)
-    # bandwidth = desired_smoothing_µs / std(widths); smooth over ≥2 quantization steps
-    kde_bw = max(2.0 * step_us, 1.0) / width_std if width_std > 0 else 0.5
-    kde = gaussian_kde(widths, bw_method=kde_bw)
-    kde_vals = kde(width_range)
-
-    bin_width_us = width_range[1] - width_range[0]
-    if bin_width_us > 0:
-        min_peak_distance_bins = int(width_min_separation_us / bin_width_us)
-    else:
-        min_peak_distance_bins = 1  # all pulses have identical width → single class
-    peaks_idx, _ = find_peaks(kde_vals, distance=max(1, min_peak_distance_bins),
-                               prominence=0.01 * kde_vals.max())
-
-    if len(peaks_idx) > 1:
-        peak_positions = width_range[peaks_idx]
-        pulse_width_class = np.argmin(
-            np.abs(widths[:, None] - peak_positions[None, :]), axis=1
-        )
-        n_width_classes = len(peak_positions)
-        print(f"✓ Found {n_width_classes} width classes at: {peak_positions.round(1)} µs")
-    else:
+    if widths.min() == widths.max():
+        # All pulses have identical width — skip KDE entirely (gaussian_kde raises
+        # LinAlgError: singular matrix when the dataset has zero variance)
         pulse_width_class = np.zeros(len(eod_data), dtype=int)
         n_width_classes = 1
-        print(f"✓ Single width class (no clear modes separated by >{width_min_separation_us} µs)")
+        print(f"✓ Single width class (all {len(widths)} pulses identical: {widths[0]:.1f} µs)")
+    else:
+        width_range = np.linspace(widths.min(), widths.max(), 1000)
+        width_std = np.std(widths)
+        kde_bw = max(2.0 * step_us, 1.0) / width_std if width_std > 0 else 0.5
+        kde = gaussian_kde(widths, bw_method=kde_bw)
+        kde_vals = kde(width_range)
+
+        bin_width_us = width_range[1] - width_range[0]
+        if bin_width_us > 0:
+            min_peak_distance_bins = int(width_min_separation_us / bin_width_us)
+        else:
+            min_peak_distance_bins = 1
+        peaks_idx, _ = find_peaks(kde_vals, distance=max(1, min_peak_distance_bins),
+                                   prominence=0.01 * kde_vals.max())
+
+        if len(peaks_idx) > 1:
+            peak_positions = width_range[peaks_idx]
+            pulse_width_class = np.argmin(
+                np.abs(widths[:, None] - peak_positions[None, :]), axis=1
+            )
+            n_width_classes = len(peak_positions)
+            print(f"✓ Found {n_width_classes} width classes at: {peak_positions.round(1)} µs")
+        else:
+            pulse_width_class = np.zeros(len(eod_data), dtype=int)
+            n_width_classes = 1
+            print(f"✓ Single width class (no clear modes separated by >{width_min_separation_us} µs)")
 
     eod_data['width_class'] = pulse_width_class
 
