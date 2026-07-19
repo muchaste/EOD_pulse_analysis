@@ -27,7 +27,7 @@ root = tkinter.Tk()
 root.withdraw()
 
 root_dir = filedialog.askdirectory(title = "Select root folder with data")
-vid_files = sorted(glob.glob(os.path.join(root_dir, '*.bin')))
+vid_files = sorted(glob.glob(os.path.join(root_dir, '*.avi')))
 log_files = sorted(glob.glob(os.path.join(root_dir, 'log_*.txt')))
 
 # vidpath = filedialog.askdirectory(title = "Select folder with video files")
