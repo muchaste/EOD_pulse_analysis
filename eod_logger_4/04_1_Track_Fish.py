@@ -1303,21 +1303,52 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
         ax_hist.hist(widths[wc_mask], bins=bin_edges, alpha=0.6,
                      color=wc_color_map[wc], label=f'Class {wc}', edgecolor='none')
     # KDE overlay per class
-    w_range = np.linspace(widths.min(), widths.max(), 400)
-    for wc in width_classes:
-        wc_mask = eod_data['width_class'] == wc
-        if wc_mask.sum() > 5:
-            wc_std = np.std(widths[wc_mask])
-            wc_kde_bw = max(2.0 * step_us, 1.0) / wc_std if wc_std > 0 else kde_bw
-            kde_wc = gaussian_kde(widths[wc_mask], bw_method=wc_kde_bw)
-            kde_scale = wc_mask.sum() * (bin_edges[1] - bin_edges[0])
-            ax_hist.plot(w_range, kde_wc(w_range) * kde_scale,
-                         color=wc_color_map[wc], linewidth=1.5)
-    ax_hist.set_xlabel('EOD width (µs)')
-    ax_hist.set_ylabel('Count')
-    ax_hist.set_title('Pulse width distribution by class')
-    if len(width_classes) > 1:
-        ax_hist.legend(fontsize=7)
+    if widths.min() == widths.max():
+        ax_hist.text(0.5, 0.5, f'All pulses identical width\n({widths[0]:.1f} µs)',
+                    ha='center', va='center', transform=ax_hist.transAxes, fontsize=9)
+        ax_hist.set_xlabel('EOD width (µs)')
+        ax_hist.set_title('Pulse width distribution by class')
+    else:
+        bin_edges = np.linspace(widths.min(), widths.max(), 60)
+        for wc in width_classes:
+            wc_mask = eod_data['width_class'] == wc
+            ax_hist.hist(widths[wc_mask], bins=bin_edges, alpha=0.6,
+                        color=wc_color_map[wc], label=f'Class {wc}', edgecolor='none')
+        w_range = np.linspace(widths.min(), widths.max(), 400)
+        for wc in width_classes:
+            wc_mask = eod_data['width_class'] == wc
+            if widths[wc_mask].min() == widths[wc_mask].max():
+                continue
+            if wc_mask.sum() > 5:
+                wc_std = np.std(widths[wc_mask])
+                wc_kde_bw = max(2.0 * step_us, 1.0) / wc_std if wc_std > 0 else kde_bw
+                kde_wc = gaussian_kde(widths[wc_mask], bw_method=wc_kde_bw)
+                kde_scale = wc_mask.sum() * (bin_edges[1] - bin_edges[0])
+                ax_hist.plot(w_range, kde_wc(w_range) * kde_scale,
+                            color=wc_color_map[wc], linewidth=1.5)
+        ax_hist.set_xlabel('EOD width (µs)')
+        ax_hist.set_ylabel('Count')
+        ax_hist.set_title('Pulse width distribution by class')
+        if len(width_classes) > 1:
+            ax_hist.legend(fontsize=7)
+
+    # w_range = np.linspace(widths.min(), widths.max(), 400)
+    # for wc in width_classes:
+    #     wc_mask = eod_data['width_class'] == wc
+    #     if widths[wc_mask].min() == widths[wc_mask].max():
+    #         continue
+    #     if wc_mask.sum() > 5:
+    #         wc_std = np.std(widths[wc_mask])
+    #         wc_kde_bw = max(2.0 * step_us, 1.0) / wc_std if wc_std > 0 else kde_bw
+    #         kde_wc = gaussian_kde(widths[wc_mask], bw_method=wc_kde_bw)
+    #         kde_scale = wc_mask.sum() * (bin_edges[1] - bin_edges[0])
+    #         ax_hist.plot(w_range, kde_wc(w_range) * kde_scale,
+    #                      color=wc_color_map[wc], linewidth=1.5)
+    # ax_hist.set_xlabel('EOD width (µs)')
+    # ax_hist.set_ylabel('Count')
+    # ax_hist.set_title('Pulse width distribution by class')
+    # if len(width_classes) > 1:
+    #     ax_hist.legend(fontsize=7)
 
     # --- Rows 4+: per-fish waveform overlays ---
     if n_assigned > 0:
