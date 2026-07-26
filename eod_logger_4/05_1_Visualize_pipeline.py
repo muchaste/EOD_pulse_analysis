@@ -33,21 +33,20 @@ from pulse_functions import load_waveforms, normalize_waveforms
 # CONFIGURATION
 # =============================================================================
 
-wav_folder      = r"C:\path\to\raw\wav\files"       # folder containing .wav recordings
-input_folder    = r"C:\path\to\04_1\input"           # eod_table + waveforms_concatenated.npz
-output_folder   = r"C:\path\to\04_1\output"          # tracked.csv, classifier_report.json
-control_path    = r"C:\path\to\control\recordings"   # control lib for LDA; set '' to skip
-svg_folder      = r"C:\path\to\svg\output"           # destination for saved SVGs
-
-event_base_name = "event_001"   # matches *_tracked.csv, *_eod_table.csv, *_waveforms*
+wav_folder      = r"E:\Example Events\L3_20231115"       # folder containing .wav recordings
+input_folder    = r"E:\Example Events\L3_20231115"           # eod_table + waveforms_concatenated.npz
+output_folder   = r"E:\Example Events\L3_20231115\tracks"          # tracked.csv, classifier_report.json
+control_path    = r"E:\Models and Classifiers\Species Assignment\Extraction_0.005"   # control lib for LDA; set '' to skip
+svg_folder      = r"E:\Example Events\L3_20231115\visualizations"           # destination for saved SVGs
+event_base_name = "event_1210"   # matches *_tracked.csv, *_eod_table.csv, *_waveforms*
 
 # Waveform normalization — must match 04_1 settings
-waveform_target_length = 150
+waveform_target_length = 300
 crop_factor            = 7
 
 # Raw audio window (relative to event start time)
 t_start_s  = 0.0    # seconds after event start to begin the window
-t_window_s = 10.0   # window duration in seconds
+t_window_s = 12.0   # window duration in seconds
 
 # Number of waveforms to overlay in Panel 3
 n_waveform_overlay = 200
@@ -55,7 +54,7 @@ n_waveform_overlay = 200
 # Figure size in inches (same for all panels)
 FIG_W = 8.0
 FIG_H = 5.0
-
+#%%
 # =============================================================================
 # PALETTE & GLOBAL STYLE
 # =============================================================================
@@ -108,7 +107,7 @@ t_sec = (eod_data['timestamp'] - eod_data['timestamp'].iloc[0]).dt.total_seconds
 
 n_fish_tracked = int((eod_data['fish_id'] >= 0).any() and eod_data['fish_id'].max() + 1)
 print(f"Tracked CSV: {len(eod_data)} pulses")
-
+#%%
 # =============================================================================
 # LOAD & REORDER RAW WAVEFORMS
 # Replicate the timestamp-sort reordering from 04_1 so waveform[i] matches
