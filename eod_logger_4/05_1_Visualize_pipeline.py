@@ -13,6 +13,7 @@ Authors: Stefan Mucha
 """
 
 import audioio as aio
+import configparser
 import glob
 import json
 import os
@@ -25,6 +26,8 @@ from scipy.stats import gaussian_kde
 from scipy.signal import find_peaks
 from sklearn.decomposition import PCA
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+import tkinter as tk
+from tkinter import filedialog
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from pulse_functions import load_waveforms, normalize_waveforms
@@ -33,26 +36,38 @@ from pulse_functions import load_waveforms, normalize_waveforms
 # CONFIGURATION
 # =============================================================================
 
-wav_folder      = r"E:\Example Events\L3_20231115"       # folder containing .wav recordings
-input_folder    = r"E:\Example Events\L3_20231115"           # eod_table + waveforms_concatenated.npz
-output_folder   = r"E:\Example Events\L3_20231115\tracks"          # tracked.csv, classifier_report.json
+wav_file = filedialog.askopenfilename(title="Select a WAV file from the event folder",
+                                      filetypes=[("WAV files", "*.wav")])
+config_file = filedialog.askopenfilename(title="Select the corresponding tracking config file",
+                                         filetypes=[("Config files", "*.cfg"), ("All files", "*.*")])
+tracked_csv = filedialog.askopenfilename(title="Select the corresponding tracked CSV file",
+                                        filetypes=[("CSV files", "*.csv")])
+
+# Filename parsing: wav_file = L3-20231115T230900_event_436.wav, eod table = L3-20231115T230900_event_436_eod_table.csv,
+# tracked = L3-20231115T230900_event_436_tracked.csv, waveforms = L3-20231115T230900_event_436_waveforms_concatenated.npz
+input_folder    = os.path.dirname(wav_file)
+base_name       = os.path.splitext(os.path.basename(wav_file))[0]  # e.g., L3-20231115T230900_event_436
+event_base_name = 'event_' + base_name.rsplit('_event_', 1)[-1]    # e.g., event_436
+wf_base         = os.path.join(input_folder, f"{base_name}_waveforms")  # load_waveforms appends _concatenated.npz
+eod_table_path  = os.path.join(input_folder, f"{base_name}_eod_table.csv")
+
+# Tracking config (config.cfg, written by parameter_gui.TrackingParameterConfigGUI) —
+# used to recover the normalization settings that must match 04_1 exactly
+tracking_config = configparser.ConfigParser()
+tracking_config.read(config_file)
+waveform_target_length = int(tracking_config['Parameters']['waveform_target_length'])
+crop_factor             = int(tracking_config['Parameters']['crop_factor'])
+
+# Hardcoded for now — will stay the same across events/sessions
 control_path    = r"E:\Models and Classifiers\Species Assignment\Extraction_0.005"   # control lib for LDA; set '' to skip
-svg_folder      = r"E:\Example Events\L3_20231115\visualizations"           # destination for saved SVGs
-event_base_name = "event_1210"   # matches *_tracked.csv, *_eod_table.csv, *_waveforms*
-
-# Waveform normalization — must match 04_1 settings
-waveform_target_length = 300
-crop_factor            = 7
-
-# Raw audio window (relative to event start time)
-t_start_s  = 0.0    # seconds after event start to begin the window
-t_window_s = 12.0   # window duration in seconds
+output_folder   = r"E:\Example Events\L3_20231115\tracks"          # classifier_report.json
+svg_folder      = r"E:\Example Events\visualizations"           # destination for saved SVGs
 
 # Number of waveforms to overlay in Panel 3
-n_waveform_overlay = 200
+n_waveform_overlay = 300
 
 # Figure size in inches (same for all panels)
-FIG_W = 8.0
+FIG_W = 4.0
 FIG_H = 5.0
 #%%
 # =============================================================================
@@ -99,7 +114,7 @@ os.makedirs(svg_folder, exist_ok=True)
 # LOAD TRACKED DATA
 # =============================================================================
 
-tracked_csv = os.path.join(output_folder, f"{event_base_name}_tracked.csv")
+# tracked_csv = os.path.join(output_folder, f"{event_base_name}_tracked.csv")
 eod_data = pd.read_csv(tracked_csv)
 eod_data['timestamp'] = pd.to_datetime(eod_data['timestamp'])
 eod_data = eod_data.sort_values('timestamp').reset_index(drop=True)
@@ -114,7 +129,7 @@ print(f"Tracked CSV: {len(eod_data)} pulses")
 # eod_data row i. The original eod_table gives the pre-sort row order.
 # =============================================================================
 
-eod_table_path = os.path.join(input_folder, f"{event_base_name}_eod_table.csv")
+# eod_table_path = os.path.join(input_folder, f"{event_base_name}_eod_table.csv")
 eod_table_orig = pd.read_csv(eod_table_path)
 eod_table_orig['timestamp'] = pd.to_datetime(eod_table_orig['timestamp'])
 original_indices = (
@@ -124,7 +139,6 @@ original_indices = (
     .tolist()
 )
 
-wf_base = os.path.join(input_folder, f"{event_base_name}_waveforms")
 waveforms_all = load_waveforms(wf_base, format='npz', length='variable')
 waveforms_raw = [waveforms_all[i] for i in original_indices]
 del waveforms_all
@@ -156,45 +170,16 @@ print(f"Normalized waveforms: {waveforms_l2.shape}")
 
 # =============================================================================
 # LOAD RAW AUDIO (8-channel WAV for Panel 1)
+# The full event WAV is loaded — no time-window subselection.
 # =============================================================================
 
-event_start_time = eod_data['timestamp'].iloc[0]
-window_start     = event_start_time + pd.Timedelta(seconds=t_start_s)
-window_end       = window_start + pd.Timedelta(seconds=t_window_s)
+with aio.AudioLoader(wav_file) as sf:
+    rate       = sf.rate
+    audio_data = sf[:, :].copy()
 
-wav_files = sorted(glob.glob(os.path.join(wav_folder, '*.wav')))
-
-# Parse start timestamp from filename: *-YYYYMMDDTHHMMSS.wav
-wav_timestamps = []
-for f in wav_files:
-    try:
-        ts_str = os.path.basename(f).split('-')[1][:-4]
-        wav_timestamps.append(pd.to_datetime(ts_str, format='%Y%m%dT%H%M%S'))
-    except (IndexError, ValueError):
-        wav_timestamps.append(pd.NaT)
-
-# Last WAV file whose start timestamp is <= window_start
-valid = [(i, ts) for i, ts in enumerate(wav_timestamps)
-         if pd.notna(ts) and ts <= window_start]
-
-audio_data = None
-rate       = None
-
-if valid:
-    wav_idx, wav_start_ts = valid[-1]
-    offset_s = (window_start - wav_start_ts).total_seconds()
-
-    with aio.AudioLoader(wav_files[wav_idx]) as sf:
-        rate         = sf.rate
-        start_smp    = int(offset_s * rate)
-        end_smp      = int((offset_s + t_window_s) * rate)
-        audio_data   = sf[start_smp:end_smp, :].copy()
-
-    n_channels = audio_data.shape[1]
-    print(f"Loaded audio {audio_data.shape} from {os.path.basename(wav_files[wav_idx])}, "
-          f"offset={offset_s:.1f}s, rate={rate} Hz")
-else:
-    print("WARNING: No matching WAV file found — Panel 1 will be skipped")
+n_channels  = audio_data.shape[1]
+t_window_s  = audio_data.shape[0] / rate
+print(f"Loaded audio {audio_data.shape} from {os.path.basename(wav_file)}, rate={rate} Hz, duration={t_window_s:.2f}s")
 
 # =============================================================================
 # SHARED: fish color map, widths, pulse assignments
@@ -204,50 +189,54 @@ fish_ids_assigned = sorted([fid for fid in eod_data['fish_id'].unique() if fid >
 fish_color_map    = {fid: OKABE_ITO[i % len(OKABE_ITO)] for i, fid in enumerate(fish_ids_assigned)}
 
 widths = eod_data['eod_width_us'].values
-
+#%%
 # =============================================================================
 # PANEL 1: RAW MULTICHANNEL RECORDING WITH DETECTED PULSES
 # =============================================================================
 
-if audio_data is not None:
-    fig1, ax1 = plt.subplots(figsize=(FIG_W, FIG_H))
+fig1, ax1 = plt.subplots(figsize=(FIG_W, FIG_H))
 
-    # Vertical spacing between channel traces
-    ch_range     = np.nanmax(np.abs(audio_data))
-    offset_scale = ch_range * 2.2
-    t_audio      = np.linspace(0, t_window_s, audio_data.shape[0])
+# Vertical spacing between channel traces
+ch_range     = np.nanmax(np.abs(audio_data))
+offset_scale = ch_range * 1.5
+p_size = 5
+t_audio      = np.linspace(0, t_window_s, audio_data.shape[0])
 
-    for ch in range(n_channels):
-        ax1.plot(t_audio, audio_data[:, ch] + ch * offset_scale,
-                 color=FG, linewidth=0.5, alpha=0.8, rasterized=False)
-        ax1.text(-0.015 * t_window_s, ch * offset_scale, f'Ch {ch + 1}',
-                 color=FG, ha='right', va='center', fontsize=8)
+for ch in range(n_channels):
+    ax1.plot(t_audio, audio_data[:, ch] + ch * offset_scale,
+             color=FG, linewidth=0.5, alpha=1, rasterized=False)
+    ax1.text(-0.015 * t_window_s, ch * offset_scale, f'Ch {ch + 1}',
+             color=FG, ha='right', va='center', fontsize=8)
 
-    # Mark detected pulses that fall within the window
-    window_mask = (eod_data['timestamp'] >= window_start) & (eod_data['timestamp'] < window_end)
-    window_pulses = eod_data.loc[window_mask].copy()
-    window_pulses['t_rel'] = (window_pulses['timestamp'] - window_start).dt.total_seconds()
+# Mark detected pulses using the absolute sample index (p1_idx) within this WAV file
+if 'pulse_location' in eod_data.columns and 'p1_idx' in eod_data.columns:
+    pulse_t_rel = eod_data['p1_idx'].values / rate
+    for i, row in eod_data.iterrows():
+        t_rel = pulse_t_rel[i]
+        if t_rel < 0 or t_rel >= t_window_s:
+            continue
+        ch_idx = int(round(float(row['pulse_location'])))
+        ch_idx = max(0, min(n_channels - 1, ch_idx))
+        smp    = min(int(t_rel * rate), audio_data.shape[0] - 1)
+        y_val  = float(audio_data[smp, ch_idx]) + ch_idx * offset_scale
+        ax1.scatter(t_rel, y_val,
+                    color=OKABE_ITO[0], s=p_size, zorder=5, linewidths=0)
 
-    if 'pulse_location' in window_pulses.columns:
-        for _, row in window_pulses.iterrows():
-            ch_idx = int(round(float(row['pulse_location'])))
-            ch_idx = max(0, min(n_channels - 1, ch_idx))
-            smp    = min(int(row['t_rel'] * rate), audio_data.shape[0] - 1)
-            y_val  = float(audio_data[smp, ch_idx]) + ch_idx * offset_scale
-            ax1.scatter(row['t_rel'], y_val,
-                        color=OKABE_ITO[0], s=20, zorder=5, linewidths=0)
+ax1.set_xlim(0, t_window_s)
+ax1.set_yticks([])
+ax1.spines['left'].set_visible(False)
+ax1.set_xlabel('Time (s)')
+ax1.set_title('Raw recording — detected pulses (orange)')
 
-    ax1.set_xlim(0, t_window_s)
-    ax1.set_yticks([])
-    ax1.spines['left'].set_visible(False)
-    ax1.set_xlabel('Time (s)')
-    ax1.set_title('Raw recording — detected pulses (orange)')
+plt.tight_layout()
+fig1.savefig(os.path.join(svg_folder, event_base_name + '_01_raw_audio.svg'),
+             format='svg', bbox_inches='tight', facecolor=BG)
+# also save .png for fast screening
+fig1.savefig(os.path.join(svg_folder, event_base_name + '_01_raw_audio.png'),
+             format='png', dpi=150, bbox_inches='tight', facecolor=BG)
 
-    plt.tight_layout()
-    fig1.savefig(os.path.join(svg_folder, '01_raw_audio.svg'),
-                 format='svg', bbox_inches='tight', facecolor=BG)
-    plt.close(fig1)
-    print("Saved: 01_raw_audio.svg")
+plt.close(fig1)
+print("Saved: 01_raw_audio.svg")
 
 # =============================================================================
 # PANEL 2: FEATURE EXTRACTION — single representative pulse with landmarks
@@ -292,8 +281,10 @@ ax2.set_ylabel('Amplitude (V)')
 ax2.set_title('EOD waveform — feature landmarks')
 
 plt.tight_layout()
-fig2.savefig(os.path.join(svg_folder, '02_feature_extraction.svg'),
+fig2.savefig(os.path.join(svg_folder, event_base_name + '_02_feature_extraction.svg'),
              format='svg', bbox_inches='tight', facecolor=BG)
+fig2.savefig(os.path.join(svg_folder, event_base_name + '_02_feature_extraction.png'),
+             format='png', dpi=150, bbox_inches='tight', facecolor=BG)
 plt.close(fig2)
 print("Saved: 02_feature_extraction.svg")
 
@@ -311,11 +302,11 @@ x_norm = np.linspace(-1.0, 1.0, waveform_target_length)
 fig3, ax3 = plt.subplots(figsize=(FIG_W, FIG_H))
 
 for i in ol_idx:
-    ax3.plot(x_norm, waveforms_l2[i], color=BLUE, alpha=0.05,
+    ax3.plot(x_norm, waveforms_l2[i], color=BLUE, alpha=0.15,
              linewidth=0.5, rasterized=False)
 
-mean_wf = waveforms_l2.mean(axis=0)
-ax3.plot(x_norm, mean_wf, color=OKABE_ITO[0], linewidth=2.0, label='Mean')
+# mean_wf = waveforms_l2.mean(axis=0)
+# ax3.plot(x_norm, mean_wf, color=OKABE_ITO[0], linewidth=2.0, label='Mean')
 
 ax3.axvline(0, color=FG, linestyle=':', linewidth=0.7, alpha=0.4)
 ax3.set_xlabel('Normalized time (P1 = 0)')
@@ -324,10 +315,13 @@ ax3.set_title(f'Normalized waveforms (n = {n_overlay} shown)')
 ax3.legend(fontsize=9, framealpha=0.6)
 
 plt.tight_layout()
-fig3.savefig(os.path.join(svg_folder, '03_normalized_overlay.svg'),
+fig3.savefig(os.path.join(svg_folder, event_base_name + '_03_normalized_overlay.svg'),
              format='svg', bbox_inches='tight', facecolor=BG)
+fig3.savefig(os.path.join(svg_folder, event_base_name + '_03_normalized_overlay.png'),
+             format='png', dpi=150, bbox_inches='tight', facecolor=BG)
+
 plt.close(fig3)
-print("Saved: 03_normalized_overlay.svg")
+print(f"Saved: {event_base_name}_03_normalized_overlay.svg")
 
 # =============================================================================
 # PANEL 4a: WIDTH DISTRIBUTION — histogram colored by width class
@@ -366,10 +360,12 @@ if len(width_classes) > 1:
     ax4a.legend(fontsize=9)
 
 plt.tight_layout()
-fig4a.savefig(os.path.join(svg_folder, '04a_width_histogram.svg'),
+fig4a.savefig(os.path.join(svg_folder, event_base_name + '_04a_width_histogram.svg'),
               format='svg', bbox_inches='tight', facecolor=BG)
+fig4a.savefig(os.path.join(svg_folder, event_base_name + '_04a_width_histogram.png'),
+              format='png', dpi=150, bbox_inches='tight', facecolor=BG)
 plt.close(fig4a)
-print("Saved: 04a_width_histogram.svg")
+print(f"Saved: {event_base_name}_04a_width_histogram.svg")
 
 # =============================================================================
 # PANEL 4b: SHAPE CLUSTERING — PCA scatter colored by shape class
@@ -414,11 +410,26 @@ ax4b.set_title('Waveform shape clustering (DBSCAN on PCA features)')
 if len(main_scs) <= 10:
     ax4b.legend(fontsize=7, markerscale=2.5, loc='best')
 
+# Mean-waveform inlays, one per main shape cluster, placed at the cluster centroid
+inset_size = 0.16
+for sc in main_scs:
+    sc_mask = (eod_data['shape_class'] == sc).values & ~artifact_mask
+    centroid_data = pca_coords[sc_mask].mean(axis=0)
+    centroid_axes = ax4b.transAxes.inverted().transform(ax4b.transData.transform(centroid_data))
+    x0 = min(max(centroid_axes[0] - inset_size / 2, 0.0), 1.0 - inset_size)
+    y0 = min(max(centroid_axes[1] - inset_size / 2, 0.0), 1.0 - inset_size)
+    ax_in = ax4b.inset_axes([x0, y0, inset_size, inset_size])
+    ax_in.plot(waveforms_l2[sc_mask].mean(axis=0), color=sc_colors[sc], linewidth=1.2)
+    ax_in.set_facecolor('none')
+    ax_in.axis('off')
+
 plt.tight_layout()
-fig4b.savefig(os.path.join(svg_folder, '04b_shape_clustering.svg'),
+fig4b.savefig(os.path.join(svg_folder, event_base_name + '_04b_shape_clustering.svg'),
               format='svg', bbox_inches='tight', facecolor=BG)
+fig4b.savefig(os.path.join(svg_folder, event_base_name + '_04b_shape_clustering.png'),
+              format='png', dpi=150, bbox_inches='tight', facecolor=BG)
 plt.close(fig4b)
-print("Saved: 04b_shape_clustering.svg")
+print(f"Saved: {event_base_name}_04b_shape_clustering.svg")
 
 # =============================================================================
 # PANEL 5: TRACKING RESULT — pulse location vs time, colored by fish_id
@@ -451,10 +462,54 @@ n_leg_cols = max(1, len(fish_ids_assigned) // 8)
 ax5.legend(markerscale=3, fontsize=7, ncol=n_leg_cols, loc='upper right')
 
 plt.tight_layout()
-fig5.savefig(os.path.join(svg_folder, '05_tracking_result.svg'),
+fig5.savefig(os.path.join(svg_folder, event_base_name + '_05_tracking_result.svg'),
              format='svg', bbox_inches='tight', facecolor=BG)
+fig5.savefig(os.path.join(svg_folder, event_base_name + '_05_tracking_result.png'),
+             format='png', dpi=150, bbox_inches='tight', facecolor=BG)
 plt.close(fig5)
-print("Saved: 05_tracking_result.svg")
+print(f"Saved: {event_base_name}_05_tracking_result.svg")
+
+# =============================================================================
+# PANEL 5b: TRACKING RESULT — raw-trace style, pulses colored by fish ID
+# =============================================================================
+
+fig5b, ax5b = plt.subplots(figsize=(FIG_W, FIG_H))
+
+for ch in range(n_channels):
+    ax5b.plot(t_audio, audio_data[:, ch] + ch * offset_scale,
+              color=FG, linewidth=0.5, alpha=1, rasterized=False)
+    ax5b.text(-0.015 * t_window_s, ch * offset_scale, f'Ch {ch + 1}',
+              color=FG, ha='right', va='center', fontsize=8)
+
+if 'pulse_location' in eod_data.columns and 'p1_idx' in eod_data.columns:
+    pulse_t_rel = eod_data['p1_idx'].values / rate
+    for i, row in eod_data.iterrows():
+        t_rel = pulse_t_rel[i]
+        if t_rel < 0 or t_rel >= t_window_s:
+            continue
+        ch_idx = int(round(float(row['pulse_location'])))
+        ch_idx = max(0, min(n_channels - 1, ch_idx))
+        smp    = min(int(t_rel * rate), audio_data.shape[0] - 1)
+        y_val  = float(audio_data[smp, ch_idx]) + ch_idx * offset_scale
+        fid    = int(row['fish_id'])
+        color  = fish_color_map[fid] if fid >= 0 else GRAY
+        ax5b.scatter(t_rel, y_val, color=color, s=p_size, zorder=5, linewidths=0,
+                     alpha=1.0 if fid >= 0 else 0.35)
+
+ax5b.set_xlim(0, t_window_s)
+ax5b.set_yticks([])
+ax5b.spines['left'].set_visible(False)
+ax5b.set_xlabel('Time (s)')
+ax5b.set_title('Raw recording — pulses colored by fish ID')
+
+plt.tight_layout()
+fig5b.savefig(os.path.join(svg_folder, event_base_name + '_05b_tracking_result_raw.svg'),
+              format='svg', bbox_inches='tight', facecolor=BG)
+# also save .png for fast screening
+fig5b.savefig(os.path.join(svg_folder, event_base_name + '_05b_tracking_result_raw.png'),
+              format='png', dpi=150, bbox_inches='tight', facecolor=BG)
+plt.close(fig5b)
+print(f"Saved: {event_base_name}_05b_tracking_result_raw.svg")
 
 # =============================================================================
 # PANEL 6: SPECIES CLASSIFICATION — LDA scatterplot
@@ -573,10 +628,14 @@ if control_path:
         ax6.legend(fontsize=8, markerscale=1.5, loc='best')
 
         plt.tight_layout()
-        fig6.savefig(os.path.join(svg_folder, '06_lda_classification.svg'),
+        fig6.savefig(os.path.join(svg_folder, event_base_name + '_06_lda_classification.svg'),
                      format='svg', bbox_inches='tight', facecolor=BG)
+        # also save .png for fast screening
+        fig6.savefig(os.path.join(svg_folder, event_base_name + '_06_lda_classification.png'),
+                     format='png', dpi=150, bbox_inches='tight', facecolor=BG)
+
         plt.close(fig6)
-        print("Saved: 06_lda_classification.svg")
+        print(f"Saved: {event_base_name}_06_lda_classification.svg")
     else:
         print("Skipping LDA panel: fewer than 2 species in reference library")
 else:
