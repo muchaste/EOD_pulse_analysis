@@ -7,7 +7,8 @@ library(sf)
 library(openxlsx)
 library(scales)
 library(ggpubr)
-
+library(readxl)
+library(suncalc)
 
 rm(list=ls())
 
@@ -278,6 +279,7 @@ for(ft_file in fish_track_list){
   ft_dat$Site <- register_raw$Site[register_raw$Session_date == ft_dat$Session_date[1] & register_raw$Logger_ID == ft_dat$Logger_id[1]]
   ft_dat$Site_logger <- paste(ft_dat$Site[1], ft_dat$Logger_id, sep="_")
   ft_dat$System <- register_raw$System[register_raw$Session_date == ft_dat$Session_date[1] & register_raw$Logger_ID == ft_dat$Logger_id[1]]
+  ft_dat$Placement <- register_raw$Placement[register_raw$Session_date == ft_dat$Session_date[1] & register_raw$Logger_ID == ft_dat$Logger_id[1]]
   ft_dat$Sunrise <- register_raw$Sunrise[register_raw$Session_date == ft_dat$Session_date[1] & register_raw$Logger_ID == ft_dat$Logger_id[1]]
   ft_dat$Sunset <- register_raw$Sunset[register_raw$Session_date == ft_dat$Session_date[1] & register_raw$Logger_ID == ft_dat$Logger_id[1]]
   ft_dat$Sunrise_next <- register_raw$Sunrise_next[register_raw$Session_date == ft_dat$Session_date[1] & register_raw$Logger_ID == ft_dat$Logger_id[1]]
@@ -314,6 +316,7 @@ for(ev_file in event_list){
   ev_dat$Site <- register_raw$Site[register_raw$Session_date == ev_dat$Session_date[1] & register_raw$Logger_ID == ev_dat$Logger_id[1]]
   ev_dat$Site_logger <- paste(ev_dat$Site[1], ev_dat$Logger_id, sep="_")
   ev_dat$System <- register_raw$System[register_raw$Session_date == ev_dat$Session_date[1] & register_raw$Logger_ID == ev_dat$Logger_id[1]]
+  ev_dat$Placement <- register_raw$Placement[register_raw$Session_date == ev_dat$Session_date[1] & register_raw$Logger_ID == ev_dat$Logger_id[1]]
   ev_dat$Sunrise <- register_raw$Sunrise[register_raw$Session_date == ev_dat$Session_date[1] & register_raw$Logger_ID == ev_dat$Logger_id[1]]
   ev_dat$Sunset <- register_raw$Sunset[register_raw$Session_date == ev_dat$Session_date[1] & register_raw$Logger_ID == ev_dat$Logger_id[1]]
   ev_dat$Sunrise_next <- register_raw$Sunrise_next[register_raw$Session_date == ev_dat$Session_date[1] & register_raw$Logger_ID == ev_dat$Logger_id[1]]
@@ -340,6 +343,7 @@ for(sp_file in species_list){
   sp_dat$Site <- register_raw$Site[register_raw$Session_date == sp_dat$Session_date[1] & register_raw$Logger_ID == sp_dat$Logger_id[1]]
   sp_dat$Site_logger <- paste(sp_dat$Site[1], sp_dat$Logger_id, sep="_")
   sp_dat$System <- register_raw$System[register_raw$Session_date == sp_dat$Session_date[1] & register_raw$Logger_ID == sp_dat$Logger_id[1]]
+  sp_dat$Placement <- register_raw$Placement[register_raw$Session_date == sp_dat$Session_date[1] & register_raw$Logger_ID == sp_dat$Logger_id[1]]
   species_raw <- bind_rows(species_raw, sp_dat)
 }
 
@@ -355,6 +359,7 @@ for(ts_file in ts_list){
   ts_dat$Site <- register_raw$Site[register_raw$Session_date == ts_dat$Session_date[1] & register_raw$Logger_ID == ts_dat$Logger_id[1]]
   ts_dat$Site_logger <- paste(ts_dat$Site[1], ts_dat$Logger_id, sep="_")
   ts_dat$System <- register_raw$System[register_raw$Session_date == ts_dat$Session_date[1] & register_raw$Logger_ID == ts_dat$Logger_id[1]]
+  ts_dat$Placement <- register_raw$Placement[register_raw$Session_date == ts_dat$Session_date[1] & register_raw$Logger_ID == ts_dat$Logger_id[1]]
   # Summarize number of fish over all columns that start with "GL", "PD", etc. (species codes)
   ts_dat$n_GL <- rowSums(ts_dat[, grepl("^GL", names(ts_dat))], na.rm = TRUE)
   ts_dat$n_PD <- rowSums(ts_dat[, grepl("^PD", names(ts_dat))], na.rm = TRUE)
@@ -371,6 +376,39 @@ ts_raw$std_time_ss <- as.numeric(difftime(ts_raw$datetime, ts_raw$Sunset, units 
 ts_raw$std_time_sr <- as.numeric(difftime(ts_raw$datetime, ts_raw$Sunrise_next, units = "hours"))
 ts_raw$Photoperiod <- ifelse(ts_raw$std_time_ss >= 0 & ts_raw$std_time_sr <= 0, "Night", "Day")
 
+# ---- Recompute time series from fish_raw, excluding species-uncertain detections -----------
+# ts_raw is built per-channel and does not account for species assignment uncertainty (unlike
+# fish_raw). Rebuild a presence time series directly from entry_time/exit_time of each fish,
+# ignoring channel identity, after filtering out uncertain species assignments.
+
+TS_BIN_MIN <- 1  # time bin resolution (minutes) for the recomputed presence time series
+
+fish_filt <- fish_raw |> filter(species_uncertain == "False")
+
+ts_expanded <- fish_filt |>
+  rowwise() |>
+  mutate(datetime = list(seq(floor_date(entry_time, unit = paste(TS_BIN_MIN, "minutes")),
+                              exit_time,
+                              by = paste(TS_BIN_MIN, "min")))) |>
+  ungroup() |>
+  select(fish_id, species_assigned, Site, System, Placement, Session_date, Logger_id,
+         Sunrise, Sunset, Sunrise_next, Sunset_next, datetime) |>
+  unnest(datetime)
+
+ts_new <- ts_expanded |>
+  count(Site, System, Placement, Session_date, Logger_id,
+        Sunrise, Sunset, Sunrise_next, Sunset_next,
+        datetime, species_assigned, name = "Number") |>
+  pivot_wider(names_from = species_assigned, values_from = Number, values_fill = 0,
+              names_prefix = "n_")
+
+for (sp_col in c("n_GL", "n_PD", "n_MV", "n_PN")) {
+  if (!sp_col %in% names(ts_new)) ts_new[[sp_col]] <- 0
+}
+
+ts_new$std_time_ss <- as.numeric(difftime(ts_new$datetime, ts_new$Sunset, units = "hours"))
+ts_new$std_time_sr <- as.numeric(difftime(ts_new$datetime, ts_new$Sunrise_next, units = "hours"))
+ts_new$Photoperiod <- ifelse(ts_new$std_time_ss >= 0 & ts_new$std_time_sr <= 0, "Night", "Day")
 
 
 # 3. PLOTS -----------------------------------------------
@@ -380,8 +418,24 @@ ts_raw$Photoperiod <- ifelse(ts_raw$std_time_ss >= 0 & ts_raw$std_time_sr <= 0, 
 # summarize ts dataset per Site and per 30 min interval
 # compute sum, mean, sd, and 95% CI of number of fish per species per 30 min interval
 # 30 min interval = 0.5 hours, so we can round std_time to the nearest 0.5
-ts_raw$std_time_rounded <- round(ts_raw$std_time_ss * 2) / 2
-ts_stack <- ts_raw %>%
+ts_new$std_time_rounded <- round(ts_new$std_time_ss * 2) / 2
+
+# Special dataset for LN to separate open water and shore loggers
+ts_LN_stack <- ts_new %>%
+  filter(System == "LN") |> 
+  group_by(Site, System, Placement, std_time_rounded) %>%
+  summarise(
+    n_GL = sum(n_GL, na.rm = TRUE),
+    n_PD = sum(n_PD, na.rm = TRUE),
+    n_MV = sum(n_MV, na.rm = TRUE),
+    n_PN = sum(n_PN, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(cols = starts_with("n_"), names_to = "Species", values_to = "Number") %>%
+  mutate(Species = str_remove(Species, "^n_"))
+
+ts_stack <- ts_new %>%
+  filter(System != "LN") |> 
   group_by(Site, System, std_time_rounded) %>%
   summarise(
     n_GL = sum(n_GL, na.rm = TRUE),
@@ -393,44 +447,59 @@ ts_stack <- ts_raw %>%
   pivot_longer(cols = starts_with("n_"), names_to = "Species", values_to = "Number") %>%
   mutate(Species = str_remove(Species, "^n_"))
 
-# Special subset for LN data because it has different sites and we want to combine them for overview plots
-ts_LN_stack <- ts_stack %>%
-  filter(System == "LN") %>%
+# Special subset for LN data because it has different sites and we want to combine the shore sites and the open water sites separately for overview plots
+ts_LN_shore_stack <- ts_LN_stack %>%
+  filter(System == "LN" & Placement == "Orthogonal") %>%
   group_by(System, std_time_rounded, Species) %>%
   summarise(Number = sum(Number, na.rm = TRUE), .groups = "drop") %>%
-  mutate(Site = "LN")
+  mutate(Site = "LN_Shore")
+
+ts_LN_open_water_stack <- ts_LN_stack %>%
+  filter(System == "LN" & Placement == "Point") %>%
+  group_by(System, std_time_rounded, Species) %>%
+  summarise(Number = sum(Number, na.rm = TRUE), .groups = "drop") %>%
+  mutate(Site = "LN_Open_Water")
 
 PLP_fish_per_hour <- ggplot(subset(ts_stack, Site == "PLP"), aes(x = std_time_rounded, y = Number, fill = Species))+
-  geom_vline(xintercept = -0.5, size = .5, colour = "white", lty = 2)+
-  geom_vline(xintercept = 12, size = .5, colour = "white", lty = 2)+
-  geom_area(alpha = .8, size = .5, col = "white")+
+  geom_vline(xintercept = -0.5, linewidth = .5, colour = "white", lty = 2)+
+  geom_vline(xintercept = 12, linewidth = .5, colour = "white", lty = 2)+
+  geom_area(alpha = .8, linewidth = .5, col = "white")+
   scale_fill_manual(values = SPECIES_PALETTE)+
   xlim(-4, 20)+
   labs(x = "Time relative to sunset (h)", y = "Number of fish detected")+
   theme_black(base_size = 16)
 
 PLS_fish_per_hour <- ggplot(subset(ts_stack, Site == "PLS"), aes(x = std_time_rounded, y = Number, fill = Species))+
-  geom_vline(xintercept = -0.5, size = .5, colour = "white", lty = 2)+
-  geom_vline(xintercept = 12, size = .5, colour = "white", lty = 2)+
-  geom_area(alpha = .8, size = .5, col = "white")+
+  geom_vline(xintercept = -0.5, linewidth = .5, colour = "white", lty = 2)+
+  geom_vline(xintercept = 12, linewidth = .5, colour = "white", lty = 2)+
+  geom_area(alpha = .8, linewidth = .5, col = "white")+
   scale_fill_manual(values = SPECIES_PALETTE)+
   xlim(-4, 20)+
   labs(x = "Time relative to sunset (h)", y = "Number of fish detected")+
   theme_black(base_size = 16)
 
-LN_fish_per_hour <- ggplot(ts_LN_stack, aes(x = std_time_rounded, y = Number, fill = Species))+
-  geom_vline(xintercept = -0.5, size = .5, colour = "white", lty = 2)+
-  geom_vline(xintercept = 12, size = .5, colour = "white", lty = 2)+
-  geom_area(alpha = .8, size = .5, col = "white")+
+LN_shore_fish_per_hour <- ggplot(ts_LN_shore_stack, aes(x = std_time_rounded, y = Number, fill = Species))+
+  geom_vline(xintercept = -0.5, linewidth = .5, colour = "white", lty = 2)+
+  geom_vline(xintercept = 12, linewidth = .5, colour = "white", lty = 2)+
+  geom_area(alpha = .8, linewidth = .5, col = "white")+
+  scale_fill_manual(values = SPECIES_PALETTE)+
+  xlim(-4, 20)+
+  labs(x = "Time relative to sunset (h)", y = "Number of fish detected")+
+  theme_black(base_size = 16)
+
+LN_open_water_fish_per_hour <- ggplot(ts_LN_open_water_stack, aes(x = std_time_rounded, y = Number, fill = Species))+
+  geom_vline(xintercept = -0.5, linewidth = .5, colour = "white", lty = 2)+
+  geom_vline(xintercept = 12, linewidth = .5, colour = "white", lty = 2)+
+  geom_area(alpha = .8, linewidth = .5, col = "white")+
   scale_fill_manual(values = SPECIES_PALETTE)+
   xlim(-4, 20)+
   labs(x = "Time relative to sunset (h)", y = "Number of fish detected")+
   theme_black(base_size = 16)
 
 JR_fish_per_hour <- ggplot(subset(ts_stack, Site == "JR1"), aes(x = std_time_rounded, y = Number, fill = Species))+
-  geom_vline(xintercept = -0.5, size = .5, colour = "white", lty = 2)+
-  geom_vline(xintercept = 12, size = .5, colour = "white", lty = 2)+
-  geom_area(alpha = .8, size = .5, col = "white")+
+  geom_vline(xintercept = -0.5, linewidth = .5, colour = "white", lty = 2)+
+  geom_vline(xintercept = 12, linewidth = .5, colour = "white", lty = 2)+
+  geom_area(alpha = .8, linewidth = .5, col = "white")+
   scale_fill_manual(values = SPECIES_PALETTE)+
   xlim(-4, 20)+
   labs(x = "Time relative to sunset (h)", y = "Number of fish detected")+
@@ -462,7 +531,18 @@ PLS_location_boxplot <- ggplot(subset(fish_raw, Site == "PLS" & species_uncertai
   theme_black(base_size = 16)+
   theme(legend.position = "none")
 
-LN_location_boxplot <- ggplot(subset(fish_raw, System == "LN" & species_uncertain == "False"), aes(x = Photoperiod, y = mean_location))+
+LN_shore_location_boxplot <- ggplot(subset(fish_raw, System == "LN" & Placement == "Orthogonal" & species_uncertain == "False" ), aes(x = Photoperiod, y = mean_location))+
+  geom_violin(aes(fill = Photoperiod), alpha = .8, scale = "width") +
+  # geom_jitter(aes(col = Photoperiod), width = 0.15, size = 0.7, alpha = 0.25) +
+  stat_summary(aes(col = Photoperiod), fun = median, geom = "crossbar",
+               width = 0.5, linewidth = 0.5) + #color = "white", 
+  scale_fill_manual(values = c("white", "darkgrey"))+
+  scale_color_manual(values = c("black", "lightgrey"))+
+  labs(x = "Photoperiod", y = "Fish location (electrode units)")+
+  theme_black(base_size = 16)+
+  theme(legend.position = "none")
+
+LN_open_water_location_boxplot <- ggplot(subset(fish_raw, System == "LN" & Placement == "Point" & species_uncertain == "False" ), aes(x = Photoperiod, y = mean_location))+
   geom_violin(aes(fill = Photoperiod), alpha = .8, scale = "width") +
   # geom_jitter(aes(col = Photoperiod), width = 0.15, size = 0.7, alpha = 0.25) +
   stat_summary(aes(col = Photoperiod), fun = median, geom = "crossbar",
@@ -496,6 +576,14 @@ species_prop <- fish_raw |>
   mutate(pct   = n / sum(n) * 100,
          label = sprintf("%s\n%.1f%%", species_assigned, pct))
 
+species_prop_LN <- fish_raw |>
+  filter(System == "LN") |>
+  filter(!species_uncertain=="True") |>
+  group_by(System, Placement) |>
+  count(species_assigned) |>
+  mutate(pct   = n / sum(n) * 100,
+         label = sprintf("%s\n%.1f%%", species_assigned, pct))
+
 PL_spcomp <- ggplot(subset(species_prop, System == "PL"), aes(x = 2, y = n, fill = species_assigned)) +
   geom_col(width = 1, color = "white") +
   coord_polar(theta = "y") +
@@ -505,7 +593,16 @@ PL_spcomp <- ggplot(subset(species_prop, System == "PL"), aes(x = 2, y = n, fill
   scale_fill_manual(values = SPECIES_PALETTE, guide = "none") +
   theme_black(base_size = 18)
 
-LN_spcomp <- ggplot(subset(species_prop, System == "LN"), aes(x = 2, y = n, fill = species_assigned)) +
+LN_shore_spcomp <- ggplot(subset(species_prop_LN, System == "LN" & Placement == "Orthogonal"), aes(x = 2, y = n, fill = species_assigned)) +
+  geom_col(width = 1, color = "white") +
+  coord_polar(theta = "y") +
+  xlim(0.5, 2.5) +
+  geom_text(aes(label = label),
+            position = position_stack(vjust = 0.5), size = 3.5) +
+  scale_fill_manual(values = SPECIES_PALETTE, guide = "none") +
+  theme_black(base_size = 18)
+
+LN_open_water_spcomp <- ggplot(subset(species_prop_LN, System == "LN" & Placement == "Point"), aes(x = 2, y = n, fill = species_assigned)) +
   geom_col(width = 1, color = "white") +
   coord_polar(theta = "y") +
   xlim(0.5, 2.5) +
@@ -568,8 +665,20 @@ PLS_width_plot <- ggplot(
   theme(axis.title.y.right = element_text(color = "#D55E00"),
         axis.text.y.right  = element_text(color = "#D55E00"))
 
-LN_width_plot <- ggplot(
-  subset(fish_dat, System == "LN" & species_uncertain == "False"), aes(x = visit_midpoint, y = mean_width_us)) +
+LN_shore_width_plot <- ggplot(
+  subset(fish_dat, System == "LN" & Placement == "Orthogonal" & species_uncertain == "False"), aes(x = visit_midpoint, y = mean_width_us)) +
+  geom_point(aes(color = species_assigned), alpha = 0.4) +
+  stat_summary(
+    aes(y = T_best * temp_scale), fun = mean, geom = "line", linewidth = 0.7, color = "#D55E00") +
+  scale_y_continuous(name = "Mean EOD width (µs)", sec.axis = sec_axis(transform = ~ . / temp_scale, name = "Temperature (°C)")) +
+  scale_x_datetime(name = "Date") +
+  scale_color_manual(values = SPECIES_PALETTE) +
+  theme_black(base_size = 18) +
+  theme(axis.title.y.right = element_text(color = "#D55E00"),
+        axis.text.y.right  = element_text(color = "#D55E00"))
+
+LN_open_water_width_plot <- ggplot(
+  subset(fish_dat, System == "LN" & Placement == "Point" & species_uncertain == "False"), aes(x = visit_midpoint, y = mean_width_us)) +
   geom_point(aes(color = species_assigned), alpha = 0.4) +
   stat_summary(
     aes(y = T_best * temp_scale), fun = mean, geom = "line", linewidth = 0.7, color = "#D55E00") +
@@ -628,19 +737,23 @@ JR_DO_boxplot <- ggplot(subset(DO_combined, System == "JR"), aes(x = factor(Phot
 plot_list <- list(
   PLP_fish_per_hour = PLP_fish_per_hour,
   PLS_fish_per_hour = PLS_fish_per_hour,
-  LN_fish_per_hour = LN_fish_per_hour,
+  LN_shore_fish_per_hour = LN_shore_fish_per_hour,
+  LN_open_water_fish_per_hour = LN_open_water_fish_per_hour,
   JR_fish_per_hour = JR_fish_per_hour,
   PLP_location_boxplot = PLP_location_boxplot,
   PLS_location_boxplot = PLS_location_boxplot,
-  LN_location_boxplot = LN_location_boxplot,
+  LN_shore_location_boxplot = LN_shore_location_boxplot,
+  LN_open_water_location_boxplot = LN_open_water_location_boxplot,
   JR_location_boxplot = JR_location_boxplot,
   PL_spcomp = PL_spcomp,
-  LN_spcomp = LN_spcomp,
+  LN_shore_spcomp = LN_shore_spcomp,
+  LN_open_water_spcomp = LN_open_water_spcomp,
   JR_spcomp = JR_spcomp,
   JR_width_plot = JR_width_plot,
   PLP_width_plot = PLP_width_plot,
   PLS_width_plot = PLS_width_plot,
-  LN_width_plot = LN_width_plot,
+  LN_shore_width_plot = LN_shore_width_plot,
+  LN_open_water_width_plot = LN_open_water_width_plot,
   PL_temp_boxplot = PL_temp_boxplot,
   LN_temp_boxplot = LN_temp_boxplot,
   JR_temp_boxplot = JR_temp_boxplot,
