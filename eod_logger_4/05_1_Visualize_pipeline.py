@@ -636,6 +636,69 @@ if control_path:
 
         plt.close(fig6)
         print(f"Saved: {event_base_name}_06_lda_classification.svg")
+
+        # =====================================================================
+        # PANEL 7: REPRESENTATIVE WAVEFORMS — one real-time-axis pulse per
+        # species, taken from the control individual closest to its species
+        # centroid in LDA space.
+        # =====================================================================
+
+        CTRL_SAMPLE_RATE   = 96000  # Hz, native recording rate
+        CTRL_INTERP_FACTOR = 1      # interpolation factor used during control waveform extraction (adjust if known)
+        wf_sample_rate     = CTRL_SAMPLE_RATE * CTRL_INTERP_FACTOR
+
+        fig7, ax7 = plt.subplots(figsize=(FIG_W, FIG_H))
+
+        for sp in all_species_codes:
+            sp_mask  = ref_species == sp
+            sp_ids   = np.array(ref_ids)[sp_mask]
+            sp_lda_x = ctrl_lda[sp_mask, 0]
+            sp_lda_y = (ctrl_lda[sp_mask, 1] if n_lda_axes >= 2
+                        else pca_cls.transform(ref_matrix[sp_mask])[:, 0])
+            centroid  = np.array([sp_lda_x.mean(), sp_lda_y.mean()])
+            dists     = np.sqrt((sp_lda_x - centroid[0])**2 + (sp_lda_y - centroid[1])**2)
+            center_id = sp_ids[np.argmin(dists)]
+
+            # Reload the raw (un-cropped, variable-length) waveforms and table for the chosen individual
+            ctrl_table_center = pd.read_csv(os.path.join(control_path, f"{center_id}_eod_table.csv"))
+            wf_base_center    = os.path.join(control_path, f"{center_id}_eod_waveforms")
+            if os.path.exists(wf_base_center + '_concatenated.npz'):
+                ctrl_wf_center = load_waveforms(wf_base_center, format='npz', length='variable')
+            else:
+                ctrl_arr_center = np.load(wf_base_center + '.npz')['waveforms']
+                ctrl_wf_center  = [ctrl_arr_center[i] for i in range(ctrl_arr_center.shape[0])]
+
+            # Pick the pulse whose P1-P2 duration is closest to the individual's median (most representative)
+            durations  = np.abs(ctrl_table_center['snippet_p2_idx'].values - ctrl_table_center['snippet_p1_idx'].values)
+            median_dur = np.median(durations)
+            rep_idx    = int(np.argmin(np.abs(durations - median_dur)))
+            rep_wf     = ctrl_wf_center[rep_idx]
+            rep_p1_idx = int(ctrl_table_center['snippet_p1_idx'].iloc[rep_idx])
+
+            # Baseline-correct and orient P1 positive, without cropping or interpolating the time axis
+            baseline = np.mean(rep_wf[:min(10, rep_p1_idx)]) if rep_p1_idx >= 10 else np.mean(rep_wf)
+            rep_wf   = rep_wf - baseline
+            if rep_wf[rep_p1_idx] < 0:
+                rep_wf = -rep_wf
+
+            time_us = (np.arange(len(rep_wf)) - rep_p1_idx) / wf_sample_rate * 1e6
+
+            ax7.plot(time_us, rep_wf, color=sp_colors_lda[sp], linewidth=1.5,
+                     label=f'{sp} ({center_id})')
+
+        ax7.axvline(0, color=FG, linewidth=0.5, linestyle=':')
+        ax7.set_xlabel('Time relative to P1 peak (\u00b5s)')
+        ax7.set_ylabel('Amplitude (a.u.)')
+        ax7.set_title('Representative waveform per species (LDA cluster center)')
+        ax7.legend(fontsize=8, loc='best')
+
+        plt.tight_layout()
+        fig7.savefig(os.path.join(svg_folder, event_base_name + '_07_species_waveforms.svg'),
+                     format='svg', bbox_inches='tight', facecolor=BG)
+        fig7.savefig(os.path.join(svg_folder, event_base_name + '_07_species_waveforms.png'),
+                     format='png', dpi=150, bbox_inches='tight', facecolor=BG)
+        plt.close(fig7)
+        print(f"Saved: {event_base_name}_07_species_waveforms.svg")
     else:
         print("Skipping LDA panel: fewer than 2 species in reference library")
 else:
