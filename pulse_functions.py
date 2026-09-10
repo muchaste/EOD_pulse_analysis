@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import json
 import os
 from pathlib import Path
-from scipy.signal import find_peaks, correlate, windows, find_peaks, butter, filtfilt, iirnotch, hilbert
+from scipy.signal import find_peaks, correlate, windows, find_peaks, butter, filtfilt, sosfiltfilt, iirnotch, hilbert
 from scipy.interpolate import interp1d
 from scipy import stats
 from scipy.optimize import curve_fit
@@ -128,8 +128,10 @@ def bandpass_filter(data, rate, lowcut, highcut, order=4):
     low = lowcut / nyquist
     high = highcut / nyquist
 
-    b, a = butter(order, [low, high], btype='band')
-    filtered_data = filtfilt(b, a, data)
+    # second-order sections (not b,a) avoid numerical instability for narrow bands
+    # at high sample rates (e.g. a ~25Hz band around 500Hz at 96kHz produces NaN with b,a)
+    sos = butter(order, [low, high], btype='band', output='sos')
+    filtered_data = sosfiltfilt(sos, data)
 
     return filtered_data
 
@@ -3751,7 +3753,10 @@ def extract_period_aligned_snippets(data_channel, rate, f0, active_segments, tar
     Extract single-period snippets from active wave-type segments, aligned to
     rising (negative-to-positive) zero-crossings. The period between each pair of
     consecutive zero-crossings is tracked per cycle, so slow drift in EOD frequency
-    is accounted for rather than assuming one fixed global period.
+    is accounted for rather than assuming one fixed global period. Zero-crossings
+    are located on a fundamental-only bandpass-filtered copy of the signal (to avoid
+    jitter from harmonic-induced spurious crossings), but the extracted snippets
+    keep the original, harmonic-rich waveform shape.
 
     Parameters
     ----------
@@ -3788,7 +3793,13 @@ def extract_period_aligned_snippets(data_channel, rate, f0, active_segments, tar
     for seg_start, seg_end in active_segments:
         segment_data = data_channel[seg_start:seg_end]
 
-        sign_changes = np.where(np.diff(np.sign(segment_data)) > 0)[0]
+        # zero-crossings are located on a narrowband (fundamental-only) copy of the
+        # segment, since strong harmonics in the raw signal otherwise cause spurious
+        # extra zero-crossings and jitter in the crossing sample, which shows up as
+        # snippets shifted along the x-axis when overlaid. The raw (harmonic-rich)
+        # waveform shape is still extracted, just using these more reliable indices.
+        phase_reference = bandpass_filter(segment_data, rate, max(1.0, f0 * 0.7), f0 * 1.3, order=4)
+        sign_changes = np.where(np.diff(np.sign(phase_reference)) > 0)[0]
         if len(sign_changes) < 2:
             continue
 

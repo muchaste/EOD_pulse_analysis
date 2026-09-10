@@ -54,7 +54,7 @@ class PulseDiagnosticTool:
     def __init__(self, root):
         self.root = root
         self.root.title("EOD Pulse Detection Diagnostic Tool")
-        self.root.geometry("1600x1200")
+        self.root.geometry("1600x1400")
         
         # Data storage
         self.raw_data = None
@@ -130,7 +130,7 @@ class PulseDiagnosticTool:
         self.notch_freq = tk.DoubleVar(value=50.0)
         self.notch_harmonics = tk.IntVar(value=3)
         self.notch_q = tk.DoubleVar(value=30.0)
-        self.wave_noise_floor_db = tk.DoubleVar(value=10.0)
+        self.wave_signal_threshold_db = tk.DoubleVar(value=0.1)
         self.wave_min_segment_duration_ms = tk.DoubleVar(value=200.0)
         self.wave_target_samples = tk.IntVar(value=100)
 
@@ -401,9 +401,9 @@ class PulseDiagnosticTool:
 
         wave_row2 = ttk.Frame(wave_frame)
         wave_row2.pack(fill=tk.X, pady=1)
-        ttk.Label(wave_row2, text="Noise floor (dB):", width=14).pack(side=tk.LEFT)
-        noise_floor_entry = ttk.Entry(wave_row2, textvariable=self.wave_noise_floor_db, width=6)
-        noise_floor_entry.pack(side=tk.LEFT, padx=2)
+        ttk.Label(wave_row2, text="Signal thresh (dB below peak):", width=22).pack(side=tk.LEFT)
+        signal_threshold_entry = ttk.Entry(wave_row2, textvariable=self.wave_signal_threshold_db, width=6)
+        signal_threshold_entry.pack(side=tk.LEFT, padx=2)
         ttk.Label(wave_row2, text="Min segment (ms):", width=14).pack(side=tk.LEFT, padx=(10,0))
         min_segment_entry = ttk.Entry(wave_row2, textvariable=self.wave_min_segment_duration_ms, width=6)
         min_segment_entry.pack(side=tk.LEFT, padx=2)
@@ -1767,7 +1767,7 @@ Current Parameters:
             envelope_power = compute_envelope_power(best_ch_data, rate, f0, bandwidth_hz=max(10.0, f0 * 0.05))
             active_segments, peak_power = find_active_wave_segments(
                 envelope_power, rate,
-                noise_floor_db_threshold=self.wave_noise_floor_db.get(),
+                noise_floor_db_threshold=self.wave_signal_threshold_db.get(),
                 min_duration_s=self.wave_min_segment_duration_ms.get() / 1000.0
             )
 
@@ -1793,6 +1793,10 @@ Current Parameters:
             self.canvas.draw()
 
             total_active_duration = sum((e - s) / rate for s, e in active_segments)
+            threshold_db = self.wave_signal_threshold_db.get()
+            threshold_power = peak_power / (10 ** (threshold_db / 10.0))
+            fraction_above_threshold = np.mean(envelope_power >= threshold_power)
+            envelope_power_db = 10 * np.log10(np.maximum(envelope_power, 1e-20))
             summary = f"""Wave Detection Results:
 ==================
 Channel: {best_channel_idx}
@@ -1803,6 +1807,9 @@ Harmonic frequencies (Hz): {np.round(best_result['harmonic_freqs'], 1).tolist()}
 
 Active segments: {len(active_segments)}
 Total active duration: {total_active_duration:.2f}s
+
+Envelope power (dB re 1, at f0): min={envelope_power_db.min():.1f}, median={np.median(envelope_power_db):.1f}, peak(95th pct)={10*np.log10(peak_power):.1f}, max={envelope_power_db.max():.1f}
+Threshold: {threshold_db:.1f} dB below peak -> {10*np.log10(threshold_power):.1f} dB, {fraction_above_threshold*100:.1f}% of samples above it
 
 All channels checked:
 """
@@ -1841,7 +1848,7 @@ All channels checked:
                 export_dict['notch_freq'] = self.notch_freq.get()
                 export_dict['notch_harmonics'] = self.notch_harmonics.get()
                 export_dict['notch_q'] = self.notch_q.get()
-                export_dict['wave_noise_floor_db'] = self.wave_noise_floor_db.get()
+                export_dict['wave_signal_threshold_db'] = self.wave_signal_threshold_db.get()
                 export_dict['wave_min_segment_duration_ms'] = self.wave_min_segment_duration_ms.get()
                 export_dict['wave_target_samples'] = self.wave_target_samples.get()
 
@@ -1870,7 +1877,7 @@ All channels checked:
                     'notch_freq': self.notch_freq,
                     'notch_harmonics': self.notch_harmonics,
                     'notch_q': self.notch_q,
-                    'wave_noise_floor_db': self.wave_noise_floor_db,
+                    'wave_signal_threshold_db': self.wave_signal_threshold_db,
                     'wave_min_segment_duration_ms': self.wave_min_segment_duration_ms,
                     'wave_target_samples': self.wave_target_samples
                 }
