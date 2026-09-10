@@ -11,13 +11,15 @@ import matplotlib.pyplot as plt
 import json
 import os
 from pathlib import Path
-from scipy.signal import find_peaks, correlate, windows, find_peaks, butter, filtfilt
+from scipy.signal import find_peaks, correlate, windows, find_peaks, butter, filtfilt, iirnotch, hilbert
 from scipy.interpolate import interp1d
 from scipy import stats
 from scipy.optimize import curve_fit
 import glob
 import mat73
 from thunderfish import pulses
+from thunderfish import harmonics as tf_harmonics
+from thunderlab import powerspectrum as tl_powerspectrum
 import matplotlib.cm as cm
 import matplotlib.dates as mdates
 import matplotlib.patches as mpatches
@@ -3457,3 +3459,424 @@ def create_tracking_plot(event_id, event_eods, event_data, event_start_time, sam
     
     print(f"        Created plot: {plot_filename}")
     return str(plot_path)
+
+############################### Wave-Type EOD Analysis Functions ######################################
+
+def compute_wave_psd(data_channel, rate, freq_resolution=1.0):
+    """
+    Compute a power spectral density using thunderlab's psd(), suitable as input
+    to detect_fundamental_and_harmonics().
+
+    Parameters
+    ----------
+    data_channel : 1-D array
+        Single-channel (or single differential pair) voltage trace.
+    rate : float
+        Sampling rate in Hz.
+    freq_resolution : float
+        Desired frequency resolution in Hz (see thunderlab.powerspectrum.psd).
+
+    Returns
+    -------
+    psd_freqs : 1-D array
+        Frequency bins in Hz.
+    psd : 1-D array
+        Linear (not decibel) power spectral density.
+    """
+    psd_freqs, psd = tl_powerspectrum.psd(data_channel, rate, freq_resolution=freq_resolution)
+    return psd_freqs, psd
+
+
+def _custom_harmonic_search(psd_freqs, psd, freq_min, freq_max, max_harmonics=10, harmonic_tol_hz=None, n_candidates=20):
+    """
+    Lenient fallback fundamental/harmonic search, used when
+    thunderfish.harmonics.harmonic_groups() finds no group (e.g. its noise-floor
+    thresholds, tuned for typical field recordings, reject an otherwise valid but
+    unusually clean or unusually noisy signal). Picks the strongest candidate peak
+    in [freq_min, freq_max] that has power at 2x, 3x, ... within a frequency
+    tolerance, scoring candidates by (number of harmonics found) * (summed power).
+
+    Parameters
+    ----------
+    psd_freqs, psd : 1-D arrays
+        Frequency bins and linear power, as returned by compute_wave_psd().
+    freq_min, freq_max : float
+        Frequency range to search for a fundamental frequency.
+    max_harmonics : int
+        Maximum number of harmonics to check for (including the fundamental).
+    harmonic_tol_hz : float or None
+        Frequency tolerance for matching a harmonic peak. Defaults to
+        max(2 * frequency resolution, 0.5% of freq_max).
+    n_candidates : int
+        Number of strongest candidate peaks in the band to test.
+
+    Returns
+    -------
+    f0, harmonic_freqs, harmonic_powers, f0_power_db : same as detect_fundamental_and_harmonics(),
+        or (None, None, None, None) if no candidate had at least one supporting harmonic.
+    """
+    band_mask = (psd_freqs >= freq_min) & (psd_freqs <= freq_max)
+    if not np.any(band_mask):
+        return None, None, None, None
+
+    band_freqs = psd_freqs[band_mask]
+    band_psd = psd[band_mask]
+
+    freq_resolution = np.mean(np.diff(psd_freqs))
+    if harmonic_tol_hz is None:
+        harmonic_tol_hz = max(2 * freq_resolution, 0.005 * freq_max)
+
+    candidate_order = np.argsort(band_psd)[::-1][:n_candidates]
+
+    best_score = -np.inf
+    best_result = None
+
+    for candidate_idx in candidate_order:
+        f0_candidate = band_freqs[candidate_idx]
+        harmonic_freqs = [f0_candidate]
+        harmonic_powers = [band_psd[candidate_idx]]
+
+        for harmonic_number in range(2, max_harmonics + 1):
+            target_freq = f0_candidate * harmonic_number
+            if target_freq > psd_freqs[-1]:
+                break
+            nearby_mask = np.abs(psd_freqs - target_freq) <= harmonic_tol_hz
+            if not np.any(nearby_mask):
+                continue
+            nearby_freqs = psd_freqs[nearby_mask]
+            nearby_powers = psd[nearby_mask]
+            local_idx = np.argmax(nearby_powers)
+            harmonic_freqs.append(nearby_freqs[local_idx])
+            harmonic_powers.append(nearby_powers[local_idx])
+
+        n_harmonics_found = len(harmonic_freqs)
+        total_power = sum(harmonic_powers)
+        score = n_harmonics_found * total_power
+
+        if n_harmonics_found >= 2 and score > best_score:
+            best_score = score
+            best_result = (f0_candidate, np.array(harmonic_freqs), np.array(harmonic_powers))
+
+    if best_result is None:
+        return None, None, None, None
+
+    f0, harmonic_freqs, harmonic_powers = best_result
+    f0_power_db = 10 * np.log10(np.sum(harmonic_powers) + 1e-20)
+
+    return f0, harmonic_freqs, harmonic_powers, f0_power_db
+
+
+def detect_fundamental_and_harmonics(psd_freqs, psd, freq_min, freq_max, mains_freq=50.0, max_harmonics=10):
+    """
+    Detect the strongest wave-type EOD fundamental frequency and its harmonics from a
+    power spectrum. Tries thunderfish.harmonics.harmonic_groups() first (peaks
+    belonging to the mains frequency and its harmonics are excluded automatically);
+    falls back to a more lenient custom harmonic-support search
+    (_custom_harmonic_search()) if harmonic_groups() finds nothing.
+
+    Parameters
+    ----------
+    psd_freqs : 1-D array
+        Frequency bins in Hz, as returned by compute_wave_psd().
+    psd : 1-D array
+        Linear power spectral density, as returned by compute_wave_psd().
+    freq_min, freq_max : float
+        Frequency range in Hz within which to search for a fundamental frequency.
+    mains_freq : float
+        Mains power frequency in Hz to exclude (50 or 60).
+    max_harmonics : int
+        Maximum number of harmonics to return for the detected group.
+
+    Returns
+    -------
+    f0 : float or None
+        Detected fundamental frequency in Hz. None if no fundamental was found.
+    harmonic_freqs : 1-D array or None
+        Frequencies of the fundamental and its harmonics in Hz.
+    harmonic_powers : 1-D array or None
+        Linear power of the fundamental and its harmonics.
+    f0_power_db : float or None
+        Summed power of the detected group, in decibel.
+    """
+    groups, fzero_harmonics, mains, all_freqs, good_freqs, low_threshold, high_threshold, center = tf_harmonics.harmonic_groups(
+        psd_freqs, psd, min_freq=freq_min, max_freq=freq_max, mains_freq=mains_freq, max_harmonics=max_harmonics
+    )
+
+    if len(groups) == 0:
+        return _custom_harmonic_search(psd_freqs, psd, freq_min, freq_max, max_harmonics=max_harmonics)
+
+    fundamentals_and_power = tf_harmonics.fundamental_freqs_and_power(groups)
+    best_group_idx = np.argmax(fundamentals_and_power[:, 1])
+
+    f0 = fundamentals_and_power[best_group_idx, 0]
+    f0_power_db = fundamentals_and_power[best_group_idx, 1]
+    harmonic_group = groups[best_group_idx]
+    harmonic_freqs = harmonic_group[:, 0]
+    harmonic_powers = harmonic_group[:, 1]
+
+    return f0, harmonic_freqs, harmonic_powers, f0_power_db
+
+
+def apply_notch_filter(data, rate, notch_freq=50.0, n_harmonics=3, quality_factor=30.0):
+    """
+    Apply cascaded notch filters at notch_freq and its harmonics (e.g. 50, 100, 150 Hz)
+    to remove mains contamination.
+
+    Parameters
+    ----------
+    data : 1-D array
+        Input signal.
+    rate : float
+        Sampling rate in Hz.
+    notch_freq : float
+        Base notch frequency in Hz (e.g. 50 or 60).
+    n_harmonics : int
+        Number of harmonics to notch out, including the fundamental (e.g. 3 removes
+        notch_freq, 2*notch_freq, 3*notch_freq).
+    quality_factor : float
+        Quality factor of each notch (higher = narrower notch).
+
+    Returns
+    -------
+    filtered_data : 1-D array
+        Notch-filtered signal.
+    """
+    filtered_data = data.copy()
+    nyquist = 0.5 * rate
+
+    for harmonic_idx in range(1, n_harmonics + 1):
+        freq_to_notch = notch_freq * harmonic_idx
+        if freq_to_notch >= nyquist:
+            break
+        b, a = iirnotch(freq_to_notch, quality_factor, rate)
+        filtered_data = filtfilt(b, a, filtered_data)
+
+    return filtered_data
+
+
+def compute_envelope_power(data, rate, f0, bandwidth_hz=10.0):
+    """
+    Compute the instantaneous power envelope of the signal in a narrow band around
+    the detected fundamental frequency, using a bandpass filter followed by the
+    Hilbert transform.
+
+    Parameters
+    ----------
+    data : 1-D array
+        Input signal (single channel or differential pair).
+    rate : float
+        Sampling rate in Hz.
+    f0 : float
+        Fundamental frequency in Hz to center the band around.
+    bandwidth_hz : float
+        Full bandwidth of the bandpass filter around f0, in Hz.
+
+    Returns
+    -------
+    envelope_power : 1-D array
+        Instantaneous power (squared envelope amplitude), same length as data.
+    """
+    lowcut = max(1.0, f0 - bandwidth_hz / 2.0)
+    highcut = f0 + bandwidth_hz / 2.0
+
+    band_data = bandpass_filter(data, rate, lowcut, highcut, order=4)
+    analytic_signal = hilbert(band_data)
+    envelope_power = np.abs(analytic_signal) ** 2
+
+    return envelope_power
+
+
+def find_active_wave_segments(envelope_power, rate, noise_floor_db_threshold=10.0, min_duration_s=0.5):
+    """
+    Find time segments where the envelope power around the fundamental frequency
+    exceeds the local noise floor by a set amount, in decibel.
+
+    The noise floor is estimated as the median envelope power (robust against short,
+    strong active segments), and the threshold is set at
+    noise_floor_db_threshold dB above that.
+
+    Parameters
+    ----------
+    envelope_power : 1-D array
+        Instantaneous power, as returned by compute_envelope_power().
+    rate : float
+        Sampling rate in Hz.
+    noise_floor_db_threshold : float
+        Number of decibels the envelope power must exceed the noise floor by, to be
+        considered an active segment.
+    min_duration_s : float
+        Minimum duration of an active segment, in seconds. Shorter segments are
+        discarded.
+
+    Returns
+    -------
+    active_segments : list of (int, int)
+        List of (start_idx, end_idx) sample index pairs marking active segments.
+    noise_floor_power : float
+        Estimated noise floor power (linear), for reference/plotting.
+    """
+    noise_floor_power = np.median(envelope_power)
+    noise_floor_power = max(noise_floor_power, 1e-20)
+
+    threshold_power = noise_floor_power * (10 ** (noise_floor_db_threshold / 10.0))
+
+    above_threshold = envelope_power >= threshold_power
+    min_duration_samples = int(min_duration_s * rate)
+
+    active_segments = []
+    in_segment = False
+    seg_start = 0
+
+    for idx, is_above in enumerate(above_threshold):
+        if is_above and not in_segment:
+            in_segment = True
+            seg_start = idx
+        elif not is_above and in_segment:
+            in_segment = False
+            seg_end = idx
+            if seg_end - seg_start >= min_duration_samples:
+                active_segments.append((seg_start, seg_end))
+
+    if in_segment:
+        seg_end = len(above_threshold)
+        if seg_end - seg_start >= min_duration_samples:
+            active_segments.append((seg_start, seg_end))
+
+    return active_segments, noise_floor_power
+
+
+def extract_period_aligned_snippets(data_channel, rate, f0, active_segments, target_length=100):
+    """
+    Extract single-period snippets from active wave-type segments, aligned to
+    rising (negative-to-positive) zero-crossings. The period between each pair of
+    consecutive zero-crossings is tracked per cycle, so slow drift in EOD frequency
+    is accounted for rather than assuming one fixed global period.
+
+    Parameters
+    ----------
+    data_channel : 1-D array
+        Full-length single channel / differential pair signal.
+    rate : float
+        Sampling rate in Hz.
+    f0 : float
+        Fundamental frequency in Hz, used only to sanity-check cycle durations
+        (cycles far from the expected period are discarded).
+    active_segments : list of (int, int)
+        Sample index pairs marking active wave segments, as returned by
+        find_active_wave_segments().
+    target_length : int
+        Number of samples each variable-length raw snippet is resampled to, so all
+        snippets can be stacked into a single 2-D array.
+
+    Returns
+    -------
+    resampled_snippets : 2-D array, shape (n_snippets, target_length)
+        Snippets resampled to a common length via linear interpolation.
+    raw_snippets : list of 1-D arrays
+        Original, variable-length raw snippets (one period each).
+    cycle_periods_s : 1-D array
+        Duration of each extracted cycle, in seconds.
+    """
+    expected_period_s = 1.0 / f0
+    min_period_s = expected_period_s * 0.5
+    max_period_s = expected_period_s * 1.5
+
+    raw_snippets = []
+    cycle_periods_s = []
+
+    for seg_start, seg_end in active_segments:
+        segment_data = data_channel[seg_start:seg_end]
+
+        sign_changes = np.where(np.diff(np.sign(segment_data)) > 0)[0]
+        if len(sign_changes) < 2:
+            continue
+
+        for crossing_idx in range(len(sign_changes) - 1):
+            cycle_start = sign_changes[crossing_idx]
+            cycle_end = sign_changes[crossing_idx + 1]
+            cycle_duration_s = (cycle_end - cycle_start) / rate
+
+            if cycle_duration_s < min_period_s or cycle_duration_s > max_period_s:
+                continue
+
+            raw_snippets.append(segment_data[cycle_start:cycle_end].copy())
+            cycle_periods_s.append(cycle_duration_s)
+
+    if len(raw_snippets) == 0:
+        return np.empty((0, target_length)), [], np.array([])
+
+    resampled_snippets = np.empty((len(raw_snippets), target_length))
+    for snippet_idx, snippet in enumerate(raw_snippets):
+        original_x = np.linspace(0, 1, len(snippet))
+        target_x = np.linspace(0, 1, target_length)
+        interpolator = interp1d(original_x, snippet, kind='linear')
+        resampled_snippets[snippet_idx] = interpolator(target_x)
+
+    return resampled_snippets, raw_snippets, np.array(cycle_periods_s)
+
+
+def align_wave_polarity(snippets):
+    """
+    Correct polarity flips between period snippets (e.g. caused by a fish rotating
+    relative to the electrodes, which can invert the recorded dipole field sign),
+    using an incrementally updated running-template cross-correlation, analogous to
+    template alignment in spike sorting.
+
+    Parameters
+    ----------
+    snippets : 2-D array, shape (n_snippets, n_samples)
+        Fixed-length, resampled period snippets (e.g. from
+        extract_period_aligned_snippets()).
+
+    Returns
+    -------
+    aligned_snippets : 2-D array, shape (n_snippets, n_samples)
+        Snippets with polarity corrected to match a common running template.
+    flipped_mask : 1-D bool array, shape (n_snippets,)
+        True where the snippet's sign was flipped.
+    running_template : 1-D array
+        Final running mean template used for alignment.
+    """
+    n_snippets = snippets.shape[0]
+    aligned_snippets = np.empty_like(snippets)
+    flipped_mask = np.zeros(n_snippets, dtype=bool)
+
+    running_template = snippets[0].copy()
+    aligned_snippets[0] = snippets[0]
+
+    for snippet_idx in range(1, n_snippets):
+        snippet = snippets[snippet_idx]
+        correlation = np.dot(running_template, snippet)
+
+        if correlation < 0:
+            snippet = -snippet
+            flipped_mask[snippet_idx] = True
+
+        aligned_snippets[snippet_idx] = snippet
+        running_template = (running_template * snippet_idx + snippet) / (snippet_idx + 1)
+
+    return aligned_snippets, flipped_mask, running_template
+
+
+def normalize_wave_snippets(snippets):
+    """
+    Peak-to-peak normalize each period snippet to the range [-0.5, 0.5], centered
+    on its own midpoint amplitude.
+
+    Parameters
+    ----------
+    snippets : 2-D array, shape (n_snippets, n_samples)
+        Period snippets (e.g. polarity-aligned output of align_wave_polarity()).
+
+    Returns
+    -------
+    normalized_snippets : 2-D array, shape (n_snippets, n_samples)
+        Peak-to-peak normalized snippets.
+    """
+    peak_to_peak = np.max(snippets, axis=1) - np.min(snippets, axis=1)
+    peak_to_peak[peak_to_peak == 0] = 1.0
+    midpoint = (np.max(snippets, axis=1) + np.min(snippets, axis=1)) / 2.0
+
+    normalized_snippets = (snippets - midpoint[:, np.newaxis]) / peak_to_peak[:, np.newaxis]
+
+    return normalized_snippets
