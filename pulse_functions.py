@@ -16,10 +16,87 @@ from scipy.interpolate import interp1d
 from scipy import stats
 from scipy.optimize import curve_fit
 import glob
+import mat73
 from thunderfish import pulses
 import matplotlib.cm as cm
 import matplotlib.dates as mdates
 import matplotlib.patches as mpatches
+
+############################### Recording Loading ######################################
+
+MAT_HEADER_MAGIC = b'MATLAB'
+
+
+def load_shuttlebox_recording(fname, n_cols, gain, analog_start_col=1, n_analog_chans=4):
+    """
+    Load a shuttlebox EOD recording, transparently handling both known .bin file formats
+    produced by the two Matlab logging scripts in lab/:
+
+    - Raw flat binary (older, session-based DAQ toolbox script,
+      background_logging_shuttlebox_4chan.m): a headerless dump of float64 samples,
+      sample-interleaved as [time, ai0, ai1, ai2, ai3, digital_in] repeating per sample.
+      Loaded via np.fromfile and reshaped to (n_samples, n_cols).
+    - Matlab v7.3 / HDF5 container (newer, daq-interface script,
+      background_logging_shuttlebox_4chan_Sarah.m): saved via save(..., "-v7.3"), which
+      stores a 'data' variable containing the analog + digital channels (no leading
+      time column). Loaded via mat73.loadmat.
+
+    The two formats are told apart automatically from the file's header: every .mat file
+    (including v7.3/HDF5-based ones) starts with a text descriptor beginning with the
+    ASCII bytes b'MATLAB' (e.g. "MATLAB 7.3 MAT-file..."), followed by a 128-byte header
+    before the actual HDF5 superblock begins - so the raw HDF5 magic signature is NOT at
+    the start of the file and can't be used directly for detection. Checking for the
+    leading b'MATLAB' text instead works for both formats.
+
+    Parameters
+    ----------
+    fname : str
+        Path to the .bin recording file (raw binary or HDF5/Matlab v7.3, despite the
+        shared .bin extension).
+    n_cols : int
+        Number of columns (channels) per sample in the RAW BINARY format
+        (n_analog_chans + n_digital_chans + 1 for the leading time column).
+        Ignored for HDF5/Matlab v7.3 files, where only the 'data' variable is used.
+    gain : float
+        Amplifier gain; analog channel values are divided by this.
+    analog_start_col : int, optional
+        Column index of the first analog channel in the RAW BINARY format (default 1,
+        i.e. one leading time column at index 0). Ignored for HDF5/Matlab v7.3 files.
+    n_analog_chans : int, optional
+        Number of analog channels to keep, in both formats (default 4).
+
+    Returns
+    -------
+    pandas.DataFrame
+        Gain-corrected analog channel data only, with `n_analog_chans` columns in a
+        consistent column order regardless of source format.
+    """
+    with open(fname, 'rb') as f:
+        header = f.read(128)
+
+    if header[:len(MAT_HEADER_MAGIC)] == MAT_HEADER_MAGIC:
+        data_dict = mat73.loadmat(fname)
+        data_raw = pd.DataFrame(data_dict['data']).iloc[:, :n_analog_chans]
+        del data_dict
+    else:
+        raw_flat = np.fromfile(fname, dtype=np.float64)
+        n_rows = raw_flat.size // n_cols
+        leftover = raw_flat.size % n_cols
+        if leftover != 0:
+            # Recording was likely stopped mid-sample, leaving a trailing partial row.
+            # Drop it rather than failing the reshape.
+            print(f"Warning: {fname} has {leftover} trailing values that don't form a "
+                  f"complete row (out of {n_cols} columns); dropping the incomplete "
+                  f"trailing row.")
+            raw_flat = raw_flat[:n_rows * n_cols]
+        raw = raw_flat.reshape(n_rows, n_cols)
+        data_raw = pd.DataFrame(raw[:, analog_start_col:analog_start_col + n_analog_chans])
+        del raw, raw_flat
+
+    data_raw = data_raw / gain
+    gc.collect()
+    return data_raw
+
 
 ############################### Pulse Extraction ######################################
 
@@ -133,6 +210,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
         Source of data:
         - '1ch_diff' : single-channel differential data (control recordings)
         - 'multich_linear' : multi-channel data with linear electrode arrangement (field recordings)
+        - 'shuttlebox_matlab' : multi-channel data from shuttlebox experiments (MATLAB format)
     return_differential : bool
         Whether to keep only differential pulses (default True, ignored if use_pca=True)
     interp_factor : int
@@ -240,6 +318,14 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
             n_pulses = len(peaks)
             eod_chans = np.zeros(n_pulses, dtype=int)
             is_differential = np.zeros(n_pulses, dtype=int)  # All single-ended
+    elif source == 'shuttlebox_matlab':
+        n_channels = data.shape[1]
+        print("    Shuttlebox MATLAB data source detected...")
+        # Shuttlebox data is multi-channel and all channels are differential -> only extract the largest-amplitude channel for each pulse
+        eod_chans, amps, cor_coefs = _select_best_channel_shuttlebox(
+            data, n_channels, peaks, troughs)
+        n_pulses = len(eod_chans)
+        is_differential = np.ones(n_pulses, dtype=int)  # 1 - all differential
 
 
     if return_differential and not use_pca:
@@ -341,6 +427,14 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
                     location_appended = True
                 else:
                     pulse_locations[-1] = diff_location
+            elif source == 'shuttlebox_matlab':
+                snippet = data[start_idx:end_idx, filtered_eod_chans[i]]
+                diff_location = filtered_eod_chans[i] 
+                if attempt == 0:
+                    pulse_locations.append(diff_location)
+                    location_appended = True
+                else:
+                    pulse_locations[-1] = diff_location
 
             if snippet.shape[0] == 0:
                 eod_waveforms.append(np.array([]))
@@ -366,7 +460,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
                 snippet_peak_idx = peak_idx - start_idx
                 snippet_trough_idx = trough_idx - start_idx
                 break
-
+            
             # Verify that snippet_peak_idx is the actual maximum and snippet_trough_idx the actual
             # minimum. The differential extraction can invert polarity relative to the raw detection,
             # so the translated raw indices may point to the wrong extremum.
@@ -399,19 +493,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
 
             # Search for missed third phase in triphasic pulses.
             amp_thr_tri = min(abs(snippet[snippet_peak_idx]), abs(snippet[snippet_trough_idx])) * 0.5
-            # # Case A1: P3 was detected as the peak (pulse appears HN but is actually HP triphasic).
-            # # detect_pulses returned (P3, P2); since P3 is temporally after P2, snippet_peak_idx > snippet_trough_idx.
-            # # Search before P2 for the missed P1.
-            # if snippet_peak_idx > snippet_trough_idx:
-            #     before_region = snippet[:snippet_trough_idx]
-            #     if len(before_region) > 0:
-            #         p1_candidates, _ = find_peaks(before_region, height=amp_thr_tri)
-            #         if len(p1_candidates) > 0:
-            #             p1_new = int(p1_candidates[-1])  # rightmost candidate, closest to P2
-            #             snippet_p3_idx = snippet_peak_idx  # old detected peak was P3
-            #             snippet_peak_idx = p1_new
-            #             filtered_peak_idc[i] = start_idx + p1_new
-
+          
             # Case A: Trough detected before peak -- HP triphasic where P3_peak was wrongly
             # returned by detect_pulses instead of P1_peak.
             # A1: search before P2 (trough) for missed P1 (positive peak).
@@ -699,6 +781,57 @@ def _select_differential_channel_pointwise(data, n_channels, peaks, troughs, sym
             is_differential[i] = 0
         
     return eod_chan, is_differential, amps, cor_coeffs
+
+def _select_best_channel_shuttlebox(data, n_channels, peaks, troughs):
+    """
+    Select the best differential channel from multi-channel shuttle-box recordings (all differential channels).
+    Best channel = highest amplitude channel for each pulse, with no polarity flip detection.
+    
+    Parameters
+    ----------
+    data : 2-D array
+        Multi-channel data
+    n_channels : int
+        Number of channels
+    peaks : 1-D array
+        Peak indices of pulses
+    troughs : 1-D array
+        Trough indices of pulses
+    
+    Returns
+    -------
+    eod_chan : 1-D array
+        Selected channel index
+    amps : 1-D array
+        Amplitudes for each channel
+    cor_coeffs : 2-D array
+        Correlation coefficients between adjacent channels
+    """
+    n_pulses = len(peaks)
+    amps = np.zeros((n_pulses, n_channels))  # Initialize 2D array
+    cor_coeffs = np.zeros((n_pulses, n_channels - 1))
+    eod_chan = np.zeros(n_pulses, dtype=int)
+
+    for i in range(n_pulses):
+        if peaks[i] < 0 or troughs[i] < 0:
+            continue  # Skip invalid indices
+        
+        # Extract 2-point snippet = data at peak and trough
+        snippet = data[[peaks[i], troughs[i]], :]  # Peak first, trough second
+
+        # Calculate amplitudes for each channel using correct peak/trough rows
+        amps[i, :] = abs(np.diff(snippet, axis = 0)[0])  # Store in 2D array
+
+        if snippet.shape[0] > 1:  # Need at least 2 samples for correlation
+            for j in range(n_channels - 1):
+                if np.var(snippet[:, j]) > 0 and np.var(snippet[:, j+1]) > 0:
+                    cor_coeffs[i, j] = np.corrcoef(snippet[:, j], snippet[:, j+1])[0, 1]
+    
+        # Find highest amplitude channel for each pulse
+        eod_chan[i] = np.argmax(amps[i,:])
+
+        
+    return eod_chan, amps, cor_coeffs
 
 
 def _estimate_differential_pulse_location(data, peak_idx, trough_idx, channel_idx, n_channels):
@@ -1061,7 +1194,7 @@ def calc_fft_peak(signal, rate, lower_thresh=0, upper_thresh=100000, zero_paddin
 
 def remove_proximity_duplicates(arrays_dict, proximity_threshold=3):
     """
-    Remove duplicates based on proximity: same channel and midpoint within threshold samples.
+    Remove duplicates based on proximity: across channels and midpoint within threshold samples.
     
     Args:
         arrays_dict: Dictionary containing all arrays to filter
@@ -1072,7 +1205,8 @@ def remove_proximity_duplicates(arrays_dict, proximity_threshold=3):
         n_removed: Number of duplicates removed
     """
     final_midpoint_idc = arrays_dict['final_midpoint_idc']
-    eod_chan = arrays_dict['eod_chan']
+    # eod_chan = arrays_dict['eod_chan']
+    eod_amps = arrays_dict['eod_amps']
 
     # Sort by midpoint index so the sliding window can break early.
     # For each pulse i (in sorted order), advance j while the distance is within
@@ -1080,16 +1214,23 @@ def remove_proximity_duplicates(arrays_dict, proximity_threshold=3):
     # Only non-duplicate pulses are used as seeds (checked via unique_mask_sorted[i]).
     sort_order = np.argsort(final_midpoint_idc, kind='stable')
     sorted_midpoints = final_midpoint_idc[sort_order]
-    sorted_channels = eod_chan[sort_order]
+    sorted_amps = eod_amps[sort_order]          # need eod_amps from arrays_dict
 
     unique_mask_sorted = np.ones(len(sorted_midpoints), dtype=bool)
-    for i in range(len(sorted_midpoints)):
-        if unique_mask_sorted[i]:
-            j = i + 1
-            while j < len(sorted_midpoints) and sorted_midpoints[j] - sorted_midpoints[i] <= proximity_threshold:
-                if sorted_channels[j] == sorted_channels[i]:
-                    unique_mask_sorted[j] = False
-                j += 1
+    i = 0
+    while i < len(sorted_midpoints):
+        # Collect all pulses within proximity_threshold of pulse i
+        j = i + 1
+        while j < len(sorted_midpoints) and sorted_midpoints[j] - sorted_midpoints[i] <= proximity_threshold:
+            j += 1
+        # Window is sorted_midpoints[i:j]
+        if j > i + 1:
+            window_amps = sorted_amps[i:j]
+            best_in_window = i + np.argmax(window_amps)
+            for k in range(i, j):
+                if k != best_in_window:
+                    unique_mask_sorted[k] = False
+        i = j   # advance past the whole group
 
     # Map mask back to original (unsorted) order
     unique_mask = np.empty(len(final_midpoint_idc), dtype=bool)
@@ -1945,17 +2086,17 @@ def load_waveforms(base_path, format="csv", length="fixed"):
                         if lengths[i] == 0:
                             waveforms_list.append(np.array([]))
                         else:
-                            waveform_length = lengths[i]
-                            waveform = concatenated[concatenated_idx:concatenated_idx + waveform_length]
+                            length = lengths[i]
+                            waveform = concatenated[concatenated_idx:concatenated_idx + length]
                             waveforms_list.append(waveform)
-                            concatenated_idx += waveform_length
+                            concatenated_idx += length
                 else:
                     # Original format - all waveforms were non-empty
                     start_indices = metadata['start_indices']
                     for i in range(metadata['total_waveforms']):
                         start_idx = start_indices[i]
-                        waveform_length = lengths[i]
-                        waveform = concatenated[start_idx:start_idx + waveform_length]
+                        length = lengths[i]
+                        waveform = concatenated[start_idx:start_idx + length]
                         waveforms_list.append(waveform)
                 
         return waveforms_list
@@ -3278,7 +3419,7 @@ def create_tracking_plot(event_id, event_eods, event_data, event_start_time, sam
                     plt.plot(midpoint_timestamps, ch_eods['pulse_location'].values[valid_midpoints] * offset_diff, 
                             '-', linewidth=0.5, color=id_colors[fish_id], alpha=0.8, 
                             label='Peak Loc' if i == 0 else "")
-
+                    
                     plt.plot(midpoint_timestamps, ch_eods['pulse_location'].values[valid_midpoints] * offset_diff, 
                             'x', markersize=3, color=id_colors[fish_id], alpha=0.8, 
                             label='Peak Loc' if i == 0 else "")

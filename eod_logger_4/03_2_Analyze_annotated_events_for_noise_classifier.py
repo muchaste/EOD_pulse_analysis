@@ -1,12 +1,11 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Load Annotations and Analyze Single Fish Events
-===============================================
+03_2_Analyze_annotated_events_for_noise_classifier.py
 
 This script loads the annotation data from the JSON file and analyzes
 single fish events to check pulse similarity.
 
+Authors: Stefan Mucha with Claude Sonnet 4.6
 """
 
 import os

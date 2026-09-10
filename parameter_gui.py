@@ -893,12 +893,12 @@ class TrackingParameterConfigGUI:
         self._lda_prob_entry.grid(row=2, column=1, sticky=tk.W, padx=5)
 
         self._lda_dist_label = ttk.Label(species_frame,
-                                         text="LDA Distance Uncertainty Percentile (ctrl scatter):",
+                                         text="Max LDA distance factor (× ctrl max scatter):",
                                          state='disabled')
         self._lda_dist_label.grid(row=3, column=0, sticky=tk.W, pady=2)
-        self.param_vars['lda_dist_uncertainty_pct'] = tk.IntVar(value=95)
+        self.param_vars['lda_max_dist_factor'] = tk.DoubleVar(value=1.5)
         self._lda_dist_entry = ttk.Entry(species_frame,
-                                         textvariable=self.param_vars['lda_dist_uncertainty_pct'],
+                                         textvariable=self.param_vars['lda_max_dist_factor'],
                                          width=10, state='disabled')
         self._lda_dist_entry.grid(row=3, column=1, sticky=tk.W, padx=5)
 
@@ -908,14 +908,16 @@ class TrackingParameterConfigGUI:
         current_row += 1
 
         norm_params = [
-            ('waveform_target_length', 'Target Length (samples):', 150, int),
-            ('crop_factor', 'Crop Factor:', 4, int),
+            ('waveform_target_length', 'Target Length (samples):', 300, int),
+            ('crop_factor', 'Crop Factor:', 7, int),
         ]
         for i, (key, label, default, dtype) in enumerate(norm_params):
-            ttk.Label(norm_frame, text=label).grid(row=i, column=0, sticky=tk.W, pady=2)
+            col = (i % 2) * 3  # 0 for left column, 3 for right column
+            row = i // 2
+            ttk.Label(norm_frame, text=label).grid(row=row, column=col, sticky=tk.W, pady=2)
             self.param_vars[key] = tk.IntVar(value=default) if dtype == int else tk.DoubleVar(value=default)
             ttk.Entry(norm_frame, textvariable=self.param_vars[key], width=10).grid(
-                row=i, column=1, sticky=tk.W, padx=5)
+                row=row, column=col+1, sticky=tk.W, padx=5)
 
         # Width sorting + DBSCAN
         cluster_frame = ttk.LabelFrame(scrollable_frame, text="Width Sorting & Shape Clustering", padding="10")
@@ -923,58 +925,47 @@ class TrackingParameterConfigGUI:
         current_row += 1
 
         cluster_params = [
-            ('width_min_separation_us', 'Min Width Peak Separation (µs):', 15, float),
-            ('shape_dbscan_min_samples', 'DBSCAN Min Samples (floor):', 5, int),
-            ('knn_percentile', 'KNN Percentile for Epsilon:', 80, int),
-            ('min_shape_eps', 'Min Epsilon Floor:', 0.1, float),
-            ('fft_artifact_threshold', 'FFT Artifact Threshold:', 0.75, float),
-            ('dbscan_max_direct', 'DBSCAN Max Direct (subsampling):', 3000, int),
-            ('dbscan_sample_size', 'DBSCAN Sample Size:', 2000, int),
+            ('width_min_separation_us', 'Min Width Peak Sep. (µs):',   13.24,   float),
+            ('shape_dbscan_min_samples', 'DBSCAN Min Samples:',          5,   int),
+            ('knn_percentile',           'KNN Percentile for Epsilon:', 60,   int),
+            ('min_shape_eps',            'Min Epsilon Floor:',          0.218,  float),
+            ('fft_artifact_threshold',   'FFT Artifact Threshold:',     0.767, float),
+            ('dbscan_max_direct',        'DBSCAN Max Direct:',          30000, int),
+            ('dbscan_sample_size',       'DBSCAN Sample Size:',         20000, int),
         ]
         for i, (key, label, default, dtype) in enumerate(cluster_params):
-            ttk.Label(cluster_frame, text=label).grid(row=i, column=0, sticky=tk.W, pady=2)
+            col = (i % 2) * 3
+            row = i // 2
+            ttk.Label(cluster_frame, text=label).grid(row=row, column=col, sticky=tk.W, pady=2)
             self.param_vars[key] = tk.DoubleVar(value=default) if dtype == float else tk.IntVar(value=default)
             ttk.Entry(cluster_frame, textvariable=self.param_vars[key], width=10).grid(
-                row=i, column=1, sticky=tk.W, padx=5)
+                row=row, column=col + 1, sticky=tk.W, padx=5)
 
         # Pass 1 parameters — two columns
         p1_frame = ttk.LabelFrame(scrollable_frame, text="Pass 1: Sequential Assignment", padding="10")
         p1_frame.grid(row=current_row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
         current_row += 1
 
-        p1_left = [
-            ('max_track_gap_s', 'Max Track Gap (s):', 5.0, float),
-            ('max_location_jump_per_s', 'Max Location Jump/s:', 400.0, float),
-            ('location_tolerance', 'Location Tolerance:', 20.0, float),
-            ('ipi_tolerance_fraction', 'IPI Tolerance Fraction:', 0.4, float),
-            ('ipi_tolerance_min_s', 'IPI Tolerance Min (s):', 0.05, float),
+        p1_params = [
+            ('max_track_gap_s',         'Max Track Gap (s):',       11.47,   float),
+            ('location_weight',         'Location Weight:',          0.7,  float),
+            ('max_location_jump_per_s', 'Max Location Jump/s:',    260.05,  float),
+            ('ipi_weight',              'IPI Weight:',               0.1,  float),
+            ('location_tolerance',      'Location Tolerance:',      10.19,  float),
+            ('waveform_weight',         'Waveform Weight:',          0.2,  float),
+            ('ipi_tolerance_fraction',  'IPI Tolerance Fraction:',   0.497,  float),
+            ('n_recent_for_ipi',        'Recent IPIs for Median:',     8,  int),
+            ('ipi_tolerance_min_s',     'IPI Tolerance Min (s):',   0.069,  float),
+            ('pass1_new_frag_cost',     'New Fragment Cost:',        4.03,  float),
+            ('min_ipi_s',               'Min IPI (s):',            0.00626,  float),
         ]
-        p1_right = [
-            ('location_weight', 'Location Weight:', 0.2, float),
-            ('ipi_weight', 'IPI Weight:', 0.4, float),
-            ('waveform_weight', 'Waveform Weight:', 0.4, float),
-            ('n_recent_for_ipi', 'Recent IPIs for Median:', 8, int),
-            ('pass1_new_frag_cost', 'New Fragment Cost:', 2.0, float),
-        ]
-
-        for i, (key, label, default, dtype) in enumerate(p1_left):
-            ttk.Label(p1_frame, text=label).grid(row=i, column=0, sticky=tk.W, pady=2)
+        for i, (key, label, default, dtype) in enumerate(p1_params):
+            col = (i % 2) * 3
+            row = i // 2
+            ttk.Label(p1_frame, text=label).grid(row=row, column=col, sticky=tk.W, pady=2)
             self.param_vars[key] = tk.DoubleVar(value=default) if dtype == float else tk.IntVar(value=default)
             ttk.Entry(p1_frame, textvariable=self.param_vars[key], width=10).grid(
-                row=i, column=1, sticky=tk.W, padx=5)
-
-        ttk.Separator(p1_frame, orient='vertical').grid(row=0, column=2, rowspan=6, sticky='ns', padx=10)
-
-        for i, (key, label, default, dtype) in enumerate(p1_right):
-            ttk.Label(p1_frame, text=label).grid(row=i, column=3, sticky=tk.W, pady=2)
-            self.param_vars[key] = tk.DoubleVar(value=default) if dtype == float else tk.IntVar(value=default)
-            ttk.Entry(p1_frame, textvariable=self.param_vars[key], width=10).grid(
-                row=i, column=4, sticky=tk.W, padx=5)
-
-        self.param_vars['min_ipi_s'] = tk.DoubleVar(value=0.002)
-        ttk.Label(p1_frame, text="Min IPI (s):").grid(row=len(p1_left), column=0, sticky=tk.W, pady=2)
-        ttk.Entry(p1_frame, textvariable=self.param_vars['min_ipi_s'], width=10).grid(
-            row=len(p1_left), column=1, sticky=tk.W, padx=5)
+                row=row, column=col + 1, sticky=tk.W, padx=5)
 
         # Pass 2 parameters
         p2_frame = ttk.LabelFrame(scrollable_frame, text="Pass 2: Fragment Stitching", padding="10")
@@ -982,17 +973,23 @@ class TrackingParameterConfigGUI:
         current_row += 1
 
         p2_params = [
-            ('pass2_max_gap_s', 'Max Gap (s):', 2.0, float),
-            ('pass2_waveform_weight', 'Waveform Weight:', 0.8, float),
-            ('pass2_spatial_weight', 'Spatial Weight:', 0.2, float),
-            ('pass2_cost_threshold', 'Cost Threshold:', 4.0, float),
-            ('pass2_max_iterations', 'Max Iterations:', 3, int),
+            ('pass2_max_gap_s',              'Max Gap (s):',                8.79,  float),
+            ('pass2_waveform_weight',        'Waveform Weight:',             0.5,  float),
+            ('pass2_cost_threshold',         'Cost Threshold:',              7.61,  float),
+            ('pass2_spatial_weight',         'Spatial Weight:',              0.5,  float),
+            ('pass2_max_iterations',         'Max Iterations:',                10,  int),
+            ('pass2_max_frags',              'Max Fragments for LAP:',      1200,  int),
+            ('pass2_overlap_wf_threshold',   'Overlap Merge WF Threshold:',  0.896,  float),
+            ('pass2_overlap_min_s',          'Overlap Merge Min (s):',       0.258,  float),
+            ('pass2_overlap_max_iterations', 'Overlap Merge Max Iter:',        2,  int),
         ]
         for i, (key, label, default, dtype) in enumerate(p2_params):
-            ttk.Label(p2_frame, text=label).grid(row=i, column=0, sticky=tk.W, pady=2)
+            col = (i % 2) * 3
+            row = i // 2
+            ttk.Label(p2_frame, text=label).grid(row=row, column=col, sticky=tk.W, pady=2)
             self.param_vars[key] = tk.DoubleVar(value=default) if dtype == float else tk.IntVar(value=default)
             ttk.Entry(p2_frame, textvariable=self.param_vars[key], width=10).grid(
-                row=i, column=1, sticky=tk.W, padx=5)
+                row=row, column=col + 1, sticky=tk.W, padx=5)
 
         # Pruning
         prune_frame = ttk.LabelFrame(scrollable_frame, text="Track Pruning", padding="10")
@@ -1000,14 +997,16 @@ class TrackingParameterConfigGUI:
         current_row += 1
 
         prune_params = [
-            ('min_track_pulses', 'Min Pulses per Track:', 15, int),
+            ('min_track_pulses',     'Min Pulses per Track:',   15,  int),
             ('min_track_duration_s', 'Min Track Duration (s):', 0.5, float),
         ]
         for i, (key, label, default, dtype) in enumerate(prune_params):
-            ttk.Label(prune_frame, text=label).grid(row=i, column=0, sticky=tk.W, pady=2)
+            col = (i % 2) * 3
+            row = i // 2
+            ttk.Label(prune_frame, text=label).grid(row=row, column=col, sticky=tk.W, pady=2)
             self.param_vars[key] = tk.IntVar(value=default) if dtype == int else tk.DoubleVar(value=default)
             ttk.Entry(prune_frame, textvariable=self.param_vars[key], width=10).grid(
-                row=i, column=1, sticky=tk.W, padx=5)
+                row=row, column=col + 1, sticky=tk.W, padx=5)
 
         # Action buttons
         button_frame = ttk.Frame(scrollable_frame, padding="10")
@@ -1100,6 +1099,10 @@ class TrackingParameterConfigGUI:
         w_wf = self.param_vars['waveform_weight'].get()
         if abs(w_loc + w_ipi + w_wf - 1.0) > 0.01:
             errors.append(f"Pass 1 weights must sum to 1.0 (currently {w_loc+w_ipi+w_wf:.2f})")
+        w2_wf = self.param_vars['pass2_waveform_weight'].get()
+        w2_sp = self.param_vars['pass2_spatial_weight'].get()
+        if abs(w2_wf + w2_sp - 1.0) > 0.01:
+            errors.append(f"Pass 2 weights (waveform + spatial) must sum to 1.0 (currently {w2_wf+w2_sp:.2f})")
         if errors:
             messagebox.showerror("Validation Error", "\n".join(errors))
             return False
@@ -1125,6 +1128,237 @@ class TrackingParameterConfigGUI:
                 print(f"Configuration automatically saved to: {cfg_path}")
             except Exception as e:
                 print(f"Failed to automatically save configuration: {e}")
+        self.parent.quit()
+        self.parent.destroy()
+
+    def on_cancel(self):
+        self.result = None
+        self.parent.quit()
+        self.parent.destroy()
+
+
+class ShuttleboxConfigGUI:
+    """
+    GUI for configuring analysis parameters for shuttlebox Matlab EOD extraction.
+
+    Output folder only (recording file and logfile are selected via in-script dialogs).
+    Includes segment settings, detection/filter parameters, and processing options.
+    No calibration, ML filtering, or event creation.
+    """
+
+    def __init__(self, parent):
+        self.parent = parent
+        self.parent.title("Shuttlebox Matlab EOD Extraction - Parameter Configuration")
+
+        main_frame = ttk.Frame(parent, padding="10")
+        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(0, weight=1)
+        main_frame.columnconfigure(0, weight=1)
+
+        canvas = tk.Canvas(main_frame, height=700, width=700)
+        scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        main_frame.rowconfigure(0, weight=1)
+
+        self.param_vars = {}
+        self.path_vars = {}
+        current_row = 0
+
+        # ===== CONFIG FILE MANAGEMENT =====
+        config_frame = ttk.LabelFrame(scrollable_frame, text="Configuration File", padding="10")
+        config_frame.grid(row=current_row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
+        current_row += 1
+
+        ttk.Button(config_frame, text="Load Config", command=self.load_config).grid(row=0, column=0, padx=5)
+        ttk.Button(config_frame, text="Save Config", command=self.save_config).grid(row=0, column=1, padx=5)
+
+        # ===== PATH SETTINGS =====
+        path_frame = ttk.LabelFrame(scrollable_frame, text="Output Folder", padding="10")
+        path_frame.grid(row=current_row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
+        current_row += 1
+
+
+        ttk.Label(path_frame, text="Root Folder:").grid(row=0, column=0, sticky=tk.W)
+        self.path_vars['root_folder'] = tk.StringVar()
+        ttk.Entry(path_frame, textvariable=self.path_vars['root_folder'], width=60).grid(
+            row=0, column=1, padx=5)
+        ttk.Button(path_frame, text="Browse",
+                   command=lambda: self.browse_folder('root_folder')).grid(row=0, column=2)
+        
+        ttk.Label(path_frame, text="Output Folder:").grid(row=1, column=0, sticky=tk.W)
+        self.path_vars['output_path'] = tk.StringVar()
+        ttk.Entry(path_frame, textvariable=self.path_vars['output_path'], width=60).grid(
+            row=1, column=1, padx=5)
+        ttk.Button(path_frame, text="Browse",
+                   command=lambda: self.browse_folder('output_path')).grid(row=1, column=2)
+
+        # ===== SEGMENT SETTINGS =====
+        seg_frame = ttk.LabelFrame(scrollable_frame, text="Segment Settings", padding="10")
+        seg_frame.grid(row=current_row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
+        current_row += 1
+
+        for i, (key, label, default) in enumerate([
+            ('test_seg_length', 'Test Segment Length (s):', 60),
+            ('seg_length_min', 'Processing Segment Length (min):', 10),
+        ]):
+            ttk.Label(seg_frame, text=label).grid(row=i, column=0, sticky=tk.W, pady=2)
+            self.param_vars[key] = tk.IntVar(value=default)
+            ttk.Entry(seg_frame, textvariable=self.param_vars[key], width=12).grid(
+                row=i, column=1, sticky=tk.W, padx=5)
+
+        # ===== PULSE EXTRACTION PARAMETERS =====
+        pulse_frame = ttk.LabelFrame(scrollable_frame, text="Pulse Extraction", padding="10")
+        pulse_frame.grid(row=current_row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
+        current_row += 1
+
+        # Left column — detection
+        self.param_vars['enable_bp'] = tk.BooleanVar(value=True)
+        ttk.Checkbutton(pulse_frame, text="Bandpass Filter",
+                        variable=self.param_vars['enable_bp']).grid(
+            row=0, column=0, columnspan=2, sticky=tk.W, pady=2)
+
+        detection_params = [
+            ('tuning_thresh', 'Tuning Threshold:', 0.02, float),
+            ('thresh', 'Detection Threshold:', 0.005, float),
+            ('bp_low_cutoff', 'BP Low Cutoff (Hz):', 500.0, float),
+            ('bp_high_cutoff', 'BP High Cutoff (Hz):', 10000.0, float),
+            ('min_rel_slope_diff', 'Min Relative Slope Difference:', 0.25, float),
+            ('min_width_us', 'Min Pulse Width (μs):', 25.0, float),
+            ('max_width_us', 'Max Pulse Width (μs):', 100.0, float),
+            ('width_fac_detection', 'Width Factor for Detection:', 7.0, float),
+            ('duplicate_samples', 'Duplicate Removal Samples:', 5, int),
+        ]
+
+        for i, (key, label, default, dtype) in enumerate(detection_params):
+            ttk.Label(pulse_frame, text=label).grid(row=i + 1, column=0, sticky=tk.W, pady=2)
+            self.param_vars[key] = tk.DoubleVar(value=default) if dtype == float else tk.IntVar(value=default)
+            ttk.Entry(pulse_frame, textvariable=self.param_vars[key], width=12).grid(
+                row=i + 1, column=1, sticky=tk.W, padx=5)
+
+        ttk.Separator(pulse_frame, orient='vertical').grid(row=0, column=2, rowspan=12, sticky='ns', padx=10)
+
+        # Right column — extraction / filter
+        filter_params = [
+            ('interp_factor', 'Interpolation Factor:', 3, int),
+            ('amplitude_ratio_min', 'Min Amplitude Ratio:', 0.1, float),
+            ('amplitude_ratio_max', 'Max Amplitude Ratio:', 1.0, float),
+            ('peak_fft_freq_min', 'Min FFT Peak Frequency (Hz):', 500.0, float),
+            ('peak_fft_freq_max', 'Max FFT Peak Frequency (Hz):', 10000.0, float),
+            ('extraction_window_length_us', 'Waveform Window Length (μs):', 4000.0, float),
+            ('extraction_window_factor', 'Waveform Window Factor:', 10.0, float),
+            ('search_window', 'Search Window (samples):', 10, int),
+        ]
+
+        for i, (key, label, default, dtype) in enumerate(filter_params):
+            ttk.Label(pulse_frame, text=label).grid(row=i, column=3, sticky=tk.W, pady=2)
+            self.param_vars[key] = tk.DoubleVar(value=default) if dtype == float else tk.IntVar(value=default)
+            ttk.Entry(pulse_frame, textvariable=self.param_vars[key], width=12).grid(
+                row=i, column=4, sticky=tk.W, padx=5)
+
+        # ===== PROCESSING OPTIONS =====
+        options_frame = ttk.LabelFrame(scrollable_frame, text="Processing Options", padding="10")
+        options_frame.grid(row=current_row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
+        current_row += 1
+
+        for i, (key, label, default) in enumerate([
+            ('create_plots', 'Create Diagnostic Plots', True),
+            ('save_filtered_out', 'Save Filtered-Out Pulses', False),
+        ]):
+            self.param_vars[key] = tk.BooleanVar(value=default)
+            ttk.Checkbutton(options_frame, text=label,
+                            variable=self.param_vars[key]).grid(
+                row=i, column=0, sticky=tk.W, pady=2)
+
+        # ===== ACTION BUTTONS =====
+        button_frame = ttk.Frame(scrollable_frame, padding="10")
+        button_frame.grid(row=current_row, column=0, columnspan=3, pady=10)
+
+        ttk.Button(button_frame, text="Start Processing",
+                   command=self.on_ok).grid(row=0, column=0, padx=5)
+        ttk.Button(button_frame, text="Cancel",
+                   command=self.on_cancel).grid(row=0, column=1, padx=5)
+
+        self.result = None
+
+    def browse_folder(self, var_name):
+        folder = filedialog.askdirectory(title=f"Select {var_name.replace('_', ' ').title()}")
+        if folder:
+            self.path_vars[var_name].set(folder)
+
+    def save_config(self):
+        filename = filedialog.asksaveasfilename(
+            title="Save Configuration",
+            defaultextension=".cfg",
+            filetypes=[("Config files", "*.cfg"), ("All files", "*.*")]
+        )
+        if not filename:
+            return
+        config = configparser.ConfigParser()
+        config['Paths'] = {k: v.get() for k, v in self.path_vars.items()}
+        config['Parameters'] = {k: str(v.get()) for k, v in self.param_vars.items()}
+        with open(filename, 'w') as f:
+            config.write(f)
+        messagebox.showinfo("Success", f"Configuration saved to:\n{filename}")
+
+    def load_config(self):
+        filename = filedialog.askopenfilename(
+            title="Load Configuration",
+            filetypes=[("Config files", "*.cfg"), ("All files", "*.*")]
+        )
+        if not filename:
+            return
+        config = configparser.ConfigParser()
+        config.read(filename)
+        if 'Paths' in config:
+            for key in self.path_vars:
+                if key in config['Paths']:
+                    self.path_vars[key].set(config['Paths'][key])
+        if 'Parameters' in config:
+            for key, var in self.param_vars.items():
+                if key in config['Parameters']:
+                    val = config['Parameters'][key]
+                    if isinstance(var, tk.BooleanVar):
+                        var.set(val.lower() in ('true', '1', 'yes'))
+                    elif isinstance(var, tk.IntVar):
+                        var.set(int(float(val)))
+                    elif isinstance(var, tk.DoubleVar):
+                        var.set(float(val))
+                    else:
+                        var.set(val)
+        messagebox.showinfo("Success", f"Configuration loaded from:\n{filename}")
+
+    def on_ok(self):
+        if not self.path_vars['output_path'].get():
+            messagebox.showerror("Validation Error", "Output folder path is required")
+            return
+        self.result = {
+            'root_folder': self.path_vars['root_folder'].get(),
+            'output_path': self.path_vars['output_path'].get(),
+            'parameters': {k: v.get() for k, v in self.param_vars.items()}
+        }
+        # Auto-save config to output folder
+        output_folder = self.path_vars['output_path'].get()
+        if output_folder and os.path.isdir(output_folder):
+            cfg_path = os.path.join(output_folder, "shuttlebox_config.cfg")
+            config = configparser.ConfigParser()
+            config['Paths'] = {k: v.get() for k, v in self.path_vars.items()}
+            config['Parameters'] = {k: str(v.get()) for k, v in self.param_vars.items()}
+            try:
+                with open(cfg_path, 'w') as f:
+                    config.write(f)
+            except Exception:
+                pass
         self.parent.quit()
         self.parent.destroy()
 

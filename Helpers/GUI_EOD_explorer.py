@@ -1,13 +1,13 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-EOD Pulse Detection Diagnostic Tool
-===================================
+GUI_EOD_explorer.py
 
-Simple diagnostic tool based on Script 03 logic with adjustable parameters.
-This is essentially Script 03 with a GUI for parameter adjustment and visualization.
+Diagnostic tool based on 02_1_Pulse_detection_diagnostic_GUI.py.
+GUI tool to load data from various sources, visualize, detect pulses,
+and perform diagnostic analysis on the detected pulses.
+Latest addition (difference to 02_1): wave-type signal detection
 
-Author: AI Assistant & User
+Authors: Stefan Mucha with Claude Sonnet 4.6
 Date: September 2025
 """
 
@@ -22,17 +22,25 @@ import audioio as aio
 import json
 import pickle
 from scipy import signal
-
-
-# Import from Script 03
 import thunderfish.pulses as pulses
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from pulse_functions import (extract_pulse_snippets, 
                              remove_duplicates,
                              bandpass_filter,
                              filter_waveforms, 
                              filter_waveforms_with_classifier,
                              unify_across_channels,
-                             normalize_waveforms)
+                             normalize_waveforms,
+                             compute_wave_psd,
+                             detect_fundamental_and_harmonics,
+                             apply_notch_filter,
+                             compute_envelope_power,
+                             find_active_wave_segments,
+                             extract_period_aligned_snippets,
+                             align_wave_polarity,
+                             normalize_wave_snippets)
 
 # ML-related imports for classifier functionality
 try:
@@ -55,6 +63,7 @@ class PulseDiagnosticTool:
         self.calibrated_data = None
         self.data_source = 'multich_linear'  # 'multich_linear', '1ch_diff'
         self.file_name = None
+        self.dead_ch_0idx = np.array([], dtype=int)  # 0-indexed dead channel indices
         
         # File metadata for reloading
         self.source_file_path = None
@@ -113,6 +122,20 @@ class PulseDiagnosticTool:
         self.bandpass_lowcut = tk.DoubleVar(value=100.0)
         self.bandpass_highcut = tk.DoubleVar(value=13000.0)
         self.bandpass_order = tk.IntVar(value=4)
+
+        # Wave-type EOD analysis configuration variables
+        self.wave_freq_min = tk.DoubleVar(value=200.0)
+        self.wave_freq_max = tk.DoubleVar(value=1200.0)
+        self.use_notch_filter = tk.BooleanVar(value=False)
+        self.notch_freq = tk.DoubleVar(value=50.0)
+        self.notch_harmonics = tk.IntVar(value=3)
+        self.notch_q = tk.DoubleVar(value=30.0)
+        self.wave_noise_floor_db = tk.DoubleVar(value=10.0)
+        self.wave_min_segment_duration_ms = tk.DoubleVar(value=200.0)
+        self.wave_target_samples = tk.IntVar(value=100)
+
+        # Storage for wave-type detection/analysis results
+        self.current_wave_data = None
 
         
         self.setup_gui()
@@ -227,6 +250,20 @@ class PulseDiagnosticTool:
             entry.pack(side=tk.RIGHT)
             entry.bind('<Return>', lambda e: self.detect_pulses())
             self.param_vars[param] = var
+
+        # Add differential/non-differential detection mode as dropdown at the right column
+        diff_return_frame = ttk.Frame(right_param_frame)
+        diff_return_frame.pack(fill=tk.X, pady=1)
+        ttk.Label(diff_return_frame, text="return_diff", width=18).pack(side=tk.LEFT)
+        self.return_diff_var = tk.StringVar(value=str(self.parameters['return_diff']))
+        return_diff_dropdown = ttk.Combobox(
+            diff_return_frame,
+            textvariable=self.return_diff_var,
+            values=['True', 'False'],
+            state='readonly',
+            width=12
+        )
+        return_diff_dropdown.pack(side=tk.RIGHT)
         
         # Add length_extraction as a dropdown at the bottom of right column
         length_extr_frame = ttk.Frame(right_param_frame)
@@ -348,6 +385,43 @@ class PulseDiagnosticTool:
         ttk.Label(bp_row2, text="Order:", width=6).pack(side=tk.LEFT, padx=(10,0))
         order_entry = ttk.Entry(bp_row2, textvariable=self.bandpass_order, width=4)
         order_entry.pack(side=tk.LEFT, padx=2)
+
+        # Wave-type EOD analysis controls
+        wave_frame = ttk.LabelFrame(right_controls, text="Wave-Type Analysis", padding=5)
+        wave_frame.pack(fill=tk.X, pady=2)
+
+        wave_row1 = ttk.Frame(wave_frame)
+        wave_row1.pack(fill=tk.X, pady=1)
+        ttk.Label(wave_row1, text="Freq min (Hz):", width=11).pack(side=tk.LEFT)
+        wave_freq_min_entry = ttk.Entry(wave_row1, textvariable=self.wave_freq_min, width=8)
+        wave_freq_min_entry.pack(side=tk.LEFT, padx=2)
+        ttk.Label(wave_row1, text="Freq max (Hz):", width=11).pack(side=tk.LEFT, padx=(10,0))
+        wave_freq_max_entry = ttk.Entry(wave_row1, textvariable=self.wave_freq_max, width=8)
+        wave_freq_max_entry.pack(side=tk.LEFT, padx=2)
+
+        wave_row2 = ttk.Frame(wave_frame)
+        wave_row2.pack(fill=tk.X, pady=1)
+        ttk.Label(wave_row2, text="Noise floor (dB):", width=14).pack(side=tk.LEFT)
+        noise_floor_entry = ttk.Entry(wave_row2, textvariable=self.wave_noise_floor_db, width=6)
+        noise_floor_entry.pack(side=tk.LEFT, padx=2)
+        ttk.Label(wave_row2, text="Min segment (ms):", width=14).pack(side=tk.LEFT, padx=(10,0))
+        min_segment_entry = ttk.Entry(wave_row2, textvariable=self.wave_min_segment_duration_ms, width=6)
+        min_segment_entry.pack(side=tk.LEFT, padx=2)
+
+        notch_enable_checkbox = ttk.Checkbutton(wave_frame, text="Enable Notch Filter", variable=self.use_notch_filter)
+        notch_enable_checkbox.pack(side=tk.LEFT, padx=5, pady=2)
+
+        wave_row3 = ttk.Frame(wave_frame)
+        wave_row3.pack(fill=tk.X, pady=1)
+        ttk.Label(wave_row3, text="Notch freq (Hz):", width=13).pack(side=tk.LEFT)
+        notch_freq_entry = ttk.Entry(wave_row3, textvariable=self.notch_freq, width=6)
+        notch_freq_entry.pack(side=tk.LEFT, padx=2)
+        ttk.Label(wave_row3, text="Harmonics:", width=9).pack(side=tk.LEFT, padx=(10,0))
+        notch_harmonics_entry = ttk.Entry(wave_row3, textvariable=self.notch_harmonics, width=4)
+        notch_harmonics_entry.pack(side=tk.LEFT, padx=2)
+        ttk.Label(wave_row3, text="Q:", width=3).pack(side=tk.LEFT, padx=(10,0))
+        notch_q_entry = ttk.Entry(wave_row3, textvariable=self.notch_q, width=6)
+        notch_q_entry.pack(side=tk.LEFT, padx=2)
         
         # Main action buttons
         buttons_row = ttk.Frame(button_frame)
@@ -355,6 +429,12 @@ class PulseDiagnosticTool:
         
         ttk.Button(buttons_row, text="Detect Pulses", command=self.detect_pulses).pack(side=tk.LEFT, padx=2, fill=tk.X, expand=True)
         ttk.Button(buttons_row, text="Analyze Pulses", command=self.analyze_pulses).pack(side=tk.LEFT, padx=2, fill=tk.X, expand=True)
+
+        buttons_row_wave = ttk.Frame(button_frame)
+        buttons_row_wave.pack(fill=tk.X, pady=2)
+
+        ttk.Button(buttons_row_wave, text="Detect Wave", command=self.detect_wave).pack(side=tk.LEFT, padx=2, fill=tk.X, expand=True)
+        ttk.Button(buttons_row_wave, text="Analyze Wave", command=self.analyze_wave).pack(side=tk.LEFT, padx=2, fill=tk.X, expand=True)
         
         # Secondary buttons
         buttons_row2 = ttk.Frame(button_frame)
@@ -531,20 +611,18 @@ class PulseDiagnosticTool:
             
             # Apply calibration if needed (for 'audio' type with calibration file)
             if self.source_file_type == 'audio' and self.calibration_file_path is not None:
-                # Load calibration factors
-                self.calibration_factors = np.array(pd.read_csv(self.calibration_file_path))
-                print(f"Loaded calibration: {self.calibration_file_path}")
+                cf_values = self._load_calibration_factors(self.calibration_file_path)
+                self.calibration_factors = cf_values  # store as 1-D array
                 
-                # Apply calibration
-                self.calibrated_data = audio_data.copy()
-                n_channels = self.calibrated_data.shape[1]
-                for i in range(n_channels):
-                    self.calibrated_data[:, i] *= self.calibration_factors[i, 1]
+                self.dead_ch_0idx = np.where(np.isnan(cf_values) | (cf_values == 0))[0]
+                if len(self.dead_ch_0idx) > 0:
+                    print("*** DEAD CHANNEL(S): %s — correction factor NaN/0, skipping calibration for these channels ***" %
+                          ", ".join("ch%d" % (c + 1) for c in self.dead_ch_0idx))
                 
-                # Also calibrate full_data cache
+                self.calibrated_data = self._apply_calibration(audio_data, cf_values, self.dead_ch_0idx)
+                
                 if self.full_data is not None:
-                    for i in range(n_channels):
-                        self.full_data[:, i] *= self.calibration_factors[i, 1]
+                    self.full_data = self._apply_calibration(self.full_data, cf_values, self.dead_ch_0idx)
                 
                 self.data_source = 'multich_linear'
                 print("Applied calibration to audio data")
@@ -553,6 +631,7 @@ class PulseDiagnosticTool:
                 # No calibration needed (precalibrated or 1ch_diff)
                 self.calibrated_data = audio_data.copy()
                 self.calibration_factors = None
+                self.dead_ch_0idx = np.array([], dtype=int)
                 
                 # Set data source based on type
                 if self.source_file_type == '1ch_diff':
@@ -732,6 +811,8 @@ class PulseDiagnosticTool:
             else:
                 source_desc = self.data_source
             info += f"Source: {source_desc}"
+            if len(self.dead_ch_0idx) > 0:
+                info += "\n*** DEAD: %s ***" % ", ".join("ch%d" % (c + 1) for c in self.dead_ch_0idx)
         elif self.source_file_path is not None:
             info += "\n[Click 'Load Data' to load]"
         
@@ -809,22 +890,47 @@ class PulseDiagnosticTool:
                 self.classifier_label.configure(text="sklearn N/A", foreground="red")
                 self.use_ml_filtering.set(False)
     
+    def _load_calibration_factors(self, filepath):
+        """Load correction factors from either all_files or median-per-channel CSV.
+        Returns 1-D float array of length n_channels, NaN for dead channels."""
+        df = pd.read_csv(filepath)
+        ch_cols = [c for c in df.columns if c.startswith('ch_')]
+        if ch_cols:
+            # all_files CSV: ch_1..ch_8, file_id, dead_channels — take nanmedian across rows
+            cf_values = np.nanmedian(df[ch_cols].values.astype(float), axis=0)
+            print(f"Calibration: detected all_files format ({len(df)} file(s), {len(ch_cols)} channels)")
+        elif 'median_correction_factor' in df.columns:
+            cf_values = df['median_correction_factor'].values.astype(float)
+            print(f"Calibration: detected median-per-channel format ({len(cf_values)} channels)")
+        else:
+            cf_values = np.array(df)[:, 1].astype(float)
+            print("Calibration: using positional column 1 (legacy format)")
+        return cf_values
+
+    def _apply_calibration(self, audio_data, cf_values, dead_ch_0idx):
+        """Apply correction factors to live channels in-place on a copy."""
+        calibrated = audio_data.copy()
+        for i in range(calibrated.shape[1]):
+            if i not in dead_ch_0idx:
+                calibrated[:, i] *= cf_values[i]
+        return calibrated
+
     def calibrate_data(self):
         """Apply calibration exactly like Script 03"""
         if self.raw_data is None or self.calibration_factors is None:
             return
-            
-        self.calibrated_data = self.raw_data.copy()
-        n_channels = self.calibrated_data.shape[1]
         
-        # Apply calibration factors (Script 03 logic)
-        for i in range(n_channels):
-            self.calibrated_data[:, i] *= self.calibration_factors[i, 1]
+        cf_values = self.calibration_factors  # already 1-D after _load_calibration_factors
+        self.dead_ch_0idx = np.where(np.isnan(cf_values) | (cf_values == 0))[0]
+        if len(self.dead_ch_0idx) > 0:
+            print("*** DEAD CHANNEL(S): %s — skipping calibration for these channels ***" %
+                  ", ".join("ch%d" % (c + 1) for c in self.dead_ch_0idx))
+            
+        self.calibrated_data = self._apply_calibration(self.raw_data, cf_values, self.dead_ch_0idx)
         
         # Also update full_data cache if it exists
         if self.full_data is not None:
-            for i in range(n_channels):
-                self.full_data[:, i] *= self.calibration_factors[i, 1]
+            self.full_data = self._apply_calibration(self.full_data, cf_values, self.dead_ch_0idx)
         
         # Set data source to multi-channel linear (calibrated data)
         self.data_source = 'multich_linear'
@@ -925,17 +1031,16 @@ class PulseDiagnosticTool:
             offset_diff = np.max(np.abs(data_diff)) * 1.2
 
             for ch in range(n_channels - 1):  # Differential channels
-                # Create differential signal for this channel pair
-                # data_diff = np.diff(data[:, i:i+2], axis=1).flatten()
-                
-                # # Downsample for plotting
-                # step = max(1, len(data_diff[:,i]) // 1500000)
-                # x_coords = np.arange(0, len(data_diff), step)
-                
-                # Plot differential signal
-                self.ax.plot((x_coords / rate) + start_sec, 
-                           data_diff[::step, ch] + ((ch + 0.5) * offset_diff), 
-                           linewidth=0.5, label=f'Ch{ch}-{ch+1}')
+                is_dead_pair = int(ch) in self.dead_ch_0idx or int(ch + 1) in self.dead_ch_0idx
+                if is_dead_pair:
+                    self.ax.plot((x_coords / rate) + start_sec,
+                                 data_diff[::step, ch] + ((ch + 0.5) * offset_diff),
+                                 linewidth=0.5, color='red', linestyle='--',
+                                 label=f'Ch{ch}-{ch+1} DEAD')
+                else:
+                    self.ax.plot((x_coords / rate) + start_sec,
+                                 data_diff[::step, ch] + ((ch + 0.5) * offset_diff),
+                                 linewidth=0.5, label=f'Ch{ch}-{ch+1}')
             
             # self.ax.set_ylim(bottom=np.min(data_diff)*1.2, top=(n_channels-1.5)*offset_diff)
             self.ax.set_ylim(bottom=-0.5*offset_diff, top=(n_channels-0.5)*offset_diff)
@@ -993,7 +1098,7 @@ class PulseDiagnosticTool:
             for param, var in self.param_vars.items():
                 value_str = var.get().strip()
                 
-                if param in ['save_filtered_out', 'return_diff', 'use_pca']:
+                if param in ['save_filtered_out', 'return_diff','use_pca']:
                     self.parameters[param] = value_str.lower() in ['true', '1', 'yes', 'on']
                 elif param in ['interp_factor', 'min_width_us', 'max_width_us', 'peak_fft_freq_min', 
                                'peak_fft_freq_max', 'length', 'length_factor', 'search_window', 
@@ -1002,6 +1107,9 @@ class PulseDiagnosticTool:
                 else:
                     self.parameters[param] = float(value_str)
             
+            # Update return_diff from dropdown
+            self.parameters['return_diff'] = self.return_diff_var.get() == 'True'
+
             # Update length_extraction from dropdown
             self.parameters['length_extraction'] = self.length_extraction_var.get()
                     
@@ -1052,30 +1160,39 @@ class PulseDiagnosticTool:
             if self.data_source == 'multich_linear' and self.plot_mode.get() == 'differential':
                 data_detect = np.diff(data, axis=1)
                 n_detect_channels = n_channels - 1
+                detect_pair_indices = [i for i in range(n_detect_channels)
+                                       if i not in self.dead_ch_0idx and (i + 1) not in self.dead_ch_0idx]
+                if len(self.dead_ch_0idx) > 0:
+                    dead_pairs = [i for i in range(n_detect_channels) if i not in detect_pair_indices]
+                    print("    *** DEAD CHANNEL(S) %s — skipping detection pairs: %s ***" %
+                          (", ".join("ch%d" % (c + 1) for c in self.dead_ch_0idx),
+                           ", ".join(str(p) for p in dead_pairs)))
             elif self.data_source == 'multich_linear' and self.plot_mode.get() == 'single_ended':
                 data_detect = data  # Use single-ended data for detection
                 n_detect_channels = n_channels
+                detect_pair_indices = list(range(n_detect_channels))
             elif self.data_source == '1ch_diff':
                 # Single-channel differential - data is already differential
                 data_detect = data
                 n_detect_channels = 1
+                detect_pair_indices = [0]
 
             # Detect pulses on each channel
             all_peaks = []
             all_troughs = []
             all_widths = []
             
-            for i in range(n_detect_channels):
+            for pair_idx in detect_pair_indices:
                 if self.use_bandpass_filter.get():
                     # Apply bandpass filter before detection
                     ch_data = bandpass_filter(
-                        data_detect[:, i], rate, 
+                        data_detect[:, pair_idx], rate, 
                         lowcut=float(self.bandpass_lowcut.get()), 
                         highcut=float(self.bandpass_highcut.get()), 
                         order=int(self.bandpass_order.get())
                     )
                 else:
-                    ch_data = data_detect[:, i]
+                    ch_data = data_detect[:, pair_idx]
 
                 ch_peaks, ch_troughs, _, ch_pulse_widths = pulses.detect_pulses(
                     ch_data, 
@@ -1121,6 +1238,9 @@ class PulseDiagnosticTool:
 
                 if self.parameters['return_diff'] and not self.parameters['use_pca']:
                     return_diff = True
+                    use_pca = False
+                elif not self.parameters['return_diff'] and not self.parameters['use_pca']:
+                    return_diff = False
                     use_pca = False
                 elif not self.parameters['return_diff'] and self.parameters['use_pca']:
                     return_diff = False
@@ -1550,6 +1670,152 @@ Current Parameters:
         self.results_text.delete(1.0, tk.END)
         self.results_text.insert(1.0, summary)
     
+    def detect_wave(self):
+        """Detect a wave-type EOD fundamental frequency and its active time segments"""
+        if self.calibrated_data is None:
+            messagebox.showwarning("Warning", "Please load data first")
+            return
+
+        try:
+            try:
+                start_sec = float(self.start_time_var.get().strip())
+                end_sec = float(self.end_time_var.get().strip())
+            except ValueError:
+                messagebox.showerror("Error", "Invalid time window values")
+                return
+
+            data = self.calibrated_data
+            rate = self.sample_rate
+
+            if self.data_source == '1ch_diff':
+                data = data[:, 0:1]
+                n_channels = 1
+            else:
+                n_channels = data.shape[1]
+
+            if end_sec <= 0:
+                end_sec = len(data) / rate
+            if start_sec < 0:
+                start_sec = 0
+
+            # Select channels for wave detection, mirroring detect_pulses() channel handling
+            if self.data_source == 'multich_linear' and self.plot_mode.get() == 'differential':
+                data_detect = np.diff(data, axis=1)
+                n_detect_channels = n_channels - 1
+                detect_pair_indices = [i for i in range(n_detect_channels)
+                                       if i not in self.dead_ch_0idx and (i + 1) not in self.dead_ch_0idx]
+            elif self.data_source == 'multich_linear' and self.plot_mode.get() == 'single_ended':
+                data_detect = data
+                n_detect_channels = n_channels
+                detect_pair_indices = list(range(n_detect_channels))
+            elif self.data_source == '1ch_diff':
+                data_detect = data
+                n_detect_channels = 1
+                detect_pair_indices = [0]
+
+            freq_min = self.wave_freq_min.get()
+            freq_max = self.wave_freq_max.get()
+            mains_freq = self.notch_freq.get()
+
+            print(f"Detecting wave-type EOD on {len(detect_pair_indices)} channels ({freq_min:.0f}-{freq_max:.0f} Hz)...")
+
+            channel_results = []
+            for pair_idx in detect_pair_indices:
+                ch_data = data_detect[:, pair_idx]
+
+                if self.use_notch_filter.get():
+                    ch_data = apply_notch_filter(
+                        ch_data, rate,
+                        notch_freq=self.notch_freq.get(),
+                        n_harmonics=self.notch_harmonics.get(),
+                        quality_factor=self.notch_q.get()
+                    )
+
+                psd_freqs, psd = compute_wave_psd(ch_data, rate, freq_resolution=1.0)
+                f0, harmonic_freqs, harmonic_powers, f0_power_db = detect_fundamental_and_harmonics(
+                    psd_freqs, psd, freq_min, freq_max, mains_freq=mains_freq
+                )
+
+                channel_results.append({
+                    'channel_idx': pair_idx,
+                    'ch_data': ch_data,
+                    'f0': f0,
+                    'harmonic_freqs': harmonic_freqs,
+                    'harmonic_powers': harmonic_powers,
+                    'f0_power_db': f0_power_db
+                })
+
+            valid_results = [r for r in channel_results if r['f0'] is not None]
+
+            if len(valid_results) == 0:
+                self.current_wave_data = None
+                messagebox.showwarning("Warning", "No wave-type fundamental frequency detected in the selected frequency range")
+                self.results_text.delete(1.0, tk.END)
+                self.results_text.insert(1.0, "Wave Detection Results:\n==================\nNo fundamental frequency detected\n")
+                return
+
+            best_result = max(valid_results, key=lambda r: r['f0_power_db'])
+            f0 = best_result['f0']
+            best_channel_idx = best_result['channel_idx']
+            best_ch_data = best_result['ch_data']
+
+            envelope_power = compute_envelope_power(best_ch_data, rate, f0, bandwidth_hz=max(10.0, f0 * 0.05))
+            active_segments, noise_floor_power = find_active_wave_segments(
+                envelope_power, rate,
+                noise_floor_db_threshold=self.wave_noise_floor_db.get(),
+                min_duration_s=self.wave_min_segment_duration_ms.get() / 1000.0
+            )
+
+            self.current_wave_data = {
+                'channel_idx': best_channel_idx,
+                'ch_data': best_ch_data,
+                'f0': f0,
+                'harmonic_freqs': best_result['harmonic_freqs'],
+                'harmonic_powers': best_result['harmonic_powers'],
+                'f0_power_db': best_result['f0_power_db'],
+                'active_segments': active_segments,
+                'noise_floor_power': noise_floor_power,
+                'sample_rate': rate,
+                'start_sec': start_sec
+            }
+
+            self.plot_data()
+            for seg_start, seg_end in active_segments:
+                self.ax.axvspan(
+                    start_sec + seg_start / rate, start_sec + seg_end / rate,
+                    color='orange', alpha=0.2
+                )
+            self.canvas.draw()
+
+            total_active_duration = sum((e - s) / rate for s, e in active_segments)
+            summary = f"""Wave Detection Results:
+==================
+Channel: {best_channel_idx}
+Fundamental frequency: {f0:.2f} Hz
+Fundamental power: {best_result['f0_power_db']:.1f} dB
+Harmonics detected: {len(best_result['harmonic_freqs'])}
+Harmonic frequencies (Hz): {np.round(best_result['harmonic_freqs'], 1).tolist()}
+
+Active segments: {len(active_segments)}
+Total active duration: {total_active_duration:.2f}s
+
+All channels checked:
+"""
+            for r in channel_results:
+                if r['f0'] is not None:
+                    summary += f"  ch {r['channel_idx']}: f0={r['f0']:.1f} Hz, power={r['f0_power_db']:.1f} dB\n"
+                else:
+                    summary += f"  ch {r['channel_idx']}: no fundamental found\n"
+
+            self.results_text.delete(1.0, tk.END)
+            self.results_text.insert(1.0, summary)
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Error during wave detection:\n{str(e)}")
+            print(f"Full error: {e}")
+            import traceback
+            traceback.print_exc()
+
     def export_parameters(self):
         """Export current parameters to JSON"""
         file_path = filedialog.asksaveasfilename(
@@ -1562,9 +1828,20 @@ Current Parameters:
             try:
                 if not self.update_parameters():
                     return
-                    
+
+                export_dict = dict(self.parameters)
+                export_dict['wave_freq_min'] = self.wave_freq_min.get()
+                export_dict['wave_freq_max'] = self.wave_freq_max.get()
+                export_dict['use_notch_filter'] = self.use_notch_filter.get()
+                export_dict['notch_freq'] = self.notch_freq.get()
+                export_dict['notch_harmonics'] = self.notch_harmonics.get()
+                export_dict['notch_q'] = self.notch_q.get()
+                export_dict['wave_noise_floor_db'] = self.wave_noise_floor_db.get()
+                export_dict['wave_min_segment_duration_ms'] = self.wave_min_segment_duration_ms.get()
+                export_dict['wave_target_samples'] = self.wave_target_samples.get()
+
                 with open(file_path, 'w') as f:
-                    json.dump(self.parameters, f, indent=2)
+                    json.dump(export_dict, f, indent=2)
                 messagebox.showinfo("Success", f"Parameters exported to:\n{file_path}")
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to export parameters:\n{str(e)}")
@@ -1580,8 +1857,23 @@ Current Parameters:
             try:
                 with open(file_path, 'r') as f:
                     imported_params = json.load(f)
-                
-                # Update parameters and GUI
+
+                wave_var_map = {
+                    'wave_freq_min': self.wave_freq_min,
+                    'wave_freq_max': self.wave_freq_max,
+                    'use_notch_filter': self.use_notch_filter,
+                    'notch_freq': self.notch_freq,
+                    'notch_harmonics': self.notch_harmonics,
+                    'notch_q': self.notch_q,
+                    'wave_noise_floor_db': self.wave_noise_floor_db,
+                    'wave_min_segment_duration_ms': self.wave_min_segment_duration_ms,
+                    'wave_target_samples': self.wave_target_samples
+                }
+                for param_name, tk_var in wave_var_map.items():
+                    if param_name in imported_params:
+                        tk_var.set(imported_params.pop(param_name))
+
+                # Update pulse-detection parameters and GUI
                 self.parameters.update(imported_params)
                 for param, value in self.parameters.items():
                     if param in self.param_vars:
@@ -1881,6 +2173,191 @@ Statistics:
                 
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to export analysis results:\n{str(e)}")
+                print(f"Full error: {e}")
+
+    def analyze_wave(self):
+        """Extract period-aligned snippets from detected wave-type active segments and analyze"""
+        if self.current_wave_data is None:
+            messagebox.showwarning("Warning", "Please run wave detection first")
+            return
+
+        try:
+            ch_data = self.current_wave_data['ch_data']
+            rate = self.current_wave_data['sample_rate']
+            f0 = self.current_wave_data['f0']
+            active_segments = self.current_wave_data['active_segments']
+
+            if len(active_segments) == 0:
+                messagebox.showwarning("Warning", "No active wave segments to analyze")
+                return
+
+            target_length = self.wave_target_samples.get()
+
+            resampled_snippets, raw_snippets, cycle_periods_s = extract_period_aligned_snippets(
+                ch_data, rate, f0, active_segments, target_length=target_length
+            )
+
+            if resampled_snippets.shape[0] == 0:
+                messagebox.showwarning("Warning", "No period-aligned snippets could be extracted")
+                return
+
+            aligned_snippets, flipped_mask, running_template = align_wave_polarity(resampled_snippets)
+            normalized_snippets = normalize_wave_snippets(aligned_snippets)
+
+            self.current_wave_analysis = {
+                'normalized_snippets': normalized_snippets,
+                'cycle_periods_s': cycle_periods_s,
+                'flipped_mask': flipped_mask,
+                'f0': f0,
+                'harmonic_freqs': self.current_wave_data['harmonic_freqs'],
+                'sample_rate': rate
+            }
+
+            self.create_wave_analysis_window(normalized_snippets, cycle_periods_s, flipped_mask, f0, rate)
+
+        except Exception as e:
+            messagebox.showerror("Analysis Error", f"Error during wave analysis:\n{str(e)}")
+            print(f"Full error: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def create_wave_analysis_window(self, normalized_snippets, cycle_periods_s, flipped_mask, f0, rate):
+        """Create separate window with detailed wave-type EOD analysis"""
+        analysis_window = tk.Toplevel(self.root)
+        window_title = "Wave Analysis Results"
+        if self.file_name:
+            window_title = f"{self.file_name} - {window_title}"
+        analysis_window.title(window_title)
+        analysis_window.geometry("1400x1000")
+
+        fig, ((ax1, ax2), (ax3, ax4), (ax5, ax6)) = plt.subplots(3, 2, figsize=(14, 9))
+
+        canvas = FigureCanvasTkAgg(fig, analysis_window)
+
+        toolbar_frame = ttk.Frame(analysis_window)
+        toolbar_frame.pack(fill=tk.X)
+        ttk.Label(toolbar_frame, text="Analysis Plot Tools:", font=('Arial', 9, 'bold')).pack(side=tk.LEFT, padx=(5, 10))
+        analysis_toolbar = NavigationToolbar2Tk(canvas, toolbar_frame)
+        analysis_toolbar.update()
+
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        n_samples = normalized_snippets.shape[1]
+        time_axis = (np.arange(n_samples) / n_samples) * (1000.0 / f0)  # ms, one period
+
+        # 1. Overlay of period-aligned, normalized snippets
+        for wf in normalized_snippets:
+            ax1.plot(time_axis, wf, 'b-', alpha=0.1, linewidth=0.5)
+
+        mean_waveform = np.mean(normalized_snippets, axis=0)
+        ax1.plot(time_axis, mean_waveform, 'r-', linewidth=2, label=f'Mean (n={len(normalized_snippets)})')
+        ax1.set_title('Period-Aligned Waveforms Overlay')
+        ax1.set_xlabel('Time (ms)')
+        ax1.set_ylabel('Normalized Amplitude')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+
+        # 2. Instantaneous frequency histogram
+        inst_freqs = 1.0 / cycle_periods_s
+        ax2.hist(inst_freqs, bins=30, alpha=0.7, edgecolor='black')
+        ax2.axvline(f0, color='r', linestyle='dashed', linewidth=1)
+        ax2.set_title(f'Instantaneous Frequency\nMean: {np.mean(inst_freqs):.1f} ± {np.std(inst_freqs):.1f} Hz')
+        ax2.set_xlabel('Frequency (Hz)')
+        ax2.set_ylabel('Count')
+        ax2.grid(True, alpha=0.3)
+
+        # 3. Polarity flip summary
+        n_flipped = np.sum(flipped_mask)
+        ax3.bar(['Not flipped', 'Flipped'], [len(flipped_mask) - n_flipped, n_flipped],
+                color=['tab:blue', 'tab:orange'])
+        ax3.set_title(f'Polarity Correction\n{n_flipped}/{len(flipped_mask)} cycles flipped')
+        ax3.set_ylabel('Count')
+        ax3.grid(True, alpha=0.3)
+
+        # 4. Frequency drift over time (cycle index as proxy for time)
+        ax4.plot(np.arange(len(inst_freqs)), inst_freqs, '.', markersize=2, alpha=0.5)
+        ax4.axhline(f0, color='r', linestyle='dashed', linewidth=1)
+        ax4.set_title('Frequency Drift (per cycle, in order of extraction)')
+        ax4.set_xlabel('Cycle index')
+        ax4.set_ylabel('Frequency (Hz)')
+        ax4.grid(True, alpha=0.3)
+
+        # 5. Empty placeholder
+        ax5.axis('off')
+
+        # 6. PSD of mean waveform with harmonics marked
+        # The mean waveform is exactly one period (n_samples spans 1/f0 seconds), so a
+        # plain FFT directly gives power at the harmonic frequencies (bin spacing = f0).
+        dt = (1.0 / f0) / n_samples
+        harmonic_fft_freqs = np.fft.rfftfreq(n_samples, d=dt)
+        harmonic_fft_power = np.abs(np.fft.rfft(mean_waveform)) ** 2
+        ax6.loglog(harmonic_fft_freqs[1:], harmonic_fft_power[1:], 'b-', linewidth=1)
+        for harmonic_freq in self.current_wave_data['harmonic_freqs']:
+            ax6.axvline(harmonic_freq, color='g', linestyle='dotted', alpha=0.6)
+        ax6.set_title('PSD of Mean Waveform (harmonics marked)')
+        ax6.set_xlabel('Frequency (Hz)')
+        ax6.set_ylabel('Power Spectral Density')
+        ax6.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+
+        export_frame = ttk.Frame(analysis_window)
+        export_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        ttk.Button(export_frame, text="Export Wave Analysis Results",
+                  command=lambda: self.export_wave_analysis_results(
+                      normalized_snippets, cycle_periods_s, flipped_mask, mean_waveform, time_axis, f0
+                  )).pack(side=tk.LEFT)
+
+        summary_text = f"""Wave Analysis Summary:
+Fundamental Frequency: {f0:.2f} Hz
+Cycles Analyzed: {len(normalized_snippets)}
+Flipped for Polarity: {n_flipped} ({n_flipped/len(flipped_mask)*100:.1f}%)
+Instantaneous Freq: {np.mean(inst_freqs):.1f} ± {np.std(inst_freqs):.1f} Hz"""
+
+        summary_label = ttk.Label(export_frame, text=summary_text, font=('Courier', 9))
+        summary_label.pack(side=tk.RIGHT, padx=10)
+
+        canvas.draw()
+
+    def export_wave_analysis_results(self, normalized_snippets, cycle_periods_s, flipped_mask,
+                                     mean_waveform, time_axis, f0):
+        """Export wave analysis results to CSV files"""
+        file_path = filedialog.asksaveasfilename(
+            title="Export Wave Analysis Results",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+
+        if file_path:
+            try:
+                stats_df = pd.DataFrame({
+                    'cycle_period_s': cycle_periods_s,
+                    'instantaneous_freq_hz': 1.0 / cycle_periods_s,
+                    'polarity_flipped': flipped_mask
+                })
+                stats_df.to_csv(file_path, index=False)
+
+                base_path = file_path.rsplit('.', 1)[0]
+                mean_wf_path = base_path + '_mean_waveform.csv'
+                mean_df = pd.DataFrame({
+                    'time_ms': time_axis,
+                    'normalized_amplitude': mean_waveform
+                })
+                mean_df.to_csv(mean_wf_path, index=False)
+
+                snippets_path = base_path + '_snippets.csv'
+                snippets_df = pd.DataFrame(normalized_snippets.T)
+                snippets_df.columns = [f'cycle_{i}' for i in range(len(normalized_snippets))]
+                snippets_df.insert(0, 'time_ms', time_axis)
+                snippets_df.to_csv(snippets_path, index=False)
+
+                exported_files = [file_path, mean_wf_path, snippets_path]
+                file_list = "\n".join(exported_files)
+                messagebox.showinfo("Success", f"Wave analysis results exported:\n{file_list}")
+
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to export wave analysis results:\n{str(e)}")
                 print(f"Full error: {e}")
 
 
