@@ -3686,14 +3686,41 @@ def compute_envelope_power(data, rate, f0, bandwidth_hz=10.0):
     return envelope_power
 
 
-def find_active_wave_segments(envelope_power, rate, noise_floor_db_threshold=10.0, min_duration_s=0.5):
+def compute_noise_reference_power(data, rate, f0, guard_factor=0.15):
+    """
+    Estimate a broadband noise-floor power for comparison against the envelope power
+    at the fundamental frequency, using a reference band centered at 1.5*f0 (always
+    falls between the fundamental and its 2nd harmonic, away from both). This works
+    even when the EOD is continuously present (e.g. most wave-type fish), where a
+    time-based noise estimate (e.g. the median of the signal band's own envelope)
+    would just measure the signal itself.
+
+    Parameters
+    ----------
+    data : 1-D array
+        Input signal (single channel or differential pair).
+    rate : float
+        Sampling rate in Hz.
+    f0 : float
+        Fundamental frequency in Hz.
+    guard_factor : float
+        Bandwidth of the reference band, as a fraction of f0.
+
+    Returns
+    -------
+    noise_floor_power : float
+        Median envelope power (linear) in the reference band.
+    """
+    reference_freq = 1.5 * f0
+    bandwidth_hz = max(10.0, f0 * guard_factor)
+    reference_envelope_power = compute_envelope_power(data, rate, reference_freq, bandwidth_hz)
+    return max(np.median(reference_envelope_power), 1e-20)
+
+
+def find_active_wave_segments(envelope_power, rate, noise_floor_power, noise_floor_db_threshold=10.0, min_duration_s=0.5):
     """
     Find time segments where the envelope power around the fundamental frequency
-    exceeds the local noise floor by a set amount, in decibel.
-
-    The noise floor is estimated as the median envelope power (robust against short,
-    strong active segments), and the threshold is set at
-    noise_floor_db_threshold dB above that.
+    exceeds a given noise floor by a set amount, in decibel.
 
     Parameters
     ----------
@@ -3701,6 +3728,8 @@ def find_active_wave_segments(envelope_power, rate, noise_floor_db_threshold=10.
         Instantaneous power, as returned by compute_envelope_power().
     rate : float
         Sampling rate in Hz.
+    noise_floor_power : float
+        Reference noise floor power (linear), e.g. from compute_noise_reference_power().
     noise_floor_db_threshold : float
         Number of decibels the envelope power must exceed the noise floor by, to be
         considered an active segment.
@@ -3712,12 +3741,7 @@ def find_active_wave_segments(envelope_power, rate, noise_floor_db_threshold=10.
     -------
     active_segments : list of (int, int)
         List of (start_idx, end_idx) sample index pairs marking active segments.
-    noise_floor_power : float
-        Estimated noise floor power (linear), for reference/plotting.
     """
-    noise_floor_power = np.median(envelope_power)
-    noise_floor_power = max(noise_floor_power, 1e-20)
-
     threshold_power = noise_floor_power * (10 ** (noise_floor_db_threshold / 10.0))
 
     above_threshold = envelope_power >= threshold_power
@@ -3742,7 +3766,7 @@ def find_active_wave_segments(envelope_power, rate, noise_floor_db_threshold=10.
         if seg_end - seg_start >= min_duration_samples:
             active_segments.append((seg_start, seg_end))
 
-    return active_segments, noise_floor_power
+    return active_segments
 
 
 def extract_period_aligned_snippets(data_channel, rate, f0, active_segments, target_length=100):

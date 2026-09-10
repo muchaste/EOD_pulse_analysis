@@ -37,6 +37,7 @@ from pulse_functions import (extract_pulse_snippets,
                              detect_fundamental_and_harmonics,
                              apply_notch_filter,
                              compute_envelope_power,
+                             compute_noise_reference_power,
                              find_active_wave_segments,
                              extract_period_aligned_snippets,
                              align_wave_polarity,
@@ -1760,8 +1761,9 @@ Current Parameters:
             best_ch_data = best_result['ch_data']
 
             envelope_power = compute_envelope_power(best_ch_data, rate, f0, bandwidth_hz=max(10.0, f0 * 0.05))
-            active_segments, noise_floor_power = find_active_wave_segments(
-                envelope_power, rate,
+            noise_floor_power = compute_noise_reference_power(best_ch_data, rate, f0)
+            active_segments = find_active_wave_segments(
+                envelope_power, rate, noise_floor_power,
                 noise_floor_db_threshold=self.wave_noise_floor_db.get(),
                 min_duration_s=self.wave_min_segment_duration_ms.get() / 1000.0
             )
