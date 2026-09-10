@@ -37,7 +37,6 @@ from pulse_functions import (extract_pulse_snippets,
                              detect_fundamental_and_harmonics,
                              apply_notch_filter,
                              compute_envelope_power,
-                             compute_noise_reference_power,
                              find_active_wave_segments,
                              extract_period_aligned_snippets,
                              align_wave_polarity,
@@ -455,9 +454,14 @@ class PulseDiagnosticTool:
             self.ml_checkbox.configure(state="disabled")
             self.classifier_label.configure(text="sklearn N/A")
         
-        # Results summary (reduced height)
-        self.results_text = tk.Text(parent, height=6, wrap=tk.WORD)
-        self.results_text.pack(fill=tk.X, padx=5, pady=5)
+        # Results summary
+        results_frame = ttk.Frame(parent)
+        results_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        results_scrollbar = ttk.Scrollbar(results_frame)
+        results_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.results_text = tk.Text(results_frame, height=18, wrap=tk.WORD, yscrollcommand=results_scrollbar.set)
+        self.results_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        results_scrollbar.config(command=self.results_text.yview)
         
     def setup_plot_panel(self, parent):
         # Matplotlib figure
@@ -1761,9 +1765,8 @@ Current Parameters:
             best_ch_data = best_result['ch_data']
 
             envelope_power = compute_envelope_power(best_ch_data, rate, f0, bandwidth_hz=max(10.0, f0 * 0.05))
-            noise_floor_power = compute_noise_reference_power(best_ch_data, rate, f0)
-            active_segments = find_active_wave_segments(
-                envelope_power, rate, noise_floor_power,
+            active_segments, peak_power = find_active_wave_segments(
+                envelope_power, rate,
                 noise_floor_db_threshold=self.wave_noise_floor_db.get(),
                 min_duration_s=self.wave_min_segment_duration_ms.get() / 1000.0
             )
@@ -1776,7 +1779,7 @@ Current Parameters:
                 'harmonic_powers': best_result['harmonic_powers'],
                 'f0_power_db': best_result['f0_power_db'],
                 'active_segments': active_segments,
-                'noise_floor_power': noise_floor_power,
+                'peak_power': peak_power,
                 'sample_rate': rate,
                 'start_sec': start_sec
             }
