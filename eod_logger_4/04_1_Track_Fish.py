@@ -1,9 +1,18 @@
+# -*- coding: utf-8 -*-
+"""
+04_1_Track_Fish.py
+
+This script performs fish tracking on EOD events extracted from field recordings. 
+It uses waveform shape, inter-pulse interval (IPI), and spatial location to cluster pulses into individual fish tracks.
+
+Authors: Stefan Mucha with Claude Sonnet 4.6
+
+"""
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import tkinter as tk
-from tkinter import filedialog
-import os
 import json
 import glob
 from scipy.optimize import linear_sum_assignment
@@ -14,12 +23,14 @@ from sklearn.decomposition import PCA
 from sklearn.metrics import pairwise_distances
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.model_selection import LeaveOneOut
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import EOD functions
 from pulse_functions import (
     load_waveforms,
     normalize_waveforms,
-    create_tracking_plot
+    save_waveforms
 )
 from parameter_gui import TrackingParameterConfigGUI
 
@@ -60,18 +71,6 @@ waveform_npz_files = glob.glob(os.path.join(input_folder, "*_waveforms_concatena
 if not waveform_npz_files:
     raise ValueError(f"No waveform NPZ files found in {input_folder}")
 print(f"✓ Found {len(waveform_npz_files)} waveform NPZ file(s)")
-# prune "_waveforms_concatenated.npz" to get base names
-# waveform_bases = set(os.path.basename(f).replace("_waveforms_concatenated.npz", "") for f in waveform_npz_files)
-
-# waveform_metadata_files = glob.glob(os.path.join(input_folder, "*_waveforms_metadata.json"))
-# if not waveform_metadata_files:
-#     raise ValueError(f"No waveform metadata files found in {input_folder}")
-# print(f"✓ Found {len(waveform_metadata_files)} waveform metadata file(s)")
-
-audio_files = glob.glob(os.path.join(input_folder, "*.wav"))
-if not audio_files:
-    raise ValueError(f"No audio files found in {input_folder}")
-print(f"✓ Found {len(audio_files)} audio file(s)")
 
 event_summary_file = os.path.join(input_folder, "all_event_summaries.csv")
 if os.path.exists(event_summary_file):
@@ -85,19 +84,13 @@ file_sets_list = []
 for eod_file in eod_files:
     base_name = os.path.basename(eod_file).replace("_eod_table.csv", "")
     event_id = np.int64(base_name.split("event_")[1])
-    
     waveform_base = os.path.join(input_folder, f"{base_name}_waveforms")
-    # waveform_meta = os.path.join(input_folder, f"{base_name}_waveforms_metadata.json")
-    audio_file = os.path.join(input_folder, f"{base_name}.wav")
-    
-    if os.path.exists(waveform_base+"_concatenated.npz") and os.path.exists(audio_file):
+    if os.path.exists(waveform_base + "_concatenated.npz"):
         file_sets_list.append({
             'base_name': base_name,
             'event_id': event_id,
             'eod_file': eod_file,
             'waveform_base': waveform_base,
-            # 'waveform_meta': waveform_meta,
-            'audio_file': audio_file
         })
     else:
         print(f"⚠ Incomplete file set for {base_name}")
@@ -152,10 +145,10 @@ pass2_waveform_weight    = float(params['pass2_waveform_weight'])
 pass2_spatial_weight     = float(params['pass2_spatial_weight'])
 pass2_cost_threshold     = float(params['pass2_cost_threshold'])
 pass2_max_iterations     = int(params['pass2_max_iterations'])
-pass2_max_frags          = 600
-pass2_overlap_wf_threshold  = 0.4
-pass2_overlap_min_s         = 0.1
-pass2_overlap_max_iterations = 3
+pass2_max_frags          = int(params['pass2_max_frags'])
+pass2_overlap_wf_threshold   = float(params['pass2_overlap_wf_threshold'])
+pass2_overlap_min_s          = float(params['pass2_overlap_min_s'])
+pass2_overlap_max_iterations = int(params['pass2_overlap_max_iterations'])
 
 min_track_pulses     = int(params['min_track_pulses'])
 min_track_duration_s = float(params['min_track_duration_s'])
@@ -163,7 +156,7 @@ min_track_duration_s = float(params['min_track_duration_s'])
 width_min_separation_us = float(params['width_min_separation_us'])
 use_species_matching    = bool(params['use_species_matching'])
 lda_min_probability       = float(params.get('lda_min_probability', 0.0))
-lda_dist_uncertainty_pct  = int(params.get('lda_dist_uncertainty_pct', 95))
+lda_max_dist_factor       = float(params.get('lda_max_dist_factor', 1.5))
 
 # Load interp_factor from analysis_parameters.csv for physics-based KDE bandwidth
 _ap_file = os.path.join(input_folder, "analysis_parameters.csv")
@@ -281,11 +274,11 @@ if use_species_matching:
                 _centroid = _sp_coords.mean(axis=0)
                 _dists = np.linalg.norm(_sp_coords - _centroid, axis=1)
                 lda_sp_centroids[_sp] = _centroid
-                lda_sp_dist_thresholds[_sp] = float(np.percentile(_dists, lda_dist_uncertainty_pct)) if len(_dists) > 1 else np.inf
+                lda_sp_dist_thresholds[_sp] = float(np.max(_dists) * lda_max_dist_factor) if len(_dists) > 0 else np.inf
             print(f"\u2713 LDA fitted on {len(ref_matrix)} control mean waveforms "
                   f"({len(all_species_codes)} species, {n_pca_cls} PCA components)")
             for _sp in all_species_codes:
-                print(f"  {_sp}: LDA dist threshold (p{lda_dist_uncertainty_pct}) = {lda_sp_dist_thresholds[_sp]:.4f}")
+                print(f"  {_sp}: LDA dist threshold ({lda_max_dist_factor:.1f}× max ctrl scatter) = {lda_sp_dist_thresholds[_sp]:.4f}")
             # Leave-one-individual-out CV (each ref_matrix row = one individual mean waveform)
             sp_counts_loo = {sp: int((ref_species_arr == sp).sum()) for sp in all_species_codes}
             loo_feasible = all(c >= 2 for c in sp_counts_loo.values())
@@ -351,25 +344,13 @@ if use_species_matching:
             print("⚠ Only 1 species in reference library — LDA disabled, using 1-NN fallback")
             print("\u26a0 Only 1 species in reference library \u2014 LDA disabled, using 1-NN fallback")
 
-# # Pre-sort events by estimated fish count (from event summaries if available)
-# if event_summaries is not None and 'mean_ipi_seconds' in file_sets.columns:
-#     single_fish_threshold = 0.03
-#     single_fish_files = file_sets[file_sets['mean_ipi_seconds'] >= single_fish_threshold]
-#     multiple_fish_files = file_sets[file_sets['mean_ipi_seconds'] < single_fish_threshold]
-#     print(f"\n✓ Pre-sorting based on mean IPI:")
-#     print(f"  - Single fish candidates: {len(single_fish_files)}")
-#     print(f"  - Multiple fish candidates: {len(multiple_fish_files)}")
-# else:
-#     single_fish_files = file_sets
-#     multiple_fish_files = pd.DataFrame()
 #%%
 # =============================================================================
 # PER-FILE PROCESSING LOOP
 # =============================================================================
 
 all_tracked_data = []
-
-# NOTE: RENAME FILE_SET AND FILE_SETS TO SOMETHING BETTER - EVENT_DATA OR SOMETHING
+session_ts_rows = []  # accumulates 1-second presence records across all events
 
 for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
     print(f"\n{'='*70}")
@@ -460,32 +441,38 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
     # Step 2a: Width-based pre-sorting into classes
     # -------------------------------------------------------------------------
     print("\nWidth-based pre-sorting...")
-    width_range = np.linspace(widths.min(), widths.max(), 1000)
-    width_std = np.std(widths)
-    # bandwidth = desired_smoothing_µs / std(widths); smooth over ≥2 quantization steps
-    kde_bw = max(2.0 * step_us, 1.0) / width_std if width_std > 0 else 0.5
-    kde = gaussian_kde(widths, bw_method=kde_bw)
-    kde_vals = kde(width_range)
-
-    bin_width_us = width_range[1] - width_range[0]
-    if bin_width_us > 0:
-        min_peak_distance_bins = int(width_min_separation_us / bin_width_us)
-    else:
-        min_peak_distance_bins = 1  # all pulses have identical width → single class
-    peaks_idx, _ = find_peaks(kde_vals, distance=max(1, min_peak_distance_bins),
-                               prominence=0.01 * kde_vals.max())
-
-    if len(peaks_idx) > 1:
-        peak_positions = width_range[peaks_idx]
-        pulse_width_class = np.argmin(
-            np.abs(widths[:, None] - peak_positions[None, :]), axis=1
-        )
-        n_width_classes = len(peak_positions)
-        print(f"✓ Found {n_width_classes} width classes at: {peak_positions.round(1)} µs")
-    else:
+    if widths.min() == widths.max():
+        # All pulses have identical width — skip KDE entirely (gaussian_kde raises
+        # LinAlgError: singular matrix when the dataset has zero variance)
         pulse_width_class = np.zeros(len(eod_data), dtype=int)
         n_width_classes = 1
-        print(f"✓ Single width class (no clear modes separated by >{width_min_separation_us} µs)")
+        print(f"✓ Single width class (all {len(widths)} pulses identical: {widths[0]:.1f} µs)")
+    else:
+        width_range = np.linspace(widths.min(), widths.max(), 1000)
+        width_std = np.std(widths)
+        kde_bw = max(2.0 * step_us, 1.0) / width_std if width_std > 0 else 0.5
+        kde = gaussian_kde(widths, bw_method=kde_bw)
+        kde_vals = kde(width_range)
+
+        bin_width_us = width_range[1] - width_range[0]
+        if bin_width_us > 0:
+            min_peak_distance_bins = int(width_min_separation_us / bin_width_us)
+        else:
+            min_peak_distance_bins = 1
+        peaks_idx, _ = find_peaks(kde_vals, distance=max(1, min_peak_distance_bins),
+                                   prominence=0.01 * kde_vals.max())
+
+        if len(peaks_idx) > 1:
+            peak_positions = width_range[peaks_idx]
+            pulse_width_class = np.argmin(
+                np.abs(widths[:, None] - peak_positions[None, :]), axis=1
+            )
+            n_width_classes = len(peak_positions)
+            print(f"✓ Found {n_width_classes} width classes at: {peak_positions.round(1)} µs")
+        else:
+            pulse_width_class = np.zeros(len(eod_data), dtype=int)
+            n_width_classes = 1
+            print(f"✓ Single width class (no clear modes separated by >{width_min_separation_us} µs)")
 
     eod_data['width_class'] = pulse_width_class
 
@@ -632,30 +619,45 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
 
         n_clusters = next_merged_id
 
-        # Assign DBSCAN noise points to nearest cluster centroid (waveform space).
-        # Prevents each noise point becoming a singleton shape class that explodes fragment count.
-        # shape_source='noise' is preserved as a diagnostic label.
+        # Assign DBSCAN noise points: if within min_shape_eps of the nearest cluster centroid,
+        # fold into that cluster (mark 'noise'); otherwise isolate as an artifact singleton
+        # so genuinely outlying pulses do not contaminate real shape classes.
         if n_clusters > 0:
             noise_mask = (final_labels == -1)
-            n_noise_forced = int(noise_mask.sum())
-            if n_noise_forced > 0:
+            n_noise_assigned = 0
+            n_singletons = 0
+            if noise_mask.any():
                 merged_centroids = np.array(
                     [wc_waveforms_p1[final_labels == c].mean(axis=0) for c in range(n_clusters)]
                 )
                 d_noise = np.linalg.norm(
                     wc_waveforms_p1[noise_mask][:, None, :] - merged_centroids[None, :, :], axis=2
                 )
-                final_labels[noise_mask] = np.argmin(d_noise, axis=1)
-                source_labels[noise_mask] = 'noise'
+                best_dist  = np.min(d_noise, axis=1)
+                best_clust = np.argmin(d_noise, axis=1)
+                noise_idxs = np.where(noise_mask)[0]
+                for ni in range(len(noise_idxs)):
+                    idx = noise_idxs[ni]
+                    if best_dist[ni] < min_shape_eps:
+                        final_labels[idx]  = best_clust[ni]
+                        source_labels[idx] = 'noise'
+                        n_noise_assigned  += 1
+                    else:
+                        final_labels[idx]  = n_clusters + n_singletons
+                        source_labels[idx] = 'artifact'
+                        n_singletons      += 1
+                n_clusters += n_singletons
         else:
             # All pulses were noise → single shared class
             final_labels[:] = 0
             source_labels[:] = 'noise'
             n_clusters = 1
-            n_noise_forced = n_wc
+            n_noise_assigned = n_wc
+            n_singletons = 0
 
         print(f"  Width class {wc}: {n_clusters} shape cluster(s) "
-              f"(P1 eps={eps_p1:.3f}, P2 eps={eps_p2:.3f}), {n_noise_forced} noise\u2192assigned "
+              f"(P1 eps={eps_p1:.3f}, P2 eps={eps_p2:.3f}), "
+              f"{n_noise_assigned} noise→assigned, {n_singletons} artifact singletons "
               f"[{'subsampled' if n_wc > dbscan_max_direct else 'direct'} {n_sample}/{n_wc}]")
 
         # Assign globally unique shape class IDs
@@ -976,12 +978,21 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
                 cost = pass2_waveform_weight * wf_cost + pass2_spatial_weight * spatial_cost
                 cost_matrix[i, j] = cost
 
-        row_ind, col_ind = linear_sum_assignment(cost_matrix)
+        # Jaqaman (2008, Nat Methods 5:695) augmented matrix:
+        # "stay unlinked" is a first-class option at cost = pass2_cost_threshold,
+        # so the LAP solver itself decides whether to link or leave fragments isolated.
+        aug = np.full((2 * n_frags, 2 * n_frags), INF)
+        aug[:n_frags, :n_frags] = cost_matrix
+        np.fill_diagonal(aug[:n_frags, n_frags:], pass2_cost_threshold)
+        np.fill_diagonal(aug[n_frags:, :n_frags], pass2_cost_threshold)
+        aug[n_frags:, n_frags:] = 0.0
+        row_ind, col_ind = linear_sum_assignment(aug)
 
-        merges = []
-        for r, c in zip(row_ind, col_ind):
-            if cost_matrix[r, c] < pass2_cost_threshold:
-                merges.append((frag_ids[r], frag_ids[c]))
+        merges = [
+            (frag_ids[r], frag_ids[c])
+            for r, c in zip(row_ind, col_ind)
+            if r < n_frags and c < n_frags and cost_matrix[r, c] < INF
+        ]
 
         if not merges:
             print(f"  Iteration {stitch_iter + 1}: no merges, stopping")
@@ -1074,7 +1085,7 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
                 track_lda_coord = lda.transform(track_pca_s)[0]  # (n_lda_axes,)
                 lda_dist = float(np.linalg.norm(track_lda_coord - lda_sp_centroids[sp_pred]))
                 dist_threshold = lda_sp_dist_thresholds[sp_pred]
-                eod_data.loc[fid_mask, 'species_assigned'] = sp_pred
+                # eod_data.loc[fid_mask, 'species_assigned'] = sp_pred
                 eod_data.loc[fid_mask, 'lda_dist_centroid'] = lda_dist
                 eod_data.loc[fid_mask, 'lda_dist_threshold'] = dist_threshold
                 for sp, p in zip(lda.classes_, sp_proba):
@@ -1086,6 +1097,7 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
                 dist_flag = f", LDA_d={lda_dist:.3f}/>{dist_threshold:.3f}" if lda_dist > dist_threshold else f", LDA_d={lda_dist:.3f}"
                 print(f"  Fish {fid:2d}: {sp_pred}{uncertain_flag} (p={assigned_proba:.3f}{dist_flag}, "
                       f"nearest: {ref_ids[nn_idx]}, dist={nn_dist:.4f}, margin={margin:.4f})")
+                eod_data.loc[fid_mask, 'species_assigned'] =  f'{sp_pred}?' if uncertain else sp_pred
 
             else:
                 # 1-NN fallback when only 1 species in reference library
@@ -1123,7 +1135,7 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
     # -------------------------------------------------------------------------
     # Consolidated output figure (3 rows)
     # -------------------------------------------------------------------------
-    print("\nGenerating consolidated tracking figure...")
+    print("\nGenerating tracking figure...")
     fish_ids_assigned = sorted([fid for fid in eod_data['fish_id'].unique() if fid >= 0])
     n_assigned = len(fish_ids_assigned)
     fish_colors = plt.cm.tab10(np.linspace(0, 1, max(n_assigned, 1)))
@@ -1176,11 +1188,12 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
         assigned_data['t_bin'] = assigned_data['t_bin'].clip(0, n_bins_fish - 1)
 
         if use_species_matching and 'species_assigned' in eod_data.columns:
-            sp_list_fish = sorted(assigned_data['species_assigned'].unique())
+            assigned_data['species_code'] = assigned_data['species_assigned'].str.rstrip('?')
+            sp_list_fish = sorted(assigned_data['species_code'].unique())
             sp_pal_fish = plt.cm.Set1(np.linspace(0, 0.8, max(len(sp_list_fish), 1)))
             sp_color_fish = {sp: sp_pal_fish[i] for i, sp in enumerate(sp_list_fish)}
             for sp in sp_list_fish:
-                sp_data = assigned_data[assigned_data['species_assigned'] == sp]
+                sp_data = assigned_data[assigned_data['species_code'] == sp]
                 counts = sp_data.groupby('t_bin')['fish_id'].nunique().reindex(
                     range(n_bins_fish), fill_value=0
                 ).values
@@ -1252,7 +1265,7 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
             track_lda = lda.transform(track_pca_s)
             tx = float(track_lda[0, 0])
             ty = float(track_lda[0, 1]) if n_lda_axes >= 2 else float(track_pca_s[0, 0])
-            sp_assigned = eod_data.loc[fid_mask_pca, 'species_assigned'].iloc[0]
+            sp_assigned = eod_data.loc[fid_mask_pca, 'species_assigned'].iloc[0].rstrip('?')
             proba_col = f'lda_proba_{sp_assigned}'
             assigned_p = (
                 float(eod_data.loc[fid_mask_pca, proba_col].iloc[0])
@@ -1290,21 +1303,52 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
         ax_hist.hist(widths[wc_mask], bins=bin_edges, alpha=0.6,
                      color=wc_color_map[wc], label=f'Class {wc}', edgecolor='none')
     # KDE overlay per class
-    w_range = np.linspace(widths.min(), widths.max(), 400)
-    for wc in width_classes:
-        wc_mask = eod_data['width_class'] == wc
-        if wc_mask.sum() > 5:
-            wc_std = np.std(widths[wc_mask])
-            wc_kde_bw = max(2.0 * step_us, 1.0) / wc_std if wc_std > 0 else kde_bw
-            kde_wc = gaussian_kde(widths[wc_mask], bw_method=wc_kde_bw)
-            kde_scale = wc_mask.sum() * (bin_edges[1] - bin_edges[0])
-            ax_hist.plot(w_range, kde_wc(w_range) * kde_scale,
-                         color=wc_color_map[wc], linewidth=1.5)
-    ax_hist.set_xlabel('EOD width (µs)')
-    ax_hist.set_ylabel('Count')
-    ax_hist.set_title('Pulse width distribution by class')
-    if len(width_classes) > 1:
-        ax_hist.legend(fontsize=7)
+    if widths.min() == widths.max():
+        ax_hist.text(0.5, 0.5, f'All pulses identical width\n({widths[0]:.1f} µs)',
+                    ha='center', va='center', transform=ax_hist.transAxes, fontsize=9)
+        ax_hist.set_xlabel('EOD width (µs)')
+        ax_hist.set_title('Pulse width distribution by class')
+    else:
+        bin_edges = np.linspace(widths.min(), widths.max(), 60)
+        for wc in width_classes:
+            wc_mask = eod_data['width_class'] == wc
+            ax_hist.hist(widths[wc_mask], bins=bin_edges, alpha=0.6,
+                        color=wc_color_map[wc], label=f'Class {wc}', edgecolor='none')
+        w_range = np.linspace(widths.min(), widths.max(), 400)
+        for wc in width_classes:
+            wc_mask = eod_data['width_class'] == wc
+            if widths[wc_mask].min() == widths[wc_mask].max():
+                continue
+            if wc_mask.sum() > 5:
+                wc_std = np.std(widths[wc_mask])
+                wc_kde_bw = max(2.0 * step_us, 1.0) / wc_std if wc_std > 0 else kde_bw
+                kde_wc = gaussian_kde(widths[wc_mask], bw_method=wc_kde_bw)
+                kde_scale = wc_mask.sum() * (bin_edges[1] - bin_edges[0])
+                ax_hist.plot(w_range, kde_wc(w_range) * kde_scale,
+                            color=wc_color_map[wc], linewidth=1.5)
+        ax_hist.set_xlabel('EOD width (µs)')
+        ax_hist.set_ylabel('Count')
+        ax_hist.set_title('Pulse width distribution by class')
+        if len(width_classes) > 1:
+            ax_hist.legend(fontsize=7)
+
+    # w_range = np.linspace(widths.min(), widths.max(), 400)
+    # for wc in width_classes:
+    #     wc_mask = eod_data['width_class'] == wc
+    #     if widths[wc_mask].min() == widths[wc_mask].max():
+    #         continue
+    #     if wc_mask.sum() > 5:
+    #         wc_std = np.std(widths[wc_mask])
+    #         wc_kde_bw = max(2.0 * step_us, 1.0) / wc_std if wc_std > 0 else kde_bw
+    #         kde_wc = gaussian_kde(widths[wc_mask], bw_method=wc_kde_bw)
+    #         kde_scale = wc_mask.sum() * (bin_edges[1] - bin_edges[0])
+    #         ax_hist.plot(w_range, kde_wc(w_range) * kde_scale,
+    #                      color=wc_color_map[wc], linewidth=1.5)
+    # ax_hist.set_xlabel('EOD width (µs)')
+    # ax_hist.set_ylabel('Count')
+    # ax_hist.set_title('Pulse width distribution by class')
+    # if len(width_classes) > 1:
+    #     ax_hist.legend(fontsize=7)
 
     # --- Rows 4+: per-fish waveform overlays ---
     if n_assigned > 0:
@@ -1360,21 +1404,41 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
         fish_id = fid_to_fish[fid]
         f = fragments[fid]
         n_p = len(f['history'])
-        dur = (eod_data.loc[f['history'][-1], 'timestamp'] -
-               eod_data.loc[f['history'][0], 'timestamp']).total_seconds()
-        mean_loc = eod_data.loc[f['history'], 'pulse_location'].mean()
-        mean_width_val = eod_data.loc[f['history'], 'eod_width_us'].mean()
-        mean_rate_val = 1.0 / np.median(f['ipi_history']) if f['ipi_history'] else float('nan')
+        entry_time = eod_data.loc[f['history'][0], 'timestamp']
+        exit_time  = eod_data.loc[f['history'][-1], 'timestamp']
+        dur = (exit_time - entry_time).total_seconds()
+        fid_mask_sum = eod_data['fish_id'] == fish_id
+        frag_locs   = eod_data.loc[f['history'], 'pulse_location'].values
+        frag_widths = eod_data.loc[f['history'], 'eod_width_us'].values
+        frag_amps   = eod_data.loc[f['history'], 'eod_amplitude'].values
+        ipi_arr     = np.array(f['ipi_history']) if f['ipi_history'] else np.array([np.nan])
+        inst_rates  = 1.0 / ipi_arr
+        mean_loc       = float(frag_locs.mean())
+        mean_width_val = float(frag_widths.mean())
+        mean_rate_val  = float(1.0 / np.median(ipi_arr)) if f['ipi_history'] else float('nan')
+        mean_wf_l2 = waveforms_l2[fid_mask_sum].mean(axis=0)
+        sp_code = ''
+        if use_species_matching and 'species_assigned' in eod_data.columns:
+            sp_code = eod_data.loc[fid_mask_sum, 'species_assigned'].iloc[0].rstrip('?')
         fish_rec = {
+            'fish_key':      f"{file_set['base_name']}_fish_{fish_id}",
             'fish_id':       fish_id,
+            'entry_time':    entry_time,
+            'exit_time':     exit_time,
             'n_pulses':      n_p,
             'duration_s':    dur,
             'mean_rate_hz':  mean_rate_val,
+            'std_rate_hz':   float(np.nanstd(inst_rates)),
+            'cv_ipi':        float(np.nanstd(ipi_arr) / np.nanmean(ipi_arr)) if np.nanmean(ipi_arr) > 0 else float('nan'),
             'mean_location': mean_loc,
+            'std_location':  float(np.std(frag_locs)),
             'mean_width_us': mean_width_val,
+            'std_width_us':  float(np.std(frag_widths)),
+            'cv_amplitude':  float(np.std(frag_amps) / np.mean(frag_amps)) if np.mean(frag_amps) > 0 else float('nan'),
+            'species_code':  sp_code,
+            'mean_waveform': mean_wf_l2,
         }
         if use_species_matching and 'species_assigned' in eod_data.columns:
-            fid_mask_sum = eod_data['fish_id'] == fish_id
             fish_rec['species_assigned']   = eod_data.loc[fid_mask_sum, 'species_assigned'].iloc[0]
             fish_rec['species_uncertain']  = bool(eod_data.loc[fid_mask_sum, 'species_uncertain'].iloc[0])
             fish_rec['nearest_individual'] = eod_data.loc[fid_mask_sum, 'nearest_individual'].iloc[0]
@@ -1386,7 +1450,7 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
                         eod_data.loc[fid_mask_sum, f'lda_proba_{sp}'].iloc[0]
                     )
                 fish_rec['lda_proba_assigned'] = fish_rec[
-                    f'lda_proba_{fish_rec["species_assigned"]}'
+                    f'lda_proba_{fish_rec["species_assigned"].rstrip("?")}'
                 ]
             else:
                 for sp in all_species_codes:
@@ -1394,6 +1458,22 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
                         eod_data.loc[fid_mask_sum, f'dist_{sp}'].iloc[0]
                     )
         fish_details.append(fish_rec)
+
+    # Accumulate per-second time series rows for session-level CSV
+    for fid in sorted(fid_to_fish):
+        fish_id = fid_to_fish[fid]
+        fid_mask_ts = eod_data['fish_id'] == fish_id
+        sp_code_ts = fish_details[fid_to_fish[fid]]['species_code'] or 'fish'
+        fish_pulses = eod_data.loc[fid_mask_ts, ['timestamp', 'pulse_location']].copy()
+        fish_pulses['bin_dt'] = fish_pulses['timestamp'].dt.floor('s')
+        for bin_dt, grp in fish_pulses.groupby('bin_dt', sort=False):
+            int_ch = int(round(float(grp['pulse_location'].mean())))
+            int_ch = max(0, min(7, int_ch))
+            session_ts_rows.append({
+                'datetime_bin': bin_dt,
+                'species_code': sp_code_ts,
+                'int_channel':  int_ch,
+            })
 
     all_tracked_data.append({
         'base_name':       file_set['base_name'],
@@ -1478,3 +1558,138 @@ event_summary_out_path = os.path.join(output_folder, 'tracked_event_summary.csv'
 event_out_df.to_csv(event_summary_out_path, index=False)
 print(f"\u2713 Saved event summary: {os.path.basename(event_summary_out_path)} "
       f"({len(event_out_df)} rows)")
+
+# --- 4: Session-level mean waveforms per species ---
+all_fish_details = [fd for entry in all_tracked_data for fd in entry['fish_details']]
+if all_fish_details and any('mean_waveform' in fd for fd in all_fish_details):
+    sp_wf_map = {}
+    sp_key_map = {}
+    for fd in all_fish_details:
+        sp = fd.get('species_code', '') or 'unknown'
+        wf = fd.get('mean_waveform')
+        if wf is None:
+            continue
+        sp_wf_map.setdefault(sp, []).append(wf)
+        sp_key_map.setdefault(sp, []).append({
+            'fish_key':      fd['fish_key'],
+            'mean_location': fd['mean_location'],
+            'mean_rate_hz':  fd['mean_rate_hz'],
+            'entry_time':    fd['entry_time'],
+            'exit_time':     fd['exit_time'],
+        })
+    for sp, wf_list in sp_wf_map.items():
+        wf_out_base = os.path.join(output_folder, f'session_{sp}_mean_waveforms')
+        save_waveforms(wf_list, wf_out_base, format='npz', length='fixed')
+        keys_df = pd.DataFrame(sp_key_map[sp])
+        keys_df.to_csv(wf_out_base + '_keys.csv', index=False)
+        print(f"\u2713 Saved mean waveforms: {os.path.basename(wf_out_base)}.npz ({len(wf_list)} fish)")
+
+# --- 5: Session time series CSV (1-second bins, fish count per species per channel) ---
+if session_ts_rows:
+    ts_df = pd.DataFrame(session_ts_rows)
+    ts_df['col'] = ts_df['species_code'] + '_ch' + ts_df['int_channel'].astype(str)
+    ts_grouped = ts_df.groupby(['datetime_bin', 'col']).size().reset_index(name='n')
+    ts_wide = ts_grouped.pivot(index='datetime_bin', columns='col', values='n').fillna(0).astype(int)
+    # Ensure all 8 channels (0-7) appear for every species, even if unobserved
+    obs_species_ts = sorted(ts_df['species_code'].unique())
+    all_expected_cols = [f'{sp}_ch{ch}' for sp in obs_species_ts for ch in range(8)]
+    ts_wide = ts_wide.reindex(columns=sorted(set(ts_wide.columns) | set(all_expected_cols)), fill_value=0)
+    t_min_ts = ts_wide.index.min()
+    t_max_ts = ts_wide.index.max()
+    full_grid = pd.date_range(start=t_min_ts, end=t_max_ts, freq='s')
+    ts_wide = ts_wide.reindex(full_grid, fill_value=0)
+    ts_wide.index.name = 'datetime'
+    ts_path = os.path.join(output_folder, 'session_fish_timeseries.csv')
+    ts_wide.to_csv(ts_path)
+    print(f"\u2713 Saved session time series: {os.path.basename(ts_path)} "
+          f"({len(ts_wide)} rows \u00d7 {len(ts_wide.columns)} columns)")
+
+# --- 6: Session summary figure (location histogram + 2 stacked time bar plots) ---
+if all_fish_details:
+    all_species_in_summ = sorted(set(fd.get('species_code', '') or 'unknown' for fd in all_fish_details))
+    sp_pal_summ = plt.cm.Set1(np.linspace(0, 0.8, max(len(all_species_in_summ), 1)))
+    sp_color_summ = {sp: sp_pal_summ[i] for i, sp in enumerate(all_species_in_summ)}
+
+    all_int_channels = list(range(8))  # always include all 8 electrode positions (0-7)
+    ch_pal = plt.cm.tab10(np.linspace(0, 0.9, 8))
+    ch_color_summ = {ch: ch_pal[ch] for ch in all_int_channels}
+
+    time_bins_h = np.arange(0, 24.5, 0.5)
+    bin_centers = time_bins_h[:-1] + 0.25
+    n_bins = len(bin_centers)
+
+    # For each fish, determine which 0.5h bins it is active in (entry_hour to exit_hour, mod 24)
+    # counts_by_sp[sp][bin] and counts_by_ch[ch][bin]
+    counts_by_sp = {sp: np.zeros(n_bins, dtype=float) for sp in all_species_in_summ}
+    counts_by_ch = {ch: np.zeros(n_bins, dtype=float) for ch in all_int_channels}
+
+    for fd in all_fish_details:
+        if not pd.notnull(fd.get('entry_time')) or not pd.notnull(fd.get('exit_time')):
+            continue
+        sp = fd.get('species_code', '') or 'unknown'
+        int_ch = max(0, min(7, int(round(fd['mean_location'])))) if pd.notnull(fd['mean_location']) else 0
+        entry_h = (fd['entry_time'].hour + fd['entry_time'].minute / 60.0 + fd['entry_time'].second / 3600.0) % 24
+        exit_h  = (fd['exit_time'].hour  + fd['exit_time'].minute  / 60.0 + fd['exit_time'].second  / 3600.0) % 24
+        for b_idx, b_start in enumerate(time_bins_h[:-1]):
+            b_end = b_start + 0.5
+            # overlap: entry < bin_end AND exit > bin_start (handles wrap-around via simple comparison)
+            if exit_h >= entry_h:
+                active = entry_h < b_end and exit_h > b_start
+            else:
+                # spans midnight
+                active = b_start < exit_h or b_end > entry_h
+            if active:
+                counts_by_sp[sp][b_idx] += 1
+                counts_by_ch[int_ch][b_idx] += 1
+
+    fig_sess, (ax_loc_s, ax_time_ch, ax_time_sp) = plt.subplots(3, 1, figsize=(14, 11))
+    fig_sess.suptitle('Session summary', fontsize=11)
+
+    # Panel 1: location histogram
+    loc_bins = np.arange(-0.25, 8.25, 0.5)
+    for sp in all_species_in_summ:
+        sp_locs = [fd['mean_location'] for fd in all_fish_details
+                   if (fd.get('species_code', '') or 'unknown') == sp
+                   and pd.notnull(fd.get('mean_location'))]
+        if sp_locs:
+            ax_loc_s.hist(sp_locs, bins=loc_bins, alpha=0.6,
+                          color=sp_color_summ[sp], label=sp, edgecolor='none')
+    ax_loc_s.set_xlabel('Mean location (electrode units)')
+    ax_loc_s.set_ylabel('Fish count')
+    ax_loc_s.set_title('Fish location distribution (0.5-unit bins)')
+    ax_loc_s.legend(fontsize=8)
+
+    # Panel 2: stacked bar by location (channel)
+    bottom_ch = np.zeros(n_bins)
+    bar_width = 0.5
+    for ch in all_int_channels:
+        ax_time_ch.bar(bin_centers, counts_by_ch[ch], width=bar_width,
+                       bottom=bottom_ch, color=ch_color_summ[ch],
+                       label=f'Ch{ch}', edgecolor='none', alpha=0.85)
+        bottom_ch += counts_by_ch[ch]
+    ax_time_ch.set_xlabel('Hour of day')
+    ax_time_ch.set_ylabel('Active fish count')
+    ax_time_ch.set_title('Active fish over time — stacked by location (0.5-hour bins)')
+    ax_time_ch.set_xlim(0, 24)
+    ax_time_ch.set_xticks(np.arange(0, 25, 2))
+    ax_time_ch.legend(fontsize=7, ncol=min(len(all_int_channels), 8), loc='upper right')
+
+    # Panel 3: stacked bar by species
+    bottom_sp = np.zeros(n_bins)
+    for sp in all_species_in_summ:
+        ax_time_sp.bar(bin_centers, counts_by_sp[sp], width=bar_width,
+                       bottom=bottom_sp, color=sp_color_summ[sp],
+                       label=sp, edgecolor='none', alpha=0.85)
+        bottom_sp += counts_by_sp[sp]
+    ax_time_sp.set_xlabel('Hour of day')
+    ax_time_sp.set_ylabel('Active fish count')
+    ax_time_sp.set_title('Active fish over time — stacked by species (0.5-hour bins)')
+    ax_time_sp.set_xlim(0, 24)
+    ax_time_sp.set_xticks(np.arange(0, 25, 2))
+    ax_time_sp.legend(fontsize=8, loc='upper right')
+
+    plt.tight_layout()
+    sess_fig_path = os.path.join(output_folder, 'session_summary.png')
+    plt.savefig(sess_fig_path, dpi=120, bbox_inches='tight')
+    plt.close()
+    print(f"\u2713 Saved session summary figure: {os.path.basename(sess_fig_path)}")
