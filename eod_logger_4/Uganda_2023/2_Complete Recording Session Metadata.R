@@ -122,3 +122,4 @@ for(logger_id in unique(metadata$Logger_ID)){
 }
 
 write.csv2(full_metadata, "Recordings_Sessions_Metadata_Complete.csv", row.names = FALSE)
+write.xlsx(full_metadata, "Recordings_Sessions_Metadata_Complete.xlsx", rowNames = FALSE)
