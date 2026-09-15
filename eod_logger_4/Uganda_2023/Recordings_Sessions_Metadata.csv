@@ -1,0 +1,73 @@
+System,Site,Start_Date,End_Date,Logger_ID,Orientation,Direction,Vertical_location,Ch_0,Ch_7,Vegetation_cover_edge_ch,Dominant_veg,t_first_rec_start,t_last_rec_end,Recorded_dur_h,Gain_factor,Extraction_Threshold,events_thresh,BP_FFT_high_cutoff,GPS_UTM_36M_East,GPS_UTM_36M_North,Notes
+LN,LN1,09/10/2023,11/10/2023,L7,Horizontal,Orthogonal,Below_surface,Shore,Open,0,Papyrus,09/10/2023 11:28:35,10/10/2023 17:48:37,30.33388889,100,0.02,0.02 + 0.04,13kHz,373860,9959143,"High cutoff 13kHz -> Noise detected, clean up events"
+JR,JR1,11/10/2023,13/10/2023,L5,Horizontal,Orthogonal,Middle,Shore,Open,2,"Papyrus, Grass",11/10/2023 09:15:04,12/10/2023 18:05:06,32.83388889,10,0.005,0.01,13kHz,374592,9959763,
+JR,JR1,11/10/2023,13/10/2023,L6,Horizontal,Parallel,Middle,Shore,Open,7,"Papyrus, Grass",11/10/2023 09:45:04,12/10/2023 16:55:02,31.16611111,10,0.005,0.01,13kHz,374592,9959763,
+SL,SLP,11/10/2023,13/10/2023,L2,Horizontal,Orthogonal,Ground,Vegetation,Open,4,Miscanthidium,11/10/2023 14:53:03,12/10/2023 22:43:02,31.83305556,10,0.005,0.01,13kHz,382134,9964854,Phase-locking / co-bursting!
+SL,SLP,11/10/2023,13/10/2023,L1,Horizontal,Orthogonal,Surface,Vegetation,Open,4,Miscanthidium,11/10/2023 17:04:04,13/10/2023 02:44:03,33.66638889,10,0.005,0.01,13kHz,382134,9964854,
+LN,LN2,16/10/2023,18/10/2023,L7,Horizontal,Orthogonal,Below_surface,Shore,Open,7,"Miscanthidium, Lillies",16/10/2023 09:36:17,17/10/2023 17:26:19,31.83388889,100,0.02,0.02 + 0.04,13kHz,374320,9957429,"water lillies, heavy rain"
+JR,JR1,16/10/2023,18/10/2023,L6,Horizontal,Parallel,Middle,Shore,Open,7,"Papyrus, Grass",16/10/2023 10:17:43,17/10/2023 17:47:41,31.49944444,10,0.005,0.01,13kHz,374592,9959763,
+JR,JR1,16/10/2023,18/10/2023,L5,Horizontal,Orthogonal,Middle,Shore,Open,2,"Papyrus, Grass",16/10/2023 10:18:02,17/10/2023 15:58:03,29.66694444,10,0.005,0.01,13kHz,374592,9959763,
+SL,SLP,18/10/2023,20/10/2023,L1,Horizontal,Orthogonal,Surface,Vegetation,Open,4,Miscanthidium,18/10/2023 12:17:17,19/10/2023 18:17:15,29.99944444,10,0.005,0.01,13kHz,382134,9964854,
+SL,SLP,18/10/2023,20/10/2023,L2,Horizontal,Orthogonal,Ground,Vegetation,Open,4,Miscanthidium,18/10/2023 12:17:24,19/10/2023 20:07:22,31.83277778,10,0.005,0.01,13kHz,382134,9964854,
+PL,PLP,18/10/2023,20/10/2023,L3,Horizontal,Orthogonal,Ground,Vegetation,Open,3,Miscanthidium,18/10/2023 12:57:40,19/10/2023 19:27:38,30.49944444,10,0.005,0.01,13kHz,382794,9964774,
+PL,PLP,18/10/2023,20/10/2023,L4,Horizontal,Orthogonal,Surface,Vegetation,Open,3,Miscanthidium,18/10/2023 12:57:50,19/10/2023 20:27:52,31.50055556,10,0.005,0.01,13kHz,382794,9964774,
+PL,PLS,18/10/2023,20/10/2023,L9,Horizontal,Parallel,Below_surface,Open,Cover,3,"Grass, Trees",18/10/2023 13:17:59,19/10/2023 09:27:58,20.16638889,10,0.005,0.01,13kHz,382782,9964814,
+LN,LNI1,23/10/2023,25/10/2023,L9,Horizontal,Orthogonal,Below_surface,Shore,Open,0,Papyrus,23/10/2023 08:49:22,24/10/2023 05:29:21,20.66638889,100,0.01+0.02,0.01+0.02,13kHz,374619,9959621,
+LN,LN3,23/10/2023,25/10/2023,L7,Horizontal,Orthogonal,Below_surface,Shore,Open,0,"Papyrus, Hippograss",23/10/2023 09:33:25,24/10/2023 11:13:27,25.66722222,100,0.02,0.02,13kHz,374584,9959720,
+JR,JR1,23/10/2023,25/10/2023,L6,Horizontal,Parallel,Middle,Shore,Open,7,"Papyrus, Grass",23/10/2023 10:05:11,24/10/2023 14:15:09,28.16611111,10,0.005,0.01,13kHz,374592,9959763,
+JR,JR1,23/10/2023,25/10/2023,L5,Horizontal,Orthogonal,Middle,Shore,Open,2,"Papyrus, Grass",23/10/2023 10:06:45,24/10/2023 10:36:46,24.50027778,10,0.005,0.01,13kHz,374592,9959763,Electrode cable completely parallel to L6 because of higher current
+PL,PLP,25/10/2023,27/10/2023,L4,Horizontal,Orthogonal,Surface,Vegetation,Open,3,Miscanthidium,25/10/2023 12:31:37,26/10/2023 13:11:36,24.66638889,10,0.005,0.01,13kHz,382794,9964774,
+PL,PLP,25/10/2023,27/10/2023,L3,Horizontal,Orthogonal,Ground,Vegetation,Open,3,Miscanthidium,25/10/2023 12:34:34,26/10/2023 13:34:33,24.99972222,10,0.005,0.01,13kHz,382794,9964774,
+PL,PLS,25/10/2023,27/10/2023,L10,Horizontal,Parallel,Below_surface,Open,Cover,3,"Grass, Trees",25/10/2023 12:46:43,26/10/2023 04:06:44,15.33361111,10,0.005,0.01,13kHz,382782,9964814,Only recorded until 3am
+SL,SLP,25/10/2023,27/10/2023,L1,Horizontal,Orthogonal,Surface,Vegetation,Open,4,Miscanthidium,25/10/2023 13:21:07,26/10/2023 10:41:06,21.33305556,10,0.005,0.01,13kHz,382134,9964854,
+SL,SLP,25/10/2023,27/10/2023,L2,Horizontal,Orthogonal,Ground,Vegetation,Open,4,Miscanthidium,25/10/2023 13:29:42,26/10/2023 13:09:43,23.66694444,10,0.005,0.01,13kHz,382134,9964854,
+LN,LNI2,30/10/2023,01/11/2023,L9,Vertical,Point,Range,Open_Surface,Open_Ground,0,None,30/10/2023 09:27:14,31/10/2023 15:57:13,30.49972222,100,0.02,0.02,13kHz,374705,9959456,
+LN,LN4,30/10/2023,01/11/2023,L7,Horizontal,Orthogonal,Below_surface,Shore,Open,7,"Hippograss, Palm",30/10/2023 10:14:54,31/10/2023 11:54:54,25.66666667,100,0.02,0.02,13kHz,374467,9959722,"Lost time, correlated to L8 file, new_first_timestamp: 30/10/2023 10:14"
+JR,JR1,30/10/2023,01/11/2023,L5,Horizontal,Orthogonal,Middle,Shore,Open,2,"Papyrus, Grass",30/10/2023 10:43:59,31/10/2023 11:54:00,25.16694444,10,0.005,0.01,13kHz,374592,9959763,
+JR,JR1,30/10/2023,01/11/2023,L6,Horizontal,Parallel,Middle,Shore,Open,7,"Papyrus, Grass",30/10/2023 10:44:30,31/10/2023 11:14:30,24.5,10,0.005,0.01,13kHz,374592,9959763,"Lost time, correlated with L5 file, new first timestamp: 30/10/2023  10:44:30"
+PL,PLP,01/11/2023,03/11/2023,L4,Horizontal,Orthogonal,Surface,Vegetation,Open,3,Miscanthidium,01/11/2023 12:12:59,02/11/2023 13:01:55,24.81555556,10,0.005,0.01,13kHz,382794,9964774,Lost time - corrected via crosscorrelation with L3 file
+PL,PLP,01/11/2023,03/11/2023,L3,Horizontal,Orthogonal,Ground,Vegetation,Open,3,Miscanthidium,01/11/2023 12:13:08,02/11/2023 13:53:07,25.66638889,10,0.005,0.01,13kHz,382794,9964774,
+PL,PLS,01/11/2023,03/11/2023,L10,Horizontal,Parallel,Below_surface,Open,Cover,3,"Grass, Trees",01/11/2023 12:25:42,02/11/2023 14:05:43,25.66694444,10,0.005,0.01,13kHz,382782,9964814,
+SL,SLP,01/11/2023,03/11/2023,L1,Horizontal,Orthogonal,Surface,Vegetation,Open,4,Miscanthidium,01/11/2023 12:40:23,02/11/2023 13:40:22,24.99972222,10,0.005,0.01,13kHz,382134,9964854,
+SL,SLP,01/11/2023,03/11/2023,L2,Horizontal,Orthogonal,Ground,Vegetation,Open,4,Miscanthidium,01/11/2023 12:42:32,02/11/2023 19:02:33,30.33361111,10,0.005,0.01,13kHz,382134,9964854,
+LN,LN5,06/11/2023,08/11/2023,L8,Horizontal,Orthogonal,Below_surface,Shore,Open,7,Hippograss,06/11/2023 09:22:45,07/11/2023 17:12:43,31.83277778,100,0.02,0.02,13kHz,381026,9962052,
+LN,LN6,06/11/2023,08/11/2023,L7,Horizontal,Orthogonal,Below_surface,Shore,Open,0,"Trees, Hippograss",06/11/2023 09:42:58,07/11/2023 17:53:00,32.16722222,100,0.02,0.02,13kHz,381086,9962037,
+LN,LNI3,06/11/2023,08/11/2023,L9,Vertical,Point,Range,Open_Surface,Open_Ground,0,None,06/11/2023 10:52:26,07/11/2023 23:12:24,36.33277778,100,0.02,0.02,13kHz,374819.5,9959335,
+JR,JR1,06/11/2023,08/11/2023,L5,Horizontal,Orthogonal,Middle,Shore,Open,2,"Papyrus, Grass",06/11/2023 11:05:03,07/11/2023 18:35:05,31.50055556,10,0.005,0.01,13kHz,374592,9959763,
+JR,JR1,06/11/2023,08/11/2023,L6,Horizontal,Parallel,Middle,Shore,Open,7,"Papyrus, Grass",06/11/2023 11:13:32,07/11/2023 17:33:32,30.33333333,10,0.005,0.01,13kHz,374592,9959763,"Lost time, correlated with L5 file, new first timestamp: 06/11/2023  11:13:32"
+PL,PLP,08/11/2023,10/11/2023,L3,Horizontal,Orthogonal,Ground,Vegetation,Open,3,Miscanthidium,08/11/2023 12:08:42,09/11/2023 20:38:41,32.49972222,10,0.005,0.01,13kHz,382794,9964774,
+PL,PLP,08/11/2023,10/11/2023,L4,Horizontal,Orthogonal,Surface,Vegetation,Open,3,Miscanthidium,08/11/2023 12:12:33,09/11/2023 16:22:33,28.16666667,10,0.005,0.01,13kHz,382794,9964774,"Lost time, deleted the same number of files as for logger 3; crosscorr with L3 file, new timestamp: 08/11/2023  12:12:33"
+PL,PLS,08/11/2023,10/11/2023,L10,Horizontal,Parallel,Below_surface,Open,Cover,3,"Grass, Trees",08/11/2023 12:17:52,09/11/2023 19:47:54,31.50055556,10,0.005,0.01,13kHz,382782,9964814,
+SL,SLP,08/11/2023,10/11/2023,L1,Horizontal,Orthogonal,Surface,Vegetation,Open,4,Miscanthidium,08/11/2023 12:40:16,09/11/2023 20:00:15,31.33305556,10,0.005,0.01,13kHz,382134,9964854,
+SL,SLP,08/11/2023,10/11/2023,L2,Horizontal,Orthogonal,Ground,Vegetation,Open,4,Miscanthidium,08/11/2023 12:40:48,10/11/2023 02:20:50,37.66722222,10,0.005,0.01,13kHz,382134,9964854,
+LN,LN8,13/11/2023,15/11/2023,L8,Vertical,Point,Range,Open_Surface,Open_Ground,0,None,13/11/2023 10:08:02,14/11/2023 17:48:01,31.66638889,100,0.02,0.02,13kHz,380983,9961970,"almost nothing, weird noise"
+LN,LN7,13/11/2023,15/11/2023,L7,Horizontal,Orthogonal,Below_surface,Shore,Open,0,"Miscanthidium, Hippograss",13/11/2023 10:26:01,14/11/2023 18:46:03,32.33388889,100,0.02,0.02,13kHz,379010,9962442,
+LN,LNI4,13/11/2023,15/11/2023,L9,Vertical,Point,Range,Open_Surface,Open_Ground,0,None,13/11/2023 11:00:11,15/11/2023 00:00:10,36.99972222,100,0.02,0.02,13kHz,374886,9959269,
+JR,JR1,13/11/2023,15/11/2023,L5,Horizontal,Orthogonal,Middle,Shore,Open,2,"Papyrus, Grass",13/11/2023 11:21:26,14/11/2023 19:01:28,31.66722222,10,0.005,0.01,13kHz,374592,9959763,Long pulses were not detected - re-ran detection with new parameters
+JR,JR1,13/11/2023,15/11/2023,L6,Horizontal,Parallel,Middle,Shore,Open,7,"Papyrus, Grass",13/11/2023 11:28:00,14/11/2023 18:07:58,30.66611111,10,0.005,0.01,13kHz,374592,9959763,
+PL,PLS,15/11/2023,17/11/2023,L10,Horizontal,Parallel,Below_surface,Open,Cover,3,"Grass, Trees",15/11/2023 13:11:36,16/11/2023 20:31:38,31.33388889,10,0.005,0.01,13kHz,382782,9964814,
+PL,PLP,15/11/2023,17/11/2023,L3,Horizontal,Orthogonal,Ground,Vegetation,Open,3,Miscanthidium,15/11/2023 13:19:00,16/11/2023 19:58:59,30.66638889,10,0.005,0.01,13kHz,382794,9964774,Flooded
+SL,SLP,15/11/2023,17/11/2023,L2,Horizontal,Orthogonal,Ground,Vegetation,Open,4,Miscanthidium,15/11/2023 13:58:31,17/11/2023 03:38:33,37.66722222,10,0.005,0.01,13kHz,382134,9964854,
+SL,SLP,15/11/2023,17/11/2023,L1,Horizontal,Orthogonal,Surface,Vegetation,Open,4,Miscanthidium,15/11/2023 13:59:11,16/11/2023 17:49:11,27.83333333,10,0.005,0.01,13kHz,382134,9964854,"Lost time, crosscorr with L2 file, new timestamp: 15/11/2023  13:59:11"
+LN,LN9,20/11/2023,22/11/2023,L7,Horizontal,Orthogonal,Below_surface,Shore,Open,0,Hippograss,20/11/2023 09:57:17,21/11/2023 18:17:19,32.33388889,100,0.02,0.02,13kHz,376926,9962491,
+LN,LN10,20/11/2023,22/11/2023,L8,Vertical,Point,Range,Open_Surface,Open_Ground,0,None,20/11/2023 10:17:49,21/11/2023 17:57:47,31.66611111,100,0.02,0.02,13kHz,376986.5,9962358,"channel 1 goes dead in file L8-20231121T144747 - maybe due to lightning?? The logger had recorded more than 24h before, removed recordings with dead channel."
+LN,LN11,20/11/2023,22/11/2023,L9,Horizontal,Orthogonal,Below_surface,Shore,Open,7,"Lillies, Hippograss",20/11/2023 10:48:43,21/11/2023 23:48:41,36.99944444,100,0.02,0.02,13kHz,380078,9958544,
+LN,LN12,20/11/2023,22/11/2023,L11,Vertical,Point,Range,Open_Surface,Open_Ground,0,None,20/11/2023 11:03:44,21/11/2023 18:03:43,30.99972222,100,0.02+0.01,0.02+0.01,13kHz,380002.5,9958606,channel 8 data missing
+LN,LN13,20/11/2023,22/11/2023,L12,Horizontal,Orthogonal,Below_surface,Shore,Open,7,Lillies,20/11/2023 11:27:07,22/11/2023 01:37:07,38.16666667,100,0.02,0.02,13kHz,378278,9957271,
+JR,JR1,20/11/2023,22/11/2023,L5,Horizontal,Orthogonal,Middle,Shore,Open,2,"Papyrus, Grass",20/11/2023 12:03:51,21/11/2023 18:43:52,30.66694444,10,0.005,0.01,13kHz,374592,9959763,
+JR,JR1,20/11/2023,22/11/2023,L6,Horizontal,Parallel,Middle,Shore,Open,7,"Papyrus, Grass",20/11/2023 12:03:53,21/11/2023 17:43:51,29.66611111,10,0.005,0.01,13kHz,374592,9959763,
+PL,PLS,22/11/2023,24/11/2023,L10,Horizontal,Parallel,Below_surface,Open,Cover,3,"Grass, Trees",22/11/2023 15:09:49,23/11/2023 22:59:52,31.83416667,10,0.005,0.01,13kHz,382782,9964814,
+PL,PLP,22/11/2023,24/11/2023,L3,Horizontal,Orthogonal,Ground,Vegetation,Open,3,Miscanthidium,22/11/2023 15:29:42,23/11/2023 23:49:41,32.33305556,10,0.005,0.01,13kHz,382794,9964774,"Electrode-holding stick was moved, possibly due to the storm"
+PL,PLP,22/11/2023,24/11/2023,L4,Horizontal,Orthogonal,Surface,Vegetation,Open,3,Miscanthidium,22/11/2023 15:29:45,23/11/2023 21:59:44,30.49972222,10,0.005,0.01,13kHz,382794,9964774,"Electrode-holding stick was moved, possibly due to the storm"
+SL,SLP,22/11/2023,24/11/2023,L2,Horizontal,Orthogonal,Ground,Vegetation,Open,4,Miscanthidium,22/11/2023 16:09:42,23/11/2023 23:39:44,31.50055556,10,0.005,0.01,13kHz,382134,9964854,
+SL,SLP,22/11/2023,24/11/2023,L1,Horizontal,Orthogonal,Surface,Vegetation,Open,4,Miscanthidium,22/11/2023 16:19:38,23/11/2023 20:59:37,28.66638889,10,0.005,0.01,13kHz,382134,9964854,Logger has surfaced - check light logger data
+LN,LN14,25/11/2023,27/11/2023,L7,Vertical,Point,Range,Open_Surface,Open_Ground,0,None,25/11/2023 09:27:18,26/11/2023 16:57:20,31.50055556,100,0.02,0.02,13kHz,378529,9960571,"tried with 0.01 thresholds, only more noise"
+LN,LN16,25/11/2023,27/11/2023,L9,Vertical,Point,Range,Open_Surface,Open_Ground,0,None,25/11/2023 09:51:46,26/11/2023 23:01:44,37.16611111,100,0.02,0.02,13kHz,375916,9958544,"tried with 0.01 thresholds, only more noise"
+JR,JR1,25/11/2023,27/11/2023,L5,Horizontal,Orthogonal,Middle,Shore,Open,2,"Papyrus, Grass",25/11/2023 10:29:38,26/11/2023 17:49:39,31.33361111,10,0.005,0.01,13kHz,374592,9959763,
+JR,JR1,25/11/2023,27/11/2023,L6,Horizontal,Parallel,Middle,Shore,Open,7,"Papyrus, Grass",25/11/2023 10:30:08,26/11/2023 16:40:06,30.16611111,10,0.005,0.01,13kHz,374592,9959763,
+JR,JR2,25/11/2023,27/11/2023,L12,Horizontal,Parallel,Middle,Shore,Open,2,"Papyrus, Grass",25/11/2023 10:52:39,27/11/2023 00:32:40,37.66694444,10,0.005,0.01,13kHz,374591,9959822,
+LN,LN17,25/11/2023,27/11/2023,L11,Horizontal,Orthogonal,Below_surface,Shore,Open,2,Trees,25/11/2023 11:42:34,26/11/2023 17:02:33,29.33305556,10,0.005 + 0.002,0.01 + 0.002,13kHz,374826,9960108,Logger was prepared for River -> only 10x gain
+PL,PLS,27/11/2023,29/11/2023,L10,Horizontal,Parallel,Below_surface,Open,Cover,3,"Grass, Trees",27/11/2023 13:29:31,28/11/2023 20:39:34,31.1675,10,0.005,0.01,13kHz,382782,9964814,
+PL,PLP,27/11/2023,29/11/2023,L3,Horizontal,Orthogonal,Ground,Vegetation,Open,3,Miscanthidium,27/11/2023 13:39:00,28/11/2023 21:08:59,31.49972222,10,0.005,0.01,13kHz,382794,9964774,
+PL,PLP,27/11/2023,29/11/2023,L4,Horizontal,Orthogonal,Surface,Vegetation,Open,3,Miscanthidium,27/11/2023 13:41:20,28/11/2023 20:11:19,30.49972222,10,0.005,0.01,13kHz,382794,9964774,
+SL,SLP,27/11/2023,29/11/2023,L1,Horizontal,Orthogonal,Surface,Vegetation,Open,4,Miscanthidium,27/11/2023 14:20:13,28/11/2023 19:10:12,28.83305556,10,0.005,0.01,13kHz,382134,9964854,
