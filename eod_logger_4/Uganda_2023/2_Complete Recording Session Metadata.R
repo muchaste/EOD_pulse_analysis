@@ -15,44 +15,7 @@ setwd("C:/Users/Admin/Projects/EOD_pulse_analysis/eod_logger_4/Uganda_2023/")
 metadata <- read.xlsx("Recordings_Sessions_Metadata.xlsx")
 man_meas <- read.xlsx("Recordings and Measurements.xlsx", sheet = "Manual_measurements")
 
-metadata$t_meas_set <- NA
-metadata$t_meas_retr <- NA
-metadata$T_ch0_set_C <- NA
-metadata$T_mid_set_C <- NA
-metadata$T_ch7_set_C <- NA
-metadata$DO_ch0_set_AS <- NA
-metadata$DO_mid_set_AS <- NA
-metadata$DO_ch7_set_AS <- NA
-metadata$pH_ch0_set <- NA
-metadata$pH_mid_set <- NA
-metadata$pH_ch7_set <- NA
-metadata$Conductivity_ch0_set_uS <- NA
-metadata$Conductivity_mid_set_uS <- NA
-metadata$Conductivity_ch7_set_uS <- NA
-metadata$Depth_ch0_set_cm <- NA
-metadata$Depth_mid_set_cm <- NA
-metadata$Depth_ch7_set_cm <- NA
-metadata$Turbidity_set_NTU <- NA
-metadata$T_ch0_retr_C <- NA
-metadata$T_mid_retr_C <- NA
-metadata$T_ch7_retr_C <- NA
-metadata$DO_ch0_retr_AS <- NA
-metadata$DO_mid_retr_AS <- NA
-metadata$DO_ch7_retr_AS <- NA
-metadata$pH_ch0_retr <- NA
-metadata$pH_mid_retr <- NA
-metadata$pH_ch7_retr <- NA
-metadata$Conductivity_ch0_retr_uS <- NA
-metadata$Conductivity_mid_retr_uS <- NA
-metadata$Conductivity_ch7_retr_uS <- NA
-metadata$Depth_ch0_retr_cm <- NA
-metadata$Depth_mid_retr_cm <- NA
-metadata$Depth_ch7_retr_cm <- NA
-metadata$Turbidity_retr_NTU <- NA
-
-
 # add manual measurements from setting and retrieving the loggers to the metadata
-
 metadata$Start_Date <- convertToDate(metadata$Start_Date)
 metadata$End_Date <- convertToDate(metadata$End_Date)
 man_meas$Date <- convertToDate(man_meas$Date)
@@ -60,8 +23,8 @@ man_meas$Time <- convertToDateTime(man_meas$Time)
 date(man_meas$Time) <- man_meas$Date
 man_meas$Location <- trimws(man_meas$Location)  # guard against stray whitespace from manual entry
 
-# Same +3h read-in shift as the sampling register in script 3 (Excel-encoded UTC
-# reinterpreted as Africa/Nairobi on read) - subtract 3h to get true local time.
+# Parse time and shift if necessary (Check!!) (Excel-encoded UTC
+# reinterpreted as Africa/Nairobi on read)
 metadata$t_first_rec_start <- as.POSIXct(convertToDateTime(metadata$t_first_rec_start), tz = TZ) - hours(1)
 metadata$t_last_rec_end    <- as.POSIXct(convertToDateTime(metadata$t_last_rec_end),    tz = TZ) - hours(1)
 
@@ -122,9 +85,9 @@ for (i in which(has_gps)) {
 }
 
 # ---- Historical weather from Open-Meteo Archive API (free, no key needed) ----
-# One API call per unique GPS location, spanning the full date range recorded
-# there, to avoid one request per session. Classifies WMO weather codes into a
-# simple Sunny/Cloudy/Fog/Rainy/Thunderstorm label and reports daily rainfall (mm).
+# One hourly-resolution API call per unique GPS location, spanning the full date
+# range recorded there, then each session summarizes only the hours that fall
+# within its own [t_first_rec_start, t_last_rec_end] window.
 weathercode_to_label <- function(code) {
   if (is.na(code)) return(NA_character_)
   if (code == 0) return("Sunny")
@@ -134,45 +97,60 @@ weathercode_to_label <- function(code) {
   if (code %in% c(95, 96, 99)) return("Thunderstorm")
   NA_character_
 }
+WEATHER_LABELS <- c("Sunny", "Cloudy", "Fog", "Rainy", "Thunderstorm")
 
 gps_groups <- unique(metadata[has_gps, c("GPS_UTM_36M_East", "GPS_UTM_36M_North")])
 
-weather_daily <- NULL
-for (i in seq_len(nrow(gps_groups))) {
-  group_rows <- has_gps &
-    metadata$GPS_UTM_36M_East == gps_groups$GPS_UTM_36M_East[i] &
-    metadata$GPS_UTM_36M_North == gps_groups$GPS_UTM_36M_North[i]
+metadata$Rainfall_mm      <- NA_real_
+metadata$Rain_computed    <- NA_character_
+metadata$Cloudcover_mean_pct <- NA_real_
+metadata$Weather_dominant <- NA_character_
+for (label in WEATHER_LABELS) metadata[[paste0("pct_hours_", tolower(label))]] <- NA_real_
 
-  lat <- metadata$Site_lat[group_rows][1]
-  lon <- metadata$Site_lon[group_rows][1]
-  date_from <- min(metadata$Start_Date[group_rows], na.rm = TRUE)
-  date_to   <- max(metadata$End_Date[group_rows],   na.rm = TRUE)
+for (g in seq_len(nrow(gps_groups))) {
+  group_rows <- which(has_gps &
+    metadata$GPS_UTM_36M_East == gps_groups$GPS_UTM_36M_East[g] &
+    metadata$GPS_UTM_36M_North == gps_groups$GPS_UTM_36M_North[g])
+
+  lat <- metadata$Site_lat[group_rows[1]]
+  lon <- metadata$Site_lon[group_rows[1]]
+  date_from <- as.Date(min(metadata$t_first_rec_start[group_rows], na.rm = TRUE))
+  date_to   <- as.Date(max(metadata$t_last_rec_end[group_rows],   na.rm = TRUE))
 
   url <- paste0(
     "https://archive-api.open-meteo.com/v1/archive?",
     "latitude=", lat, "&longitude=", lon,
     "&start_date=", date_from, "&end_date=", date_to,
-    "&daily=weathercode,precipitation_sum&timezone=", URLencode(TZ, reserved = TRUE)
+    "&hourly=weathercode,precipitation,cloudcover&timezone=", URLencode(TZ, reserved = TRUE)
   )
 
   resp <- tryCatch(fromJSON(url), error = function(e) NULL)
-  if (is.null(resp) || is.null(resp$daily)) {
+  if (is.null(resp) || is.null(resp$hourly)) {
     warning(paste0("Weather API request failed for GPS ", lat, ",", lon))
     next
   }
 
-  weather_daily <- rbind(weather_daily, data.frame(
-    GPS_UTM_36M_East  = gps_groups$GPS_UTM_36M_East[i],
-    GPS_UTM_36M_North = gps_groups$GPS_UTM_36M_North[i],
-    Start_Date        = as.Date(resp$daily$time),
-    Weather_computed  = sapply(resp$daily$weathercode, weathercode_to_label),
-    Rainfall_mm       = resp$daily$precipitation_sum
-  ))
-}
-weather_daily$Rain_computed <- ifelse(weather_daily$Rainfall_mm > 0.1, "yes", "no")
+  hourly <- data.frame(
+    time          = as.POSIXct(resp$hourly$time, format = "%Y-%m-%dT%H:%M", tz = TZ),
+    precipitation = resp$hourly$precipitation,
+    cloudcover    = resp$hourly$cloudcover,
+    weather_label = sapply(resp$hourly$weathercode, weathercode_to_label)
+  )
 
-metadata <- merge(metadata, weather_daily,
-                   by = c("GPS_UTM_36M_East", "GPS_UTM_36M_North", "Start_Date"), all.x = TRUE)
+  for (i in group_rows) {
+    session_hours <- hourly[hourly$time >= metadata$t_first_rec_start[i] &
+                             hourly$time <= metadata$t_last_rec_end[i], ]
+    if (nrow(session_hours) == 0) next
+
+    metadata$Rainfall_mm[i]         <- sum(session_hours$precipitation, na.rm = TRUE)
+    metadata$Rain_computed[i]       <- ifelse(metadata$Rainfall_mm[i] > 0.1, "yes", "no")
+    metadata$Cloudcover_mean_pct[i] <- mean(session_hours$cloudcover, na.rm = TRUE)
+
+    label_pct <- table(factor(session_hours$weather_label, levels = WEATHER_LABELS)) / nrow(session_hours) * 100
+    for (label in WEATHER_LABELS) metadata[[paste0("pct_hours_", tolower(label))]][i] <- unname(label_pct[label])
+    metadata$Weather_dominant[i] <- names(which.max(label_pct))
+  }
+}
 
 # Returns exactly one value for `mask`, or NA if no match, or the mean (with a
 # warning identifying the session) if more than one row matches unexpectedly.
@@ -187,6 +165,41 @@ safe_extract <- function(vec, mask, label) {
 }
 
 full_metadata <- NULL
+
+metadata$t_meas_set <- NA
+metadata$t_meas_retr <- NA
+metadata$T_ch0_set_C <- NA
+metadata$T_mid_set_C <- NA
+metadata$T_ch7_set_C <- NA
+metadata$DO_ch0_set_AS <- NA
+metadata$DO_mid_set_AS <- NA
+metadata$DO_ch7_set_AS <- NA
+metadata$pH_ch0_set <- NA
+metadata$pH_mid_set <- NA
+metadata$pH_ch7_set <- NA
+metadata$Conductivity_ch0_set_uS <- NA
+metadata$Conductivity_mid_set_uS <- NA
+metadata$Conductivity_ch7_set_uS <- NA
+metadata$Depth_ch0_set_cm <- NA
+metadata$Depth_mid_set_cm <- NA
+metadata$Depth_ch7_set_cm <- NA
+metadata$Turbidity_set_NTU <- NA
+metadata$T_ch0_retr_C <- NA
+metadata$T_mid_retr_C <- NA
+metadata$T_ch7_retr_C <- NA
+metadata$DO_ch0_retr_AS <- NA
+metadata$DO_mid_retr_AS <- NA
+metadata$DO_ch7_retr_AS <- NA
+metadata$pH_ch0_retr <- NA
+metadata$pH_mid_retr <- NA
+metadata$pH_ch7_retr <- NA
+metadata$Conductivity_ch0_retr_uS <- NA
+metadata$Conductivity_mid_retr_uS <- NA
+metadata$Conductivity_ch7_retr_uS <- NA
+metadata$Depth_ch0_retr_cm <- NA
+metadata$Depth_mid_retr_cm <- NA
+metadata$Depth_ch7_retr_cm <- NA
+metadata$Turbidity_retr_NTU <- NA
 
 for(logger_id in unique(metadata$Logger_ID)){
   logger_sub <- subset(metadata, Logger_ID == logger_id)
