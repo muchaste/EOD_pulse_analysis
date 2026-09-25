@@ -21,8 +21,6 @@ from scipy.signal import find_peaks
 from sklearn.cluster import DBSCAN
 from sklearn.decomposition import PCA
 from sklearn.metrics import pairwise_distances
-from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-from sklearn.model_selection import LeaveOneOut
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -30,7 +28,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from pulse_functions import (
     load_waveforms,
     normalize_waveforms,
-    save_waveforms
+    save_waveforms,
+    fit_species_classifier,
+    classify_fish_waveform
 )
 from parameter_gui import TrackingParameterConfigGUI
 
@@ -175,174 +175,40 @@ step_us = 1e6 / (96000.0 * interp_factor)
 print(f"\u2713 Width quantization step: {step_us:.2f} \u00b5s (96 kHz \u00d7 {interp_factor:.0f}\u00d7 interp)")
 
 # =============================================================================
-# SPECIES MATCHING: Load control reference library
+# SPECIES MATCHING: Load control reference library + fit classifier
 # =============================================================================
-reference_library = {}
+species_classifier = None
 lda = None
 pca_cls = None
 loo_accuracy = None
+ref_matrix = None
+ref_ids = []
+ref_species = []
+all_species_codes = []
+lda_sp_centroids = {}
+lda_sp_dist_thresholds = {}
+ref_pca_scores = None
 if use_species_matching:
     print("\n" + "="*70)
     print("LOADING CONTROL REFERENCE LIBRARY")
     print("="*70)
-    ctrl_concat_files = glob.glob(os.path.join(control_path, "*_eod_waveforms_concatenated.npz"))
-    ctrl_fixed_files  = glob.glob(os.path.join(control_path, "*_eod_waveforms.npz"))
-    # Build set of individual ids already covered by concat files to avoid double-loading
-    concat_ids = set(os.path.basename(f).replace("_eod_waveforms_concatenated.npz", "")
-                     for f in ctrl_concat_files)
-    # Merge: variable-length concat files + fixed-length files not already covered
-    ctrl_entries = [(ind_id, 'variable') for ind_id in concat_ids]
-    for f in ctrl_fixed_files:
-        ind_id = os.path.basename(f).replace("_eod_waveforms.npz", "")
-        if ind_id not in concat_ids:
-            ctrl_entries.append((ind_id, 'fixed'))
-
-    if not ctrl_entries:
-        print("\u26a0 No control waveform files found \u2014 species matching disabled")
-        use_species_matching = False
-    else:
-        for ind_id, wf_format in ctrl_entries:
-            table_file = os.path.join(control_path, f"{ind_id}_eod_table.csv")
-            if not os.path.exists(table_file):
-                print(f"  \u26a0 No eod_table for {ind_id}, skipping")
-                continue
-            ctrl_table = pd.read_csv(table_file)
-            if 'snippet_p1_idx' not in ctrl_table.columns or 'snippet_p2_idx' not in ctrl_table.columns:
-                print(f"  \u26a0 Missing p1/p2 idx columns in {ind_id}_eod_table.csv, skipping")
-                continue
-            wf_base = os.path.join(control_path, f"{ind_id}_eod_waveforms")
-            if wf_format == 'variable':
-                ctrl_wf_list = load_waveforms(wf_base, format='npz', length='variable')
-            else:
-                ctrl_wf_arr = np.load(wf_base + '.npz')['waveforms']
-                ctrl_wf_list = [ctrl_wf_arr[i] for i in range(ctrl_wf_arr.shape[0])]
-            if len(ctrl_wf_list) == 0:
-                print(f"  \u26a0 Empty waveforms for {ind_id}, skipping")
-                continue
-            ctrl_p1 = ctrl_table['snippet_p1_idx'].values
-            ctrl_p2 = ctrl_table['snippet_p2_idx'].values
-            if len(ctrl_wf_list) != len(ctrl_p1):
-                print(f"  \u26a0 Waveform/table count mismatch for {ind_id} "
-                      f"({len(ctrl_wf_list)} vs {len(ctrl_p1)}), skipping")
-                continue
-            ctrl_wf_norm = normalize_waveforms(
-                ctrl_wf_list, ctrl_p1, ctrl_p2,
-                method='p1_unity', crop_and_interpolate=True,
-                crop_factor=crop_factor, target_length=waveform_target_length
-            )
-            ctrl_wf_norm = np.array(ctrl_wf_norm)
-            ctrl_norms = np.linalg.norm(ctrl_wf_norm, axis=1, keepdims=True)
-            ctrl_norms[ctrl_norms == 0] = 1.0
-            ctrl_wf_l2 = ctrl_wf_norm / ctrl_norms
-            species_code = ind_id[:2].upper()
-            reference_library[ind_id] = {
-                'mean_wf':      ctrl_wf_l2.mean(axis=0),
-                'species_code': species_code
-            }
-            print(f"  \u2713 {ind_id} ({species_code}): {len(ctrl_wf_l2)} pulses")
-
-        print(f"\n\u2713 Reference library: {len(reference_library)} individual(s)")
-        species_counts = {}
-        for info in reference_library.values():
-            sp = info['species_code']
-            species_counts[sp] = species_counts.get(sp, 0) + 1
-        for sp, cnt in sorted(species_counts.items()):
-            print(f"  {sp}: {cnt} individual(s)")
-        ref_ids   = list(reference_library.keys())
-        ref_matrix = np.array([reference_library[rid]['mean_wf'] for rid in ref_ids])  # (N_ref, waveform_target_length)
-        ref_species = [reference_library[rid]['species_code'] for rid in ref_ids]
-        all_species_codes = sorted(set(ref_species))
-
-        # Fit PCA (dimensionality reduction) + LDA (species discriminant) on control reference
-        # mean waveforms once. This stable classifier is reused for every field event.
-        ref_species_arr = np.array(ref_species)
-        n_pca_cls = max(1, min(len(ref_matrix) - 1, waveform_target_length, 20))
-        if len(all_species_codes) >= 2:
-            pca_cls = PCA(n_components=n_pca_cls)
-            ref_pca_scores = pca_cls.fit_transform(ref_matrix)
-            lda = LinearDiscriminantAnalysis()
-            lda.fit(ref_pca_scores, ref_species_arr)
-            # Per-species centroid + distance threshold in LDA space for out-of-distribution detection.
-            # A field fish whose LDA coordinate exceeds the Nth percentile of intra-species
-            # control scatter is flagged uncertain regardless of softmax probability.
-            ctrl_lda_coords = lda.transform(ref_pca_scores)  # (N_ref, n_lda_axes)
-            lda_sp_centroids = {}
-            lda_sp_dist_thresholds = {}
-            for _sp in all_species_codes:
-                _sp_idx = np.where(ref_species_arr == _sp)[0]
-                _sp_coords = ctrl_lda_coords[_sp_idx]
-                _centroid = _sp_coords.mean(axis=0)
-                _dists = np.linalg.norm(_sp_coords - _centroid, axis=1)
-                lda_sp_centroids[_sp] = _centroid
-                lda_sp_dist_thresholds[_sp] = float(np.max(_dists) * lda_max_dist_factor) if len(_dists) > 0 else np.inf
-            print(f"\u2713 LDA fitted on {len(ref_matrix)} control mean waveforms "
-                  f"({len(all_species_codes)} species, {n_pca_cls} PCA components)")
-            for _sp in all_species_codes:
-                print(f"  {_sp}: LDA dist threshold ({lda_max_dist_factor:.1f}× max ctrl scatter) = {lda_sp_dist_thresholds[_sp]:.4f}")
-            # Leave-one-individual-out CV (each ref_matrix row = one individual mean waveform)
-            sp_counts_loo = {sp: int((ref_species_arr == sp).sum()) for sp in all_species_codes}
-            loo_feasible = all(c >= 2 for c in sp_counts_loo.values())
-            if loo_feasible:
-                loo = LeaveOneOut()
-                loo_correct = 0
-                loo_total = 0
-                loo_sp_correct = {sp: 0 for sp in all_species_codes}
-                loo_sp_total   = {sp: 0 for sp in all_species_codes}
-                for train_idx, test_idx in loo.split(ref_pca_scores):
-                    n_pca_cv = max(1, min(n_pca_cls, len(train_idx) - 1))
-                    pca_cv = PCA(n_components=n_pca_cv)
-                    scores_train = pca_cv.fit_transform(ref_matrix[train_idx])
-                    scores_test = pca_cv.transform(ref_matrix[test_idx])
-                    lda_cv = LinearDiscriminantAnalysis()
-                    lda_cv.fit(scores_train, ref_species_arr[train_idx])
-                    true_sp = ref_species_arr[test_idx][0]
-                    pred_sp = lda_cv.predict(scores_test)[0]
-                    is_correct = int(pred_sp == true_sp)
-                    loo_correct += is_correct
-                    loo_total += 1
-                    loo_sp_correct[true_sp] += is_correct
-                    loo_sp_total[true_sp] += 1
-                loo_accuracy = loo_correct / loo_total
-                print(f"✓ LOO CV accuracy: {loo_accuracy:.1%} ({loo_correct}/{loo_total})")
-                for sp in all_species_codes:
-                    sp_acc = loo_sp_correct[sp] / loo_sp_total[sp] if loo_sp_total[sp] > 0 else float('nan')
-                    print(f"  {sp}: {sp_acc:.1%} ({loo_sp_correct[sp]}/{loo_sp_total[sp]})")
-                loo_per_species = {
-                    sp: {
-                        'accuracy': loo_sp_correct[sp] / loo_sp_total[sp] if loo_sp_total[sp] > 0 else None,
-                        'correct':  loo_sp_correct[sp],
-                        'total':    loo_sp_total[sp],
-                    }
-                    for sp in all_species_codes
-                }
-            else:
-                loo_accuracy = None
-                loo_per_species = {}
-                print("⚠ LOO CV skipped: at least one species has only 1 individual")
-
-            # Save classifier report so each batch run has a record of the model used
-            classifier_report = {
-                'waveform_target_length': waveform_target_length,
-                'crop_factor': crop_factor,
-                'n_pca_components': n_pca_cls,
-                'n_ref_individuals': len(ref_matrix),
-                'species_n_individuals': {
-                    sp: int((ref_species_arr == sp).sum()) for sp in all_species_codes
-                },
-                'loo_accuracy': loo_accuracy,
-                'loo_per_species': loo_per_species,
-                'ref_individuals': ref_ids,
-            }
-            classifier_report_path = os.path.join(output_folder, 'classifier_report.json')
-            with open(classifier_report_path, 'w') as _f:
-                json.dump(classifier_report, _f, indent=2)
-            print(f"✓ Saved classifier report: {os.path.basename(classifier_report_path)}")
-        else:
-            lda = None
-            pca_cls = None
-            loo_accuracy = None
-            print("⚠ Only 1 species in reference library — LDA disabled, using 1-NN fallback")
-            print("\u26a0 Only 1 species in reference library \u2014 LDA disabled, using 1-NN fallback")
+    species_classifier = fit_species_classifier(
+        control_path, waveform_target_length, crop_factor,
+        lda_max_dist_factor=lda_max_dist_factor, output_folder=output_folder
+    )
+    use_species_matching = species_classifier is not None
+    if species_classifier is not None:
+        ref_matrix             = species_classifier['ref_matrix']
+        ref_ids                = species_classifier['ref_ids']
+        ref_species            = species_classifier['ref_species']
+        all_species_codes      = species_classifier['all_species_codes']
+        pca_cls                = species_classifier['pca_cls']
+        lda                    = species_classifier['lda']
+        lda_sp_centroids       = species_classifier['lda_sp_centroids']
+        lda_sp_dist_thresholds = species_classifier['lda_sp_dist_thresholds']
+        loo_accuracy           = species_classifier['loo_accuracy']
+        if pca_cls is not None:
+            ref_pca_scores = pca_cls.transform(ref_matrix)
 
 #%%
 # =============================================================================
@@ -1051,7 +917,7 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
     # -------------------------------------------------------------------------
     # Species assignment: LDA (PCA -> LDA on control means) or 1-NN fallback
     # -------------------------------------------------------------------------
-    if use_species_matching and len(reference_library) > 0:
+    if use_species_matching and species_classifier is not None:
         print("\nAssigning species...")
         eod_data['species_assigned'] = ''
         eod_data['species_uncertain'] = False
@@ -1059,6 +925,8 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
         eod_data['dist_nearest'] = np.nan
         eod_data['dist_margin'] = np.nan
         if lda is not None:
+            eod_data['lda_dist_centroid'] = np.nan
+            eod_data['lda_dist_threshold'] = np.nan
             for sp in lda.classes_:
                 eod_data[f'lda_proba_{sp}'] = np.nan
         else:
@@ -1069,45 +937,33 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
         for fid in fish_ids_for_matching:
             fid_mask = eod_data['fish_id'] == fid
             track_mean_wf = waveforms_l2[fid_mask].mean(axis=0)  # (waveform_target_length,)
-            # L2 distances to each control individual (kept for nearest_individual / dist diagnostics)
-            dists = np.linalg.norm(ref_matrix - track_mean_wf[None, :], axis=1)  # (N_ref,)
-            nn_idx = int(np.argmin(dists))
-            nn_dist = float(dists[nn_idx])
-            sorted_dists = np.sort(dists)
-            margin = float(sorted_dists[1] - sorted_dists[0]) if len(sorted_dists) > 1 else np.nan
-            eod_data.loc[fid_mask, 'nearest_individual'] = ref_ids[nn_idx]
-            eod_data.loc[fid_mask, 'dist_nearest']       = nn_dist
-            eod_data.loc[fid_mask, 'dist_margin']        = margin
+            cls_result = classify_fish_waveform(track_mean_wf, species_classifier, lda_min_probability)
+            eod_data.loc[fid_mask, 'nearest_individual'] = cls_result['nearest_individual']
+            eod_data.loc[fid_mask, 'dist_nearest']       = cls_result['dist_nearest']
+            eod_data.loc[fid_mask, 'dist_margin']        = cls_result['dist_margin']
+            eod_data.loc[fid_mask, 'species_assigned']   = cls_result['species_assigned']
+            eod_data.loc[fid_mask, 'species_uncertain']  = cls_result['species_uncertain']
             if lda is not None:
-                track_pca_s = pca_cls.transform(track_mean_wf[None, :])
-                sp_pred = lda.predict(track_pca_s)[0]
-                sp_proba = lda.predict_proba(track_pca_s)[0]
-                track_lda_coord = lda.transform(track_pca_s)[0]  # (n_lda_axes,)
-                lda_dist = float(np.linalg.norm(track_lda_coord - lda_sp_centroids[sp_pred]))
-                dist_threshold = lda_sp_dist_thresholds[sp_pred]
-                # eod_data.loc[fid_mask, 'species_assigned'] = sp_pred
-                eod_data.loc[fid_mask, 'lda_dist_centroid'] = lda_dist
+                lda_dist = cls_result['lda_dist_centroid']
+                dist_threshold = cls_result['lda_dist_threshold']
+                eod_data.loc[fid_mask, 'lda_dist_centroid']  = lda_dist
                 eod_data.loc[fid_mask, 'lda_dist_threshold'] = dist_threshold
-                for sp, p in zip(lda.classes_, sp_proba):
-                    eod_data.loc[fid_mask, f'lda_proba_{sp}'] = float(p)
-                assigned_proba = float(sp_proba[list(lda.classes_).index(sp_pred)])
-                uncertain = (assigned_proba < lda_min_probability) or (lda_dist > dist_threshold)
-                eod_data.loc[fid_mask, 'species_uncertain'] = uncertain
-                uncertain_flag = " (!)" if uncertain else ""
+                for sp in lda.classes_:
+                    eod_data.loc[fid_mask, f'lda_proba_{sp}'] = cls_result[f'lda_proba_{sp}']
+                uncertain_flag = " (!)" if cls_result['species_uncertain'] else ""
                 dist_flag = f", LDA_d={lda_dist:.3f}/>{dist_threshold:.3f}" if lda_dist > dist_threshold else f", LDA_d={lda_dist:.3f}"
-                print(f"  Fish {fid:2d}: {sp_pred}{uncertain_flag} (p={assigned_proba:.3f}{dist_flag}, "
-                      f"nearest: {ref_ids[nn_idx]}, dist={nn_dist:.4f}, margin={margin:.4f})")
-                eod_data.loc[fid_mask, 'species_assigned'] =  f'{sp_pred}?' if uncertain else sp_pred
-
+                print(f"  Fish {fid:2d}: {cls_result['species_assigned'].rstrip('?')}{uncertain_flag} "
+                      f"(p={cls_result['lda_proba_assigned']:.3f}{dist_flag}, "
+                      f"nearest: {cls_result['nearest_individual']}, dist={cls_result['dist_nearest']:.4f}, "
+                      f"margin={cls_result['dist_margin']:.4f})")
             else:
                 # 1-NN fallback when only 1 species in reference library
-                eod_data.loc[fid_mask, 'species_assigned'] = ref_species[nn_idx]
                 for sp in all_species_codes:
-                    sp_mask_idx = [i for i, s in enumerate(ref_species) if s == sp]
-                    if sp_mask_idx:
-                        eod_data.loc[fid_mask, f'dist_{sp}'] = float(dists[sp_mask_idx].min())
-                print(f"  Fish {fid:2d}: {ref_species[nn_idx]} (nearest: {ref_ids[nn_idx]}, "
-                      f"dist={nn_dist:.4f}, margin={margin:.4f})")
+                    key = f'dist_{sp}'
+                    if key in cls_result:
+                        eod_data.loc[fid_mask, key] = cls_result[key]
+                print(f"  Fish {fid:2d}: {cls_result['species_assigned']} (nearest: {cls_result['nearest_individual']}, "
+                      f"dist={cls_result['dist_nearest']:.4f}, margin={cls_result['dist_margin']:.4f})")
 
     # -------------------------------------------------------------------------
     # Step 6: Summary and validation plot
@@ -1240,7 +1096,7 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
     ax_pca.set_title('PCA of waveforms (colored by fish ID)')
 
     # LDA discriminant space: control individual means + per-track means
-    if use_species_matching and lda is not None and len(reference_library) > 0 and n_assigned > 0:
+    if use_species_matching and lda is not None and species_classifier is not None and n_assigned > 0:
         sp_pal = plt.cm.Set3(np.linspace(0, 0.9, max(len(all_species_codes), 1)))
         sp_color_map_pca = {sp: sp_pal[i] for i, sp in enumerate(all_species_codes)}
         n_lda_axes = len(lda.classes_) - 1
@@ -1452,6 +1308,8 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
                 fish_rec['lda_proba_assigned'] = fish_rec[
                     f'lda_proba_{fish_rec["species_assigned"].rstrip("?")}'
                 ]
+                fish_rec['lda_dist_centroid']  = float(eod_data.loc[fid_mask_sum, 'lda_dist_centroid'].iloc[0])
+                fish_rec['lda_dist_threshold'] = float(eod_data.loc[fid_mask_sum, 'lda_dist_threshold'].iloc[0])
             else:
                 for sp in all_species_codes:
                     fish_rec[f'dist_{sp}'] = float(

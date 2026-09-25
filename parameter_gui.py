@@ -8,6 +8,7 @@ file paths, and machine learning settings for EOD pulse extraction scripts.
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import configparser
+import json
 import os
 
 
@@ -1128,6 +1129,235 @@ class TrackingParameterConfigGUI:
                 print(f"Configuration automatically saved to: {cfg_path}")
             except Exception as e:
                 print(f"Failed to automatically save configuration: {e}")
+        self.parent.quit()
+        self.parent.destroy()
+
+    def on_cancel(self):
+        self.result = None
+        self.parent.quit()
+        self.parent.destroy()
+
+
+class ClassificationParameterConfigGUI:
+    """
+    GUI for configuring species reclassification parameters (standalone reclassification
+    script). Reuses an already-tracked session's fish + stored mean waveforms without
+    re-running tracking; only classification thresholds are user-adjustable.
+    waveform_target_length/crop_factor are locked to the original tracking run's values,
+    read from that session's classifier_report.json.
+    """
+
+    def __init__(self, parent):
+        self.parent = parent
+        self.parent.title("Species Reclassification - Parameter Configuration")
+
+        main_frame = ttk.Frame(parent, padding="10")
+        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(0, weight=1)
+        main_frame.columnconfigure(0, weight=1)
+
+        self.param_vars = {}
+        self.path_vars = {}
+        current_row = 0
+
+        # Config file management
+        config_frame = ttk.LabelFrame(main_frame, text="Configuration File", padding="10")
+        config_frame.grid(row=current_row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
+        current_row += 1
+        ttk.Button(config_frame, text="Load Config", command=self.load_config).grid(row=0, column=0, padx=5)
+        ttk.Button(config_frame, text="Save Config", command=self.save_config).grid(row=0, column=1, padx=5)
+
+        # Paths
+        path_frame = ttk.LabelFrame(main_frame, text="File and Folder Paths", padding="10")
+        path_frame.grid(row=current_row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
+        current_row += 1
+
+        ttk.Label(path_frame, text="Tracked Session Folder (04_1 output):").grid(row=0, column=0, sticky=tk.W)
+        self.path_vars['input_path'] = tk.StringVar()
+        ttk.Entry(path_frame, textvariable=self.path_vars['input_path'], width=55).grid(row=0, column=1, padx=5)
+        ttk.Button(path_frame, text="Browse",
+                   command=lambda: self.browse_folder('input_path', callback=self._load_locked_params)).grid(
+            row=0, column=2)
+
+        ttk.Label(path_frame, text="Control Reference Library Folder:").grid(row=1, column=0, sticky=tk.W)
+        self.path_vars['control_path'] = tk.StringVar()
+        ttk.Entry(path_frame, textvariable=self.path_vars['control_path'], width=55).grid(row=1, column=1, padx=5)
+        ttk.Button(path_frame, text="Browse",
+                   command=lambda: self.browse_folder('control_path')).grid(row=1, column=2)
+
+        ttk.Label(path_frame, text="Output Folder (new/versioned, not overwritten):").grid(row=2, column=0, sticky=tk.W)
+        self.path_vars['output_path'] = tk.StringVar()
+        ttk.Entry(path_frame, textvariable=self.path_vars['output_path'], width=55).grid(row=2, column=1, padx=5)
+        ttk.Button(path_frame, text="Browse",
+                   command=lambda: self.browse_folder('output_path')).grid(row=2, column=2)
+
+        # Locked normalization params, read-only, loaded from classifier_report.json
+        locked_frame = ttk.LabelFrame(main_frame, text="Waveform Normalization (locked to original tracking run)",
+                                      padding="10")
+        locked_frame.grid(row=current_row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
+        current_row += 1
+
+        ttk.Label(locked_frame, text="Target Length (samples):").grid(row=0, column=0, sticky=tk.W, pady=2)
+        self.param_vars['waveform_target_length'] = tk.StringVar(value='')
+        ttk.Entry(locked_frame, textvariable=self.param_vars['waveform_target_length'], width=10,
+                 state='readonly').grid(row=0, column=1, sticky=tk.W, padx=5)
+
+        ttk.Label(locked_frame, text="Crop Factor:").grid(row=0, column=2, sticky=tk.W, pady=2)
+        self.param_vars['crop_factor'] = tk.StringVar(value='')
+        ttk.Entry(locked_frame, textvariable=self.param_vars['crop_factor'], width=10,
+                 state='readonly').grid(row=0, column=3, sticky=tk.W, padx=5)
+
+        self._locked_status_label = ttk.Label(locked_frame, text="(select tracked session folder to load)")
+        self._locked_status_label.grid(row=1, column=0, columnspan=4, sticky=tk.W, pady=2)
+
+        # Classification thresholds
+        thresh_frame = ttk.LabelFrame(main_frame, text="Classification Thresholds", padding="10")
+        thresh_frame.grid(row=current_row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
+        current_row += 1
+
+        ttk.Label(thresh_frame, text="Min LDA Probability Threshold (0\u20131):").grid(
+            row=0, column=0, sticky=tk.W, pady=2)
+        self.param_vars['lda_min_probability'] = tk.DoubleVar(value=0.0)
+        ttk.Entry(thresh_frame, textvariable=self.param_vars['lda_min_probability'], width=10).grid(
+            row=0, column=1, sticky=tk.W, padx=5)
+
+        ttk.Label(thresh_frame, text="Max LDA Distance Factor (\u00d7 ctrl max scatter):").grid(
+            row=1, column=0, sticky=tk.W, pady=2)
+        self.param_vars['lda_max_dist_factor'] = tk.DoubleVar(value=1.5)
+        ttk.Entry(thresh_frame, textvariable=self.param_vars['lda_max_dist_factor'], width=10).grid(
+            row=1, column=1, sticky=tk.W, padx=5)
+
+        # Action buttons
+        button_frame = ttk.Frame(main_frame, padding="10")
+        button_frame.grid(row=current_row, column=0, columnspan=3, pady=10)
+        ttk.Button(button_frame, text="Start Reclassification", command=self.on_ok).grid(row=0, column=0, padx=5)
+        ttk.Button(button_frame, text="Cancel", command=self.on_cancel).grid(row=0, column=1, padx=5)
+
+        self.result = None
+        self._locked_values = {}
+
+    def browse_folder(self, var_name, callback=None):
+        folder = filedialog.askdirectory(title=f"Select {var_name.replace('_', ' ').title()}")
+        if folder:
+            self.path_vars[var_name].set(folder)
+            if callback is not None:
+                callback()
+
+    def _load_locked_params(self):
+        report_path = os.path.join(self.path_vars['input_path'].get(), 'classifier_report.json')
+        if not os.path.exists(report_path):
+            self._locked_status_label.config(text="\u26a0 classifier_report.json not found in this folder")
+            self._locked_values = {}
+            self.param_vars['waveform_target_length'].set('')
+            self.param_vars['crop_factor'].set('')
+            return
+        try:
+            with open(report_path, 'r') as f:
+                report = json.load(f)
+            self._locked_values = {
+                'waveform_target_length': int(report['waveform_target_length']),
+                'crop_factor': int(report['crop_factor']),
+            }
+            self.param_vars['waveform_target_length'].set(str(self._locked_values['waveform_target_length']))
+            self.param_vars['crop_factor'].set(str(self._locked_values['crop_factor']))
+            self._locked_status_label.config(text=f"\u2713 Loaded from {os.path.basename(report_path)}")
+        except Exception as e:
+            self._locked_status_label.config(text=f"\u26a0 Failed to read classifier_report.json: {e}")
+            self._locked_values = {}
+
+    def save_config(self):
+        filename = filedialog.asksaveasfilename(
+            title="Save Configuration",
+            defaultextension=".cfg",
+            filetypes=[("Config files", "*.cfg"), ("All files", "*.*")]
+        )
+        if not filename:
+            return
+        config = configparser.ConfigParser()
+        config['Paths'] = {k: v.get() for k, v in self.path_vars.items()}
+        config['Parameters'] = {
+            'lda_min_probability': str(self.param_vars['lda_min_probability'].get()),
+            'lda_max_dist_factor': str(self.param_vars['lda_max_dist_factor'].get()),
+        }
+        try:
+            with open(filename, 'w') as f:
+                config.write(f)
+            messagebox.showinfo("Success", f"Configuration saved to:\n{filename}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save configuration:\n{e}")
+
+    def load_config(self):
+        filename = filedialog.askopenfilename(
+            title="Load Configuration",
+            filetypes=[("Config files", "*.cfg"), ("All files", "*.*")]
+        )
+        if not filename:
+            return
+        config = configparser.ConfigParser()
+        try:
+            config.read(filename)
+            if 'Paths' in config:
+                for key in self.path_vars:
+                    if key in config['Paths']:
+                        self.path_vars[key].set(config['Paths'][key])
+            if 'Parameters' in config:
+                if 'lda_min_probability' in config['Parameters']:
+                    self.param_vars['lda_min_probability'].set(config['Parameters'].getfloat('lda_min_probability'))
+                if 'lda_max_dist_factor' in config['Parameters']:
+                    self.param_vars['lda_max_dist_factor'].set(config['Parameters'].getfloat('lda_max_dist_factor'))
+            self._load_locked_params()
+            messagebox.showinfo("Success", f"Configuration loaded from:\n{filename}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load configuration:\n{e}")
+
+    def validate_inputs(self):
+        errors = []
+        input_path = self.path_vars['input_path'].get()
+        if not input_path:
+            errors.append("Tracked session folder is required")
+        elif not os.path.exists(input_path):
+            errors.append("Tracked session folder does not exist")
+        if not self.path_vars['control_path'].get():
+            errors.append("Control reference library folder is required")
+        elif not os.path.exists(self.path_vars['control_path'].get()):
+            errors.append("Control reference library folder does not exist")
+        output_path = self.path_vars['output_path'].get()
+        if not output_path:
+            errors.append("Output folder is required")
+        elif input_path and os.path.abspath(output_path) == os.path.abspath(input_path):
+            errors.append("Output folder must differ from the tracked session folder (no overwrite in place)")
+        if not self._locked_values:
+            errors.append("waveform_target_length/crop_factor could not be loaded \u2014 select a valid tracked session folder")
+        if errors:
+            messagebox.showerror("Validation Error", "\n".join(errors))
+            return False
+        return True
+
+    def on_ok(self):
+        if not self.validate_inputs():
+            return
+        self.result = {
+            'paths': {k: v.get() for k, v in self.path_vars.items()},
+            'parameters': {
+                'lda_min_probability': self.param_vars['lda_min_probability'].get(),
+                'lda_max_dist_factor': self.param_vars['lda_max_dist_factor'].get(),
+                'waveform_target_length': self._locked_values['waveform_target_length'],
+                'crop_factor': self._locked_values['crop_factor'],
+            }
+        }
+        output_folder = self.path_vars['output_path'].get()
+        os.makedirs(output_folder, exist_ok=True)
+        cfg_path = os.path.join(output_folder, "config.cfg")
+        config = configparser.ConfigParser()
+        config['Paths'] = {k: v.get() for k, v in self.path_vars.items()}
+        config['Parameters'] = {key: str(val) for key, val in self.result['parameters'].items()}
+        try:
+            with open(cfg_path, 'w') as f:
+                config.write(f)
+            print(f"Configuration automatically saved to: {cfg_path}")
+        except Exception as e:
+            print(f"Failed to automatically save configuration: {e}")
         self.parent.quit()
         self.parent.destroy()
 
