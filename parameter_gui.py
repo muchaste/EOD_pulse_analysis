@@ -11,15 +11,59 @@ import configparser
 import json
 import os
 
+# Field-extraction parameter presets per pulse_mode. Monophasic (eel) values are
+# first-pass estimates ported from Suriname_2024_eodlogger/old/1_Extract Eel EODs main.py
+# and will likely need hands-on retuning against real recordings.
+FIELD_BIPHASIC_PRESET = {
+    'thresh': 0.02,
+    'bandpass_low_cutoff': 100,
+    'bandpass_high_cutoff': 15000,
+    'min_rel_slope_diff': 0.25,
+    'min_width_us': 30,
+    'max_width_us': 1000,
+    'width_fac_detection': 7.0,
+    'duplicate_samples': 5,
+    'interp_factor': 3,
+    'amplitude_ratio_min': 0.2,
+    'amplitude_ratio_max': 4.0,
+    'peak_fft_freq_min': 100,
+    'peak_fft_freq_max': 15000,
+    'extraction_window_length_us': 4000,
+    'extraction_window_factor': 10.0,
+    'search_window': 10,
+    'extraction_window': 'fixed',
+}
+
+FIELD_MONOPHASIC_PRESET = {
+    'thresh': 0.01,
+    'bandpass_low_cutoff': 20,
+    'bandpass_high_cutoff': 500,
+    'min_rel_slope_diff': 0.25,
+    'min_width_us': 300,
+    'max_width_us': 2000,
+    'width_fac_detection': 7.0,
+    'duplicate_samples': 5,
+    'interp_factor': 3,
+    'amplitude_ratio_min': 1.0,
+    'amplitude_ratio_max': 50.0,
+    'peak_fft_freq_min': 40,
+    'peak_fft_freq_max': 400,
+    'extraction_window_length_us': 3000,
+    'extraction_window_factor': 10.0,
+    'search_window': 15,
+    'extraction_window': 'fixed',
+}
+
 
 class ParameterConfigGUI:
     """
     Comprehensive GUI for configuring all analysis parameters, paths, and ML settings.
     """
     
-    def __init__(self, parent):
+    def __init__(self, parent, default_mode='biphasic'):
         self.parent = parent
         self.parent.title("EOD Pulse Extraction - Parameter Configuration")
+        self.default_mode = default_mode
         
         # Create main frame with scrollbar
         main_frame = ttk.Frame(parent, padding="10")
@@ -205,6 +249,17 @@ class ParameterConfigGUI:
                                     values=['fixed', 'variable'], state='readonly', width=12)
         length_combo.grid(row=next_row+3, column=4, sticky=tk.W, padx=5)
         
+        # Pulse Mode preset selector (species-specific defaults)
+        ttk.Label(pulse_frame, text="Pulse Mode:", font=('TkDefaultFont', 9, 'bold')).grid(
+            row=next_row+4, column=3, sticky=tk.W, pady=2)
+        self.param_vars['pulse_mode'] = tk.StringVar(value=self.default_mode)
+        pulse_mode_combo = ttk.Combobox(pulse_frame, textvariable=self.param_vars['pulse_mode'],
+                                        values=['biphasic', 'monophasic'], state='readonly', width=12)
+        pulse_mode_combo.grid(row=next_row+4, column=4, sticky=tk.W, padx=5)
+        pulse_mode_combo.bind('<<ComboboxSelected>>', self.apply_pulse_mode_preset)
+        if self.default_mode == 'monophasic':
+            self.apply_pulse_mode_preset()
+        
         # ===== EVENT CREATION PARAMETERS =====
         event_frame = ttk.LabelFrame(scrollable_frame, text="Event Creation Parameters", padding="10")
         event_frame.grid(row=current_row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
@@ -314,6 +369,14 @@ class ParameterConfigGUI:
         state = 'normal' if self.param_vars['create_events'].get() else 'disabled'
         for widget in self.event_param_widgets:
             widget.config(state=state)
+    
+    def apply_pulse_mode_preset(self, event=None):
+        """Apply the detection/filtering preset for the currently selected pulse mode."""
+        mode = self.param_vars['pulse_mode'].get()
+        preset = FIELD_BIPHASIC_PRESET if mode == 'biphasic' else FIELD_MONOPHASIC_PRESET
+        for key, value in preset.items():
+            if key in self.param_vars:
+                self.param_vars[key].set(value)
     
     def browse_folder(self, var_name):
         """Open folder selection dialog."""
