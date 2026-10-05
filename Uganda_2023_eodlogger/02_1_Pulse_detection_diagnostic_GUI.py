@@ -30,7 +30,59 @@ from pulse_functions import (extract_pulse_snippets,
                              filter_waveforms, 
                              filter_waveforms_with_classifier,
                              unify_across_channels,
-                             normalize_waveforms)
+                             normalize_waveforms,
+                             calc_fwhm_width)
+
+# Parameter presets per pulse_mode. Monophasic (eel) values are first-pass estimates
+# ported from Suriname_2024_eodlogger/old/1_Extract Eel EODs main.py and will likely
+# need hands-on retuning against real recordings.
+BIPHASIC_PRESET = {
+    'thresh': 1,
+    'min_rel_slope_diff': 0.25,
+    'min_width_us': 30,
+    'max_width_us': 1000,
+    'width_fac_detection': 7.0,
+    'interp_factor': 3,
+    'duplicate_samples': 5,
+    'amplitude_ratio_min': 0.2,
+    'amplitude_ratio_max': 4.0,
+    'save_filtered_out': False,
+    'peak_fft_freq_min': 50,
+    'peak_fft_freq_max': 13000,
+    'return_diff': True,
+    'use_pca': False,
+    'pca_interp_points': 300,
+    'pca_component': 0,
+    'symmetry_threshold': 0.2,
+    'length': 2000,
+    'length_extraction': 'variable',
+    'length_factor': 10,
+    'search_window': 10
+}
+
+MONOPHASIC_PRESET = {
+    'thresh': 0.5,
+    'min_rel_slope_diff': 0.25,
+    'min_width_us': 300,
+    'max_width_us': 2000,
+    'width_fac_detection': 7.0,
+    'interp_factor': 3,
+    'duplicate_samples': 5,
+    'amplitude_ratio_min': 1.0,
+    'amplitude_ratio_max': 50.0,
+    'save_filtered_out': False,
+    'peak_fft_freq_min': 40,
+    'peak_fft_freq_max': 400,
+    'return_diff': True,
+    'use_pca': False,
+    'pca_interp_points': 300,
+    'pca_component': 0,
+    'symmetry_threshold': 0.2,
+    'length': 3000,
+    'length_extraction': 'fixed',
+    'length_factor': 10,
+    'search_window': 15
+}
 
 # ML-related imports for classifier functionality
 try:
@@ -63,29 +115,8 @@ class PulseDiagnosticTool:
         self.full_data = None  # Store full data for subsetting (if reasonable size)
         
         # Default parameters (exactly from Script 03)
-        self.parameters = {
-            'thresh': 1,
-            'min_rel_slope_diff': 0.25,
-            'min_width_us': 30,
-            'max_width_us': 1000,
-            'width_fac_detection': 7.0,
-            'interp_factor': 3,
-            'duplicate_samples': 5,
-            'amplitude_ratio_min': 0.2,
-            'amplitude_ratio_max': 4.0,
-            'save_filtered_out': False,
-            'peak_fft_freq_min': 50,
-            'peak_fft_freq_max': 13000,
-            'return_diff': True,
-            'use_pca': False,
-            'pca_interp_points': 300,
-            'pca_component': 0,
-            'symmetry_threshold': 0.2,
-            'length': 2000,
-            'length_extraction': 'variable',
-            'length_factor': 10,
-            'search_window': 10
-        }
+        self.parameters = dict(BIPHASIC_PRESET)
+        self.parameters['pulse_mode'] = 'biphasic'
         
         # Time window parameters (0,0 means use full file)
         self.time_window = {'start_sec': 0.0, 'end_sec': 0.0}
@@ -185,6 +216,21 @@ class PulseDiagnosticTool:
         param_frame = ttk.LabelFrame(parent, text="Parameters", padding=5)
         param_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
+        # Pulse Mode preset selector (species-specific defaults)
+        pulse_mode_frame = ttk.Frame(param_frame)
+        pulse_mode_frame.pack(fill=tk.X, pady=(0, 5))
+        ttk.Label(pulse_mode_frame, text="Pulse Mode:", width=18).pack(side=tk.LEFT)
+        self.pulse_mode_var = tk.StringVar(value=self.parameters['pulse_mode'])
+        pulse_mode_dropdown = ttk.Combobox(
+            pulse_mode_frame,
+            textvariable=self.pulse_mode_var,
+            values=['biphasic', 'monophasic'],
+            state='readonly',
+            width=12
+        )
+        pulse_mode_dropdown.pack(side=tk.RIGHT)
+        pulse_mode_dropdown.bind('<<ComboboxSelected>>', self.on_pulse_mode_change)
+        
         # Create two-column layout for parameters
         param_columns_frame = ttk.Frame(param_frame)
         param_columns_frame.pack(fill=tk.BOTH, expand=True)
@@ -199,8 +245,8 @@ class PulseDiagnosticTool:
         
         # Parameter inputs split into two columns
         self.param_vars = {}
-        # Exclude length_extraction from automatic generation (will be a dropdown)
-        param_items = [(k, v) for k, v in self.parameters.items() if k != 'length_extraction']
+        # Exclude length_extraction and pulse_mode from automatic generation (dropdowns instead)
+        param_items = [(k, v) for k, v in self.parameters.items() if k not in ('length_extraction', 'pulse_mode')]
         mid_point = (len(param_items) + 1) // 2
         
         # Left column parameters
@@ -1025,6 +1071,18 @@ class PulseDiagnosticTool:
         self.ax.set_ylabel('Voltage')
         self.ax.grid(True, alpha=0.3)
         
+    def on_pulse_mode_change(self, event=None):
+        """Apply the preset parameters for the newly selected pulse mode."""
+        mode = self.pulse_mode_var.get()
+        preset = BIPHASIC_PRESET if mode == 'biphasic' else MONOPHASIC_PRESET
+        self.parameters = dict(preset)
+        self.parameters['pulse_mode'] = mode
+        for param, var in self.param_vars.items():
+            if param in self.parameters:
+                var.set(str(self.parameters[param]))
+        self.return_diff_var.set(str(self.parameters['return_diff']))
+        self.length_extraction_var.set(self.parameters['length_extraction'])
+
     def update_parameters(self):
         """Update parameters from GUI inputs"""
         try:
@@ -1045,6 +1103,9 @@ class PulseDiagnosticTool:
 
             # Update length_extraction from dropdown
             self.parameters['length_extraction'] = self.length_extraction_var.get()
+
+            # Update pulse_mode from dropdown
+            self.parameters['pulse_mode'] = self.pulse_mode_var.get()
                     
         except ValueError as e:
             messagebox.showerror("Parameter Error", f"Invalid parameter value: {str(e)}")
@@ -1199,7 +1260,8 @@ class PulseDiagnosticTool:
                     window_factor=int(self.parameters['length_factor']),
                     window_length=self.parameters['length'],
                     search_window=self.parameters['search_window'],
-                    symmetry_threshold=self.parameters.get('symmetry_threshold', 0.3)
+                    symmetry_threshold=self.parameters.get('symmetry_threshold', 0.3),
+                    pulse_mode=self.parameters['pulse_mode']
                 )
 
                 print(f"    Filtering for differential pulses...{len(unique_pulses)} total, {np.sum(is_differential)} differential")
@@ -1221,6 +1283,12 @@ class PulseDiagnosticTool:
                     pulse_orientation, amplitude_ratios, fft_peak_freqs, pulse_locations,
                     wf_lengths, snippet_p3_idc, final_p3_idc, self.parameters
                 )
+
+                # Monophasic pulses: peak-to-trough distance misrepresents true pulse
+                # duration (small second phase), so use FWHM of the dominant phase instead.
+                if self.parameters['pulse_mode'] == 'monophasic':
+                    eod_widths = calc_fwhm_width(
+                        eod_waveforms, snippet_p1_idc, rate, interp_factor=self.parameters['interp_factor'])
 
                 # Filter clipped and low-quality pulses
                 clip_thresh = self.clip_threshold.get()
