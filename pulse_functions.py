@@ -196,7 +196,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
                            source, return_differential=True, interp_factor=1,
                            use_pca=False, pca_component=0, pca_interp_points=100,
                            window_mode="fixed", window_factor=7, window_length = 4000,
-                           search_window=10, symmetry_threshold=0.3):
+                           search_window=10, symmetry_threshold=0.3, pulse_mode='biphasic'):
     """
     Extract and analyze EOD snippets with variable widths based on detected pulse widths.
     For 2-D multi-channel data (finds polarity flips and extracts differential signals OR
@@ -222,6 +222,12 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
         Whether to keep only differential pulses (default True, ignored if use_pca=True)
     interp_factor : int
         Interpolation factor for waveform extraction (default 1, no interpolation)
+    pulse_mode : str, optional
+        'biphasic' (default) : P1/P2 and orientation assigned by temporal order (peak vs.
+        trough comes first) - original behavior, for weakly electric fish pulses.
+        'monophasic' : P1/P2 and orientation assigned by amplitude dominance (the larger-
+        magnitude extremum is P1 regardless of time order) - for electric eel pulses, where
+        the dominant phase is not necessarily first in time.
     use_pca : bool
         If True, use PCA-based extraction with spatial interpolation instead of differential.
         This method reduces noise by projecting multi-channel data onto principal components
@@ -594,27 +600,42 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
         # Calculate peak-to-trough amplitude
         eod_amp = abs(snippet[snippet_peak_idx] - snippet[snippet_trough_idx])
 
-        # Determine pulse orientation based on peak and trough indices
-        if snippet_trough_idx < snippet_peak_idx:
-            pulse_orientation = 'HN'  # Head-negative (trough before peak)
+        if pulse_mode == 'monophasic':
+            # Dominant phase (larger magnitude) is P1 regardless of temporal order
+            if abs(snippet[snippet_peak_idx]) >= abs(snippet[snippet_trough_idx]):
+                pulse_orientation = 'HP'  # Head-positive (dominant phase is the peak)
+                snippet_p1_idc.append(snippet_peak_idx)
+                snippet_p2_idc.append(snippet_trough_idx)
+                final_p1_idc.append(filtered_peak_idc[i])
+                final_p2_idc.append(filtered_trough_idc[i])
+                amplitude_ratio = abs(snippet[snippet_peak_idx] / snippet[snippet_trough_idx]) if snippet[snippet_trough_idx] != 0 else np.inf
+            else:
+                pulse_orientation = 'HN'  # Head-negative (dominant phase is the trough)
+                snippet_p1_idc.append(snippet_trough_idx)
+                snippet_p2_idc.append(snippet_peak_idx)
+                final_p1_idc.append(filtered_trough_idc[i])
+                final_p2_idc.append(filtered_peak_idc[i])
+                amplitude_ratio = abs(snippet[snippet_trough_idx] / snippet[snippet_peak_idx]) if snippet[snippet_peak_idx] != 0 else np.inf
         else:
-            pulse_orientation = 'HP'  # Head-positive (peak before trough)
+            # Determine pulse orientation based on temporal order of peak and trough
+            if snippet_trough_idx < snippet_peak_idx:
+                pulse_orientation = 'HN'  # Head-negative (trough before peak)
+            else:
+                pulse_orientation = 'HP'  # Head-positive (peak before trough)
 
-        # Calculate amplitude ratio and determine p1 and p2
-        if pulse_orientation == 'HP':
-            snippet_p1_idc.append(snippet_peak_idx)
-            snippet_p2_idc.append(snippet_trough_idx)
-            final_p1_idc.append(filtered_peak_idc[i])
-            final_p2_idc.append(filtered_trough_idc[i])
-            amplitude_ratio = abs(snippet[snippet_peak_idx] / snippet[snippet_trough_idx]) if snippet[snippet_trough_idx] != 0 else np.inf
-        else:
-            snippet_p1_idc.append(snippet_trough_idx)
-            snippet_p2_idc.append(snippet_peak_idx)
-            final_p1_idc.append(filtered_trough_idc[i])
-            final_p2_idc.append(filtered_peak_idc[i])
-            amplitude_ratio = abs(snippet[snippet_trough_idx] / snippet[snippet_peak_idx]) if snippet[snippet_peak_idx] != 0 else np.inf
-
-        # amplitude_ratio = abs(snippet[snippet_peak_idx] / snippet[snippet_trough_idx]) if snippet[snippet_trough_idx] != 0 else np.inf
+            # Calculate amplitude ratio and determine p1 and p2
+            if pulse_orientation == 'HP':
+                snippet_p1_idc.append(snippet_peak_idx)
+                snippet_p2_idc.append(snippet_trough_idx)
+                final_p1_idc.append(filtered_peak_idc[i])
+                final_p2_idc.append(filtered_trough_idc[i])
+                amplitude_ratio = abs(snippet[snippet_peak_idx] / snippet[snippet_trough_idx]) if snippet[snippet_trough_idx] != 0 else np.inf
+            else:
+                snippet_p1_idc.append(snippet_trough_idx)
+                snippet_p2_idc.append(snippet_peak_idx)
+                final_p1_idc.append(filtered_trough_idc[i])
+                final_p2_idc.append(filtered_peak_idc[i])
+                amplitude_ratio = abs(snippet[snippet_trough_idx] / snippet[snippet_peak_idx]) if snippet[snippet_peak_idx] != 0 else np.inf
 
         # Calculate FFT peak frequency for the processed waveform
         if len(snippet) > 0:
@@ -1198,6 +1219,67 @@ def calc_fft_peak(signal, rate, lower_thresh=0, upper_thresh=100000, zero_paddin
     peak_freq = freqs[valid_idx][np.argmax(np.abs(fft_spectrum[valid_idx]))]
 
     return peak_freq
+
+def calc_fwhm_width(eod_waveforms, snippet_p1_idc, rate, interp_factor=1):
+    """
+    Calculate the full width at half maximum (FWHM) of the dominant phase (P1) for each
+    waveform. Intended for monophasic (electric eel) pulses, where peak-to-trough distance
+    does not represent the true pulse duration since the second phase is small and close by.
+
+    Parameters
+    ----------
+    eod_waveforms : list of 1-D arrays
+        Variable-length waveform snippets, as returned by extract_pulse_snippets().
+    snippet_p1_idc : 1-D array
+        Index of the dominant phase (P1) within each snippet, as returned by
+        extract_pulse_snippets().
+    rate : int
+        Sample rate of the original signal (before interpolation).
+    interp_factor : int, optional
+        Interpolation factor applied to the waveforms (default 1, no interpolation).
+
+    Returns
+    -------
+    fwhm_widths : 1-D array
+        FWHM width in microseconds for each waveform.
+    """
+    wf_rate = rate * interp_factor
+    fwhm_widths = np.full(len(eod_waveforms), np.nan)
+
+    for i, snippet in enumerate(eod_waveforms):
+        p1_idx = snippet_p1_idc[i]
+        if len(snippet) == 0 or p1_idx < 0 or p1_idx >= len(snippet):
+            continue
+
+        p1_val = snippet[p1_idx]
+        half_max = abs(p1_val) / 2
+        signed_snippet = snippet if p1_val >= 0 else -snippet
+
+        # Search left from P1 for the half-max crossing
+        left_idx = p1_idx
+        while left_idx > 0 and signed_snippet[left_idx - 1] > half_max:
+            left_idx -= 1
+        if left_idx > 0:
+            y0, y1 = signed_snippet[left_idx - 1], signed_snippet[left_idx]
+            frac = (half_max - y0) / (y1 - y0) if (y1 - y0) != 0 else 0
+            left_crossing = (left_idx - 1) + frac
+        else:
+            left_crossing = left_idx
+
+        # Search right from P1 for the half-max crossing
+        right_idx = p1_idx
+        while right_idx < len(signed_snippet) - 1 and signed_snippet[right_idx + 1] > half_max:
+            right_idx += 1
+        if right_idx < len(signed_snippet) - 1:
+            y0, y1 = signed_snippet[right_idx], signed_snippet[right_idx + 1]
+            frac = (half_max - y0) / (y1 - y0) if (y1 - y0) != 0 else 0
+            right_crossing = right_idx + frac
+        else:
+            right_crossing = right_idx
+
+        fwhm_widths[i] = (right_crossing - left_crossing) * 1e6 / wf_rate
+
+    return fwhm_widths
 
 def remove_proximity_duplicates(arrays_dict, proximity_threshold=3):
     """
