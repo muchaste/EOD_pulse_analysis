@@ -37,7 +37,8 @@ from pulse_functions import (
     create_channel_events,
     merge_channel_events,
     filter_events,
-    create_event_plots
+    create_event_plots,
+    calc_fwhm_width
 )
 
 # Import parameter configuration GUI
@@ -400,7 +401,8 @@ for n, filepath in enumerate(file_set['filename']):
                 window_factor = parameters['extraction_window_factor'],
                 window_length = parameters['extraction_window_length_us'],
                 search_window = parameters['search_window'],
-                symmetry_threshold=parameters.get('symmetry_threshold', 0.3)
+                symmetry_threshold=parameters.get('symmetry_threshold', 0.3),
+                pulse_mode=parameters.get('pulse_mode', 'biphasic')
             )
         elif parameters['waveform_extraction'] == 'PCA':
             (
@@ -416,12 +418,19 @@ for n, filepath in enumerate(file_set['filename']):
                 window_mode = parameters['extraction_window'],
                 window_factor = parameters['extraction_window_factor'],
                 window_length = parameters['extraction_window_length_us'],
-                search_window = parameters['search_window']
+                search_window = parameters['search_window'],
+                pulse_mode=parameters.get('pulse_mode', 'biphasic')
             )
 
         if len(eod_snippets) == 0:
             print("    No valid EOD snippets extracted after waveform extraction")
             continue
+
+        # Monophasic pulses: peak-to-trough distance misrepresents true pulse duration
+        # (small second phase), so use FWHM of the dominant phase instead.
+        if parameters.get('pulse_mode', 'biphasic') == 'monophasic':
+            eod_widths = calc_fwhm_width(
+                eod_snippets, snippet_p1_idc, rate, interp_factor=parameters['interp_factor'])
 
         # Filter first — eliminates noise before the O(n·k) dedup walk
         if use_ml_filtering and loaded_classifier is not None and loaded_scaler is not None:
