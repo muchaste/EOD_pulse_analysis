@@ -31,7 +31,8 @@ from pulse_functions import (extract_pulse_snippets,
                              filter_waveforms_with_classifier,
                              unify_across_channels,
                              normalize_waveforms,
-                             calc_fwhm_width)
+                             calc_fwhm_width,
+                             detect_monophasic_pulses)
 
 # Parameter presets per pulse_mode. Monophasic (eel) values are first-pass estimates
 # ported from Suriname_2024_eodlogger/old/1_Extract Eel EODs main.py and will likely
@@ -42,6 +43,7 @@ BIPHASIC_PRESET = {
     'min_width_us': 30,
     'max_width_us': 1000,
     'width_fac_detection': 7.0,
+    'min_distance_us': 2000,
     'interp_factor': 3,
     'duplicate_samples': 5,
     'amplitude_ratio_min': 0.2,
@@ -49,7 +51,6 @@ BIPHASIC_PRESET = {
     'save_filtered_out': False,
     'peak_fft_freq_min': 50,
     'peak_fft_freq_max': 13000,
-    'return_diff': True,
     'use_pca': False,
     'pca_interp_points': 300,
     'pca_component': 0,
@@ -66,6 +67,7 @@ MONOPHASIC_PRESET = {
     'min_width_us': 300,
     'max_width_us': 2000,
     'width_fac_detection': 7.0,
+    'min_distance_us': 2000,
     'interp_factor': 3,
     'duplicate_samples': 5,
     'amplitude_ratio_min': 1.0,
@@ -73,7 +75,6 @@ MONOPHASIC_PRESET = {
     'save_filtered_out': False,
     'peak_fft_freq_min': 40,
     'peak_fft_freq_max': 400,
-    'return_diff': True,
     'use_pca': False,
     'pca_interp_points': 300,
     'pca_component': 0,
@@ -1188,17 +1189,29 @@ class PulseDiagnosticTool:
                 else:
                     ch_data = data_detect[:, pair_idx]
 
-                ch_peaks, ch_troughs, _, ch_pulse_widths = pulses.detect_pulses(
-                    ch_data, 
-                    rate,
-                    thresh=self.parameters['thresh'], 
-                    min_rel_slope_diff=self.parameters['min_rel_slope_diff'],
-                    min_width=self.parameters['min_width_us'] / 1e6,
-                    max_width=self.parameters['max_width_us'] / 1e6,
-                    width_fac=self.parameters['width_fac_detection'],
-                    verbose=0,
-                    return_data=False
-                )
+                if self.parameters['pulse_mode'] == 'monophasic':
+                    # Simple threshold peak-finding instead of thunderfish's biphasic
+                    # peak-trough slope-pairing model (see detect_monophasic_pulses docstring).
+                    ch_peaks, ch_troughs, _, ch_pulse_widths = detect_monophasic_pulses(
+                        ch_data,
+                        rate,
+                        thresh=self.parameters['thresh'],
+                        min_width_us=self.parameters['min_width_us'],
+                        max_width_us=self.parameters['max_width_us'],
+                        min_distance_us=self.parameters['min_distance_us']
+                    )
+                else:
+                    ch_peaks, ch_troughs, _, ch_pulse_widths = pulses.detect_pulses(
+                        ch_data, 
+                        rate,
+                        thresh=self.parameters['thresh'], 
+                        min_rel_slope_diff=self.parameters['min_rel_slope_diff'],
+                        min_width=self.parameters['min_width_us'] / 1e6,
+                        max_width=self.parameters['max_width_us'] / 1e6,
+                        width_fac=self.parameters['width_fac_detection'],
+                        verbose=0,
+                        return_data=False
+                    )
                 all_peaks.append(ch_peaks)
                 all_troughs.append(ch_troughs)
                 all_widths.append(ch_pulse_widths)
