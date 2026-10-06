@@ -428,13 +428,22 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
                     pulse_locations.append(0.0)
                     location_appended = True
             elif source == 'multich_linear':
-                snippet = np.diff(data[start_idx:end_idx, filtered_eod_chans[i]:filtered_eod_chans[i]+2]).flatten()
-                diff_location = _estimate_differential_pulse_location(
-                    data, peak_idx, trough_idx, filtered_eod_chans[i], n_channels
-                )
-                # diff_location, _, _ = _estimate_gaussian_pulse_location(
-                #     data, peak_idx, trough_idx, n_channels
-                # )
+                # Only true differential pulses (is_differential==1) have a valid channel
+                # pair (filtered_eod_chans[i], +1); single-ended fallback (0) and no-flip
+                # "noise" (-1) pulses must use the selected channel directly, otherwise
+                # diffing against a nonexistent/unrelated neighbour silently returns an
+                # empty snippet (e.g. when the edge channel n_channels-1 is selected).
+                if filtered_is_differential[i] == 1:
+                    snippet = np.diff(data[start_idx:end_idx, filtered_eod_chans[i]:filtered_eod_chans[i]+2]).flatten()
+                    diff_location = _estimate_differential_pulse_location(
+                        data, peak_idx, trough_idx, filtered_eod_chans[i], n_channels
+                    )
+                elif filtered_is_differential[i] == 0:
+                    snippet = data[start_idx:end_idx, filtered_eod_chans[i]].flatten()
+                    diff_location = float(filtered_eod_chans[i])
+                else:
+                    snippet = np.array([])
+                    diff_location = -1.0
                 if attempt == 0:
                     pulse_locations.append(diff_location)
                     location_appended = True
@@ -1280,6 +1289,103 @@ def calc_fwhm_width(eod_waveforms, snippet_p1_idc, rate, interp_factor=1):
         fwhm_widths[i] = (right_crossing - left_crossing) * 1e6 / wf_rate
 
     return fwhm_widths
+
+def detect_monophasic_pulses(data, rate, thresh, min_width_us=300, max_width_us=10000,
+                              min_distance_us=2000, pair_search_us=None):
+    """
+    Detect monophasic (electric eel) pulses via simple threshold peak-finding, instead of
+    thunderfish.pulses.detect_pulses()'s biphasic peak-trough slope-pairing model. Each
+    pulse is the locally dominant extremum (positive or negative) above `thresh`; a
+    companion extremum of the opposite polarity is located nearby so the output stays
+    peak/trough-pair compatible with the rest of the pipeline (unify_across_channels,
+    extract_pulse_snippets).
+
+    Parameters
+    ----------
+    data : 1-D array
+        Single-channel (or differential-pair) signal to detect pulses in.
+    rate : int
+        Sampling rate.
+    thresh : float
+        Minimum absolute amplitude for a candidate extremum.
+    min_width_us, max_width_us : float, optional
+        Pulse width bounds in microseconds, applied as a coarse rel_height=0.5 width
+        pre-filter at detection time (default 300-10000).
+    min_distance_us : float, optional
+        Minimum time between two distinct pulses in microseconds (refractory period,
+        default 2000). Weaker candidates within this distance of a stronger one are
+        discarded (non-max suppression).
+    pair_search_us : float, optional
+        Window (in microseconds, each side of the dominant extremum) to search for the
+        companion opposite-polarity extremum. Defaults to max_width_us.
+
+    Returns
+    -------
+    peaks : 1-D array of int
+        Indices of local maxima (one per pulse: the dominant extremum itself if
+        positive-dominant, otherwise its companion).
+    troughs : 1-D array of int
+        Indices of local minima (one per pulse: the dominant extremum itself if
+        negative-dominant, otherwise its companion).
+    heights : 1-D array of float
+        Absolute amplitude of the dominant extremum for each pulse.
+    widths : 1-D array of int
+        Width in samples (rel_height=0.5) of the dominant extremum, matching the units
+        convention of thunderfish.pulses.detect_pulses().
+    """
+    if pair_search_us is None:
+        pair_search_us = max_width_us
+
+    min_distance_samp = max(1, int(min_distance_us * rate / 1e6))
+    min_width_samp = max(1, int(min_width_us * rate / 1e6))
+    max_width_samp = max(min_width_samp + 1, int(max_width_us * rate / 1e6))
+    pair_search_samp = max(1, int(pair_search_us * rate / 1e6))
+
+    pos_idx, pos_props = find_peaks(data, height=thresh, distance=min_distance_samp,
+                                     width=(min_width_samp, max_width_samp), rel_height=0.5)
+    neg_idx, neg_props = find_peaks(-data, height=thresh, distance=min_distance_samp,
+                                     width=(min_width_samp, max_width_samp), rel_height=0.5)
+
+    cand_idx = np.concatenate([pos_idx, neg_idx])
+    if len(cand_idx) == 0:
+        return (np.array([], dtype=int), np.array([], dtype=int),
+                np.array([]), np.array([], dtype=int))
+
+    cand_height = np.concatenate([pos_props['peak_heights'], neg_props['peak_heights']])
+    cand_width = np.concatenate([pos_props['widths'], neg_props['widths']])
+    cand_sign = np.concatenate([np.ones(len(pos_idx), dtype=int), -np.ones(len(neg_idx), dtype=int)])
+
+    # Non-max suppression: strongest candidates win within min_distance_samp
+    order = np.argsort(-cand_height)
+    accepted_mask = np.zeros(len(cand_idx), dtype=bool)
+    accepted_positions = []
+    for i in order:
+        pos = cand_idx[i]
+        if all(abs(pos - a) >= min_distance_samp for a in accepted_positions):
+            accepted_mask[i] = True
+            accepted_positions.append(pos)
+
+    time_order = np.argsort(cand_idx[accepted_mask])
+    dom_idx = cand_idx[accepted_mask][time_order]
+    dom_height = cand_height[accepted_mask][time_order]
+    dom_width = cand_width[accepted_mask][time_order]
+    dom_sign = cand_sign[accepted_mask][time_order]
+
+    peaks = np.zeros(len(dom_idx), dtype=int)
+    troughs = np.zeros(len(dom_idx), dtype=int)
+    for i in range(len(dom_idx)):
+        idx, sign = dom_idx[i], dom_sign[i]
+        win_start = max(0, idx - pair_search_samp)
+        win_end = min(len(data), idx + pair_search_samp)
+        window = data[win_start:win_end]
+        if sign > 0:
+            peaks[i] = idx
+            troughs[i] = win_start + int(np.argmin(window))
+        else:
+            troughs[i] = idx
+            peaks[i] = win_start + int(np.argmax(window))
+
+    return peaks, troughs, dom_height, dom_width.astype(int)
 
 def remove_proximity_duplicates(arrays_dict, proximity_threshold=3):
     """
