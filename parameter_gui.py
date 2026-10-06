@@ -33,6 +33,9 @@ FIELD_BIPHASIC_PRESET = {
     'extraction_window_factor': 10.0,
     'search_window': 10,
     'extraction_window': 'fixed',
+    'return_diff': True,
+    'waveform_extraction': 'Differential',
+    'ignore_channel': False,
 }
 
 FIELD_MONOPHASIC_PRESET = {
@@ -52,8 +55,11 @@ FIELD_MONOPHASIC_PRESET = {
     'peak_fft_freq_max': 400,
     'extraction_window_length_us': 3000,
     'extraction_window_factor': 10.0,
-    'search_window': 15,
+    'search_window': 200,
     'extraction_window': 'fixed',
+    'return_diff': False,
+    'waveform_extraction': 'Differential',
+    'ignore_channel': True,
 }
 
 
@@ -311,6 +317,7 @@ class ParameterConfigGUI:
             ('merge_events', 'Merge Channel Events', True),
             ('pre_merge_filtering', 'Filter Before Merging', True),
             ('post_merge_filtering', 'Filter After Merging', True),
+            ('ignore_channel', 'Ignore Channel (time-only clustering)', False),
         ]
         
         for i, (key, label, default) in enumerate(event_boolean_params):
