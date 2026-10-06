@@ -22,6 +22,7 @@ FIELD_BIPHASIC_PRESET = {
     'min_width_us': 30,
     'max_width_us': 1000,
     'width_fac_detection': 7.0,
+    'min_distance_us': 2000,
     'duplicate_samples': 5,
     'interp_factor': 3,
     'amplitude_ratio_min': 0.2,
@@ -42,6 +43,7 @@ FIELD_MONOPHASIC_PRESET = {
     'min_width_us': 300,
     'max_width_us': 2000,
     'width_fac_detection': 7.0,
+    'min_distance_us': 2000,
     'duplicate_samples': 5,
     'interp_factor': 3,
     'amplitude_ratio_min': 1.0,
@@ -186,6 +188,7 @@ class ParameterConfigGUI:
             ('min_width_us', 'Min Pulse Width (μs):', 30, float),
             ('max_width_us', 'Max Pulse Width (μs):', 1000, float),
             ('width_fac_detection', 'Width Factor for Detection:', 7.0, float),
+            ('min_distance_us', 'Min Pulse Distance (μs, monophasic only):', 2000, float),
             ('duplicate_samples', 'Duplicate Removal Samples:', 5, int)
         ]
         
