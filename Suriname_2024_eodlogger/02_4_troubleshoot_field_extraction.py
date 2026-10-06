@@ -1,9 +1,11 @@
 """
 02_4_troubleshoot_field_extraction.py (Suriname eel adaptation)
 Re-extracts EODs from a single calibrated event WAV for diagnostic purposes.
-Uses the same monophasic-aware pulse extraction functions as
-Suriname_2024_eodlogger/02_3_Pulse_extraction_field.py (detect_monophasic_pulses,
-calc_fwhm_width, pulse_mode-aware extract_pulse_snippets).
+Mirrors the current 02_3_Pulse_extraction_field.py pipeline: return_diff selects the
+extraction mode (differential pair selection vs single-ended largest-peak selection,
+see pulse_functions._select_differential_channel_pointwise /
+_select_best_singleended_channel), pulse_mode independently selects the detection
+algorithm (thunderfish vs detect_monophasic_pulses) and width/orientation logic.
 Run stepwise in Spyder using #%% cell markers.
 No event creation, no file saving.
 """
@@ -66,8 +68,8 @@ if "Parameters" in config:
         else:
             parameters[key] = float(val)
 
-# Default to monophasic for this eel troubleshooting copy if not present in an older config.
-parameters.setdefault("pulse_mode", "monophasic")
+# Defaults for configs saved before pulse_mode/min_distance_us existed.
+parameters.setdefault("pulse_mode", "biphasic")
 parameters.setdefault("min_distance_us", 2000)
 
 use_ml_filtering = False
@@ -125,7 +127,8 @@ plt.show()
 
 #%% -- FULL FILE PLOT (SINGLE-ENDED) ------------------------------------------
 # Monophasic/single-electrode-dominant pulses can be large on one raw channel while
-# barely visible in its neighbouring differential pairs - check both views.
+# barely visible in its neighbouring differential pairs - check both views regardless
+# of which extraction mode (return_diff) you intend to run below.
 
 offset_se = np.max(np.abs(data)) * 1.5
 
@@ -145,8 +148,8 @@ plt.show()
 # Edit t_start_s and t_end_s, then re-run this cell and all cells below.
 # Set both to 0.0 to use the full file.
 
-t_start_s = 60.0
-t_end_s = 70.0
+t_start_s = 0.0
+t_end_s = 0.0
 
 s_idx = int(t_start_s * rate)
 e_idx = int(t_end_s * rate) if t_end_s > 0 else len(data)
@@ -185,31 +188,37 @@ plt.tight_layout()
 plt.show()
 
 #%% -- DETECT ----------------------------------------------------------------
-# pulse_mode_override is read from config but can be overridden here for comparison.
-# monophasic: scipy-based detect_monophasic_pulses, run on BOTH differential pairs AND
-#   raw single-ended channels, so pulses dominant on one electrode (no clean pair flip)
-#   are not missed by differential-only detection.
-# biphasic: thunderfish.pulses.detect_pulses, differential pairs only (original behaviour).
+# return_diff selects WHICH signal detection runs on (differential pairs vs raw
+# single-ended channels) - same role as in 02_3. pulse_mode independently selects the
+# detection algorithm (detect_monophasic_pulses vs thunderfish.pulses.detect_pulses)
+# applied to whichever signal is chosen here. Both can be overridden here manually and
+# re-run from this cell to compare behaviour.
 
-pulse_mode_override = parameters["pulse_mode"]   # override: 'monophasic' or 'biphasic'
-print(f"pulse_mode = {pulse_mode_override}")
+return_diff_override = parameters["return_diff"]
+pulse_mode_override = parameters["pulse_mode"]
+print(f"return_diff = {return_diff_override}, pulse_mode = {pulse_mode_override}")
 
 enable_bp = parameters.get("enable_bandpass_filter", False)
 bp_low = parameters.get("bandpass_low_cutoff", 300)
 bp_high = parameters.get("bandpass_high_cutoff", 2000)
 
+if return_diff_override:
+    detect_signal_source = data_diff
+    detect_indices = list(range(n_channels - 1))
+else:
+    detect_signal_source = detection_data
+    detect_indices = list(range(n_channels))
+
 peaks_list = []
 troughs_list = []
 widths_list = []
-detect_source_list = []   # 'diff' or 'single', for bookkeeping/printing only
-detect_chan_list = []
 
-def _maybe_bandpass(sig):
-    return bandpass_filter(sig, rate, bp_low, bp_high) if enable_bp else sig
+for ch_idx in detect_indices:
+    sig = detect_signal_source[:, ch_idx]
+    if enable_bp:
+        sig = bandpass_filter(sig, rate, bp_low, bp_high)
 
-if pulse_mode_override == "monophasic":
-    for pair_idx in range(n_channels - 1):
-        sig = _maybe_bandpass(data_diff[:, pair_idx])
+    if pulse_mode_override == "monophasic":
         ch_peaks, ch_troughs, _, ch_widths = detect_monophasic_pulses(
             sig, rate,
             thresh=parameters["thresh"],
@@ -217,25 +226,7 @@ if pulse_mode_override == "monophasic":
             max_width_us=parameters["max_width_us"],
             min_distance_us=parameters["min_distance_us"]
         )
-        peaks_list.append(ch_peaks); troughs_list.append(ch_troughs); widths_list.append(ch_widths)
-        detect_source_list.append("diff"); detect_chan_list.append(pair_idx)
-        print(f"  Diff pair {pair_idx} (Ch{pair_idx}-Ch{pair_idx+1}): {len(ch_peaks)} pulses detected")
-
-    for ch in range(n_channels):
-        sig = _maybe_bandpass(detection_data[:, ch])
-        ch_peaks, ch_troughs, _, ch_widths = detect_monophasic_pulses(
-            sig, rate,
-            thresh=parameters["thresh"],
-            min_width_us=parameters["min_width_us"],
-            max_width_us=parameters["max_width_us"],
-            min_distance_us=parameters["min_distance_us"]
-        )
-        peaks_list.append(ch_peaks); troughs_list.append(ch_troughs); widths_list.append(ch_widths)
-        detect_source_list.append("single"); detect_chan_list.append(ch)
-        print(f"  Single-ended Ch{ch}: {len(ch_peaks)} pulses detected")
-else:
-    for pair_idx in range(n_channels - 1):
-        sig = _maybe_bandpass(data_diff[:, pair_idx])
+    else:
         ch_peaks, ch_troughs, _, ch_widths = pulses.detect_pulses(
             sig, rate,
             thresh=parameters["thresh"],
@@ -246,9 +237,11 @@ else:
             verbose=0,
             return_data=False
         )
-        peaks_list.append(ch_peaks); troughs_list.append(ch_troughs); widths_list.append(ch_widths)
-        detect_source_list.append("diff"); detect_chan_list.append(pair_idx)
-        print(f"  Diff pair {pair_idx} (Ch{pair_idx}-Ch{pair_idx+1}): {len(ch_peaks)} pulses detected")
+    peaks_list.append(ch_peaks)
+    troughs_list.append(ch_troughs)
+    widths_list.append(ch_widths)
+    label = f"Ch{ch_idx}-{ch_idx+1}" if return_diff_override else f"Ch{ch_idx}"
+    print(f"  {label}: {len(ch_peaks)} pulses detected")
 
 unique_midpoints, unique_peaks, unique_troughs, unique_widths = unify_across_channels(
     peaks_list, troughs_list, widths_list,
@@ -258,11 +251,6 @@ print(f"After unification: {len(unique_midpoints)} unique pulses")
 del peaks_list, troughs_list, widths_list
 
 #%% -- EXTRACT ---------------------------------------------------------------
-# return_diff_override is read from config but can be overridden here.
-# Change it manually and re-run from this cell to compare behaviour.
-
-return_diff_override = parameters["return_diff"]   # override: True or False
-print(f"return_differential = {return_diff_override}")
 
 (
     eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
@@ -318,7 +306,6 @@ print(f"After filter: {len(keep_indices)} kept, {len(filtered_out_indices)} filt
 fo_raw_p1  = raw_p1_idc[filtered_out_indices]
 fo_raw_p2  = raw_p2_idc[filtered_out_indices]
 fo_eod_chan = eod_chan[filtered_out_indices]
-fo_is_differential = is_differential[filtered_out_indices]
 
 eod_snippets    = [eod_snippets[i] for i in keep_indices]
 eod_amps        = eod_amps[keep_indices]
@@ -357,7 +344,7 @@ print(f"After dedup: {len(eod_snippets)} pulses")
 def _channel_description(chan, is_diff):
     if is_diff == 1:
         return f"diff {chan}-{chan+1}"
-    elif is_diff == 0:
+    elif is_diff in (0, 2):
         return f"single ch{chan}"
     else:
         return "none (-1)"
@@ -377,89 +364,57 @@ eod_table = pd.DataFrame({
     "pulse_location":     pulse_locations,
 })
 
-print(f"\npulse_mode={pulse_mode_override}  return_differential={return_diff_override}")
-print(f"Total kept: {len(eod_table)}  |  is_diff=-1: {(is_differential==-1).sum()}  is_diff=0: {(is_differential==0).sum()}  is_diff=1: {(is_differential==1).sum()}")
+print(f"\npulse_mode={pulse_mode_override}  return_diff={return_diff_override}")
+print(f"Total kept: {len(eod_table)}  |  is_diff=-1: {(is_differential==-1).sum()}  is_diff=0/2: {((is_differential==0)|(is_differential==2)).sum()}  is_diff=1: {(is_differential==1).sum()}")
 print(eod_table.to_string())
 
-#%% -- DIAGNOSTIC PLOT (DIFFERENTIAL CHANNELS) --------------------------------
+#%% -- DIAGNOSTIC PLOT --------------------------------------------------------
+# A given run only ever produces one representation (return_diff is fixed for the whole
+# run), so - unlike the old dual-lane design - a single set of lanes covers every pulse.
 
-offset = np.max(np.abs(data_diff)) * 1.5
-n_diff_ch = n_channels - 1
+if return_diff_override:
+    offset = np.max(np.abs(data_diff)) * 1.5
+    n_plot_ch = n_channels - 1
+    plot_data = data_diff
+    ch_label_fmt = lambda ch: f"Ch{ch}-{ch+1}"
+    plot_title_prefix = "Differential"
+else:
+    offset = np.max(np.abs(detection_data)) * 1.5
+    n_plot_ch = n_channels
+    plot_data = detection_data
+    ch_label_fmt = lambda ch: f"Ch{ch}"
+    plot_title_prefix = "Single-ended"
 
 plt.figure(figsize=(20, 8))
-for ch in range(n_diff_ch):
-    step = max(1, len(data_diff) // 5000000)
-    x = (np.arange(0, len(data_diff), step) + s_idx) / rate
-    plt.plot(x, data_diff[::step, ch] + ch * offset, linewidth=0.5,
-             label=f"Ch{ch}-{ch+1}", color="steelblue")
+for ch in range(n_plot_ch):
+    step = max(1, len(plot_data) // 5000000)
+    x = (np.arange(0, len(plot_data), step) + s_idx) / rate
+    plt.plot(x, plot_data[::step, ch] + ch * offset, linewidth=0.5,
+             label=ch_label_fmt(ch), color="steelblue")
 
-    ch_mask = (eod_chan == ch) & (is_differential == 1)
+    ch_mask = eod_chan == ch
     if ch_mask.any():
         p1 = raw_p1_idc[ch_mask]
         p2 = raw_p2_idc[ch_mask]
-        plt.plot((p1 + s_idx) / rate, data_diff[p1, ch] + ch * offset,
+        plt.plot((p1 + s_idx) / rate, plot_data[p1, ch] + ch * offset,
                  "o", markersize=5, color="red", zorder=3)
-        plt.plot((p2 + s_idx) / rate, data_diff[p2, ch] + ch * offset,
+        plt.plot((p2 + s_idx) / rate, plot_data[p2, ch] + ch * offset,
                  "o", markersize=5, color="blue", zorder=3)
 
-    fo_ch_mask = (fo_eod_chan == ch) & (fo_is_differential == 1)
+    fo_ch_mask = fo_eod_chan == ch
     if fo_ch_mask.any():
         p1_fo = fo_raw_p1[fo_ch_mask]
         p2_fo = fo_raw_p2[fo_ch_mask]
-        plt.plot((p1_fo + s_idx) / rate, data_diff[p1_fo, ch] + ch * offset,
+        plt.plot((p1_fo + s_idx) / rate, plot_data[p1_fo, ch] + ch * offset,
                  "o", markersize=4, color="grey", alpha=0.6, zorder=2)
-        plt.plot((p2_fo + s_idx) / rate, data_diff[p2_fo, ch] + ch * offset,
+        plt.plot((p2_fo + s_idx) / rate, plot_data[p2_fo, ch] + ch * offset,
                  "o", markersize=4, color="grey", alpha=0.6, zorder=2)
 
-plt.ylim(-0.5 * offset, (n_diff_ch - 0.5) * offset)
+plt.ylim(-0.5 * offset, (n_plot_ch - 0.5) * offset)
 plt.xlabel("Time (s)")
 plt.ylabel("Voltage (offset)")
-# Subset counts only (is_differential==1) - this plot does not show single-ended pulses,
-# see the single-ended plot below for those. Grand totals shown for cross-reference.
-plt.title(f"Differential pulses only - {(is_differential==1).sum()}/{len(eod_table)} kept, "
-          f"{(fo_is_differential==1).sum()}/{len(filtered_out_indices)} grey=filtered (red=P1 blue=P2)")
+plt.title(f"{plot_title_prefix} - {len(eod_table)} kept (red=P1 blue=P2), {len(filtered_out_indices)} grey=filtered")
 plt.legend(loc="upper right", fontsize=7)
 plt.tight_layout()
 plt.show()
 
-#%% -- DIAGNOSTIC PLOT (SINGLE-ENDED CHANNELS) --------------------------------
-# is_differential==0 pulses are extracted directly from the raw channel (no diff), so
-# their P1/P2 markers must be plotted against detection_data, not data_diff.
-
-offset_se = np.max(np.abs(detection_data)) * 1.5
-
-plt.figure(figsize=(20, 8))
-for ch in range(n_channels):
-    step = max(1, len(detection_data) // 5000000)
-    x = (np.arange(0, len(detection_data), step) + s_idx) / rate
-    plt.plot(x, detection_data[::step, ch] + ch * offset_se, linewidth=0.5,
-             label=f"Ch{ch}", color="steelblue")
-
-    ch_mask = (eod_chan == ch) & (is_differential == 0)
-    if ch_mask.any():
-        p1 = raw_p1_idc[ch_mask]
-        p2 = raw_p2_idc[ch_mask]
-        plt.plot((p1 + s_idx) / rate, detection_data[p1, ch] + ch * offset_se,
-                 "o", markersize=5, color="red", zorder=3)
-        plt.plot((p2 + s_idx) / rate, detection_data[p2, ch] + ch * offset_se,
-                 "o", markersize=5, color="blue", zorder=3)
-
-    fo_ch_mask = (fo_eod_chan == ch) & (fo_is_differential == 0)
-    if fo_ch_mask.any():
-        p1_fo = fo_raw_p1[fo_ch_mask]
-        p2_fo = fo_raw_p2[fo_ch_mask]
-        plt.plot((p1_fo + s_idx) / rate, detection_data[p1_fo, ch] + ch * offset_se,
-                 "o", markersize=4, color="grey", alpha=0.6, zorder=2)
-        plt.plot((p2_fo + s_idx) / rate, detection_data[p2_fo, ch] + ch * offset_se,
-                 "o", markersize=4, color="grey", alpha=0.6, zorder=2)
-
-plt.ylim(-0.5 * offset_se, (n_channels - 0.5) * offset_se)
-plt.xlabel("Time (s)")
-plt.ylabel("Voltage (offset)")
-# Subset counts only (is_differential==0) - this plot does not show differential pulses,
-# see the differential plot above for those. Grand totals shown for cross-reference.
-plt.title(f"Single-ended pulses only - {(is_differential==0).sum()}/{len(eod_table)} kept, "
-          f"{(fo_is_differential==0).sum()}/{len(filtered_out_indices)} grey=filtered (red=P1 blue=P2)")
-plt.legend(loc="upper right", fontsize=7)
-plt.tight_layout()
-plt.show()
