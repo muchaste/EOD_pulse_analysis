@@ -319,11 +319,17 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
             eod_chans = np.zeros(n_pulses, dtype=int)  # Will be updated with peak electrode
             is_differential = np.full(n_pulses, 2, dtype=int)  # 2 = PCA method
         elif n_channels > 1:
-            print(f"    Extracting differential waveforms from {n_channels}-channel data...")
-            # Find differential channel with polarity flip
-            eod_chans, is_differential, _, cor_coefs = _select_differential_channel_pointwise(
-                data, n_channels, peaks, troughs,
-                symmetry_threshold=symmetry_threshold)
+            if return_differential:
+                print(f"    Extracting differential waveforms from {n_channels}-channel data...")
+                # Find differential channel with polarity flip
+                eod_chans, is_differential, _, cor_coefs = _select_differential_channel_pointwise(
+                    data, n_channels, peaks, troughs,
+                    symmetry_threshold=symmetry_threshold)
+            else:
+                print(f"    Extracting single-ended waveforms from {n_channels}-channel data...")
+                # Select largest-peak channel per pulse and refresh peak/trough to match it
+                eod_chans, is_differential, peaks, troughs = _select_best_singleended_channel(
+                    data, n_channels, peaks, troughs, search_window=search_window)
             n_pulses = len(eod_chans)
         else:
             print("    Single-channel data detected, skipping differential channel selection...")
@@ -429,10 +435,11 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
                     location_appended = True
             elif source == 'multich_linear':
                 # Only true differential pulses (is_differential==1) have a valid channel
-                # pair (filtered_eod_chans[i], +1); single-ended fallback (0) and no-flip
-                # "noise" (-1) pulses must use the selected channel directly, otherwise
-                # diffing against a nonexistent/unrelated neighbour silently returns an
-                # empty snippet (e.g. when the edge channel n_channels-1 is selected).
+                # pair (filtered_eod_chans[i], +1); single-ended pulses (0, from
+                # _select_best_singleended_channel) and no-flip "noise" (-1, from
+                # _select_differential_channel_pointwise) must use the selected channel
+                # directly, otherwise diffing against a nonexistent/unrelated neighbour
+                # silently returns an empty snippet (e.g. when the edge channel is selected).
                 if filtered_is_differential[i] == 1:
                     snippet = np.diff(data[start_idx:end_idx, filtered_eod_chans[i]:filtered_eod_chans[i]+2]).flatten()
                     diff_location = _estimate_differential_pulse_location(
@@ -440,7 +447,9 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
                     )
                 elif filtered_is_differential[i] == 0:
                     snippet = data[start_idx:end_idx, filtered_eod_chans[i]].flatten()
-                    diff_location = float(filtered_eod_chans[i])
+                    diff_location = _estimate_location_dipole_or_gaussian(
+                        data, peak_idx, trough_idx, n_channels
+                    )
                 else:
                     snippet = np.array([])
                     diff_location = -1.0
@@ -735,9 +744,11 @@ def _select_differential_channel_pointwise(data, n_channels, peaks, troughs, sym
     Returns
     -------
     eod_chan : 1-D array
-        Selected channel index
+        Selected differential channel-pair index, or -1 if no reliable flip found (noise).
+        Has no single-ended fallback - use `_select_best_singleended_channel()` instead
+        when `return_differential=False`.
     is_differential : 1-D array
-        1 if differential, 0 if single-ended
+        1 if a reliable polarity flip was found, -1 if not (noise)
     amps : 1-D array
         Amplitudes for each channel
     cor_coeffs : 2-D array
@@ -795,10 +806,11 @@ def _select_differential_channel_pointwise(data, n_channels, peaks, troughs, sym
                 is_differential[i] = 1
                 # print(f"Pulse {i}: Multiple flips, chosing highest amplitude difference")         
             elif len(flips) == 0:
-                # No flip: use channel with largest single-ended amplitude
-                eod_chan[i] = np.argmax(amps[i,:])
-                is_differential[i] = 0
-                # print(f"Pulse {i}: No flips, chosing largest single-ended amplitude")
+                # No flip anywhere: noise. Differential mode has no single-ended fallback -
+                # use return_differential=False / _select_best_singleended_channel() for that.
+                eod_chan[i] = -1
+                is_differential[i] = -1
+                # print(f"Pulse {i}: No flips, noise")
             elif len(flips) == 1:
                 # If there is no flip in differential channels, this is a noise pulse
                 if len(flips_diff) == 0:
@@ -1077,6 +1089,108 @@ def _fit_dipole_location(spatial_amplitudes):
             return x0, d, False
     except (RuntimeError, ValueError):
         return x0_guess, d_guess, False
+
+
+def _estimate_location_dipole_or_gaussian(data, ref_p1_idx, ref_p2_idx, n_channels):
+    """
+    Estimate single-ended pulse location along the electrode array. Prefers a Gaussian fit
+    on the per-channel signed amplitude profile - appropriate for the unipolar amplitude
+    falloff-with-distance typical of single-ended monophasic recordings. Only falls back to
+    the dipole model (`_fit_dipole_location`, more physically accurate for a genuine bipolar
+    field) when the amplitude profile actually crosses zero across the array - otherwise the
+    dipole fit has no real zero-crossing to anchor on and converges to a meaningless position
+    (confirmed empirically: a pure amplitude-falloff profile with no sign change pulls the
+    dipole fit toward whichever channel has the smallest amplitude).
+
+    Parameters
+    ----------
+    data : 2-D array
+        Multi-channel recording (samples x channels).
+    ref_p1_idx : int
+        Reference P1 sample index in the full recording.
+    ref_p2_idx : int
+        Reference P2 sample index in the full recording.
+    n_channels : int
+        Number of recording channels.
+
+    Returns
+    -------
+    location : float
+        Estimated location in electrode units [0, n_channels-1].
+    """
+    gaussian_loc, ch_amps, _ = _estimate_gaussian_pulse_location(data, ref_p1_idx, ref_p2_idx, n_channels)
+    has_sign_change = np.any(np.diff(np.sign(ch_amps)) != 0)
+    if has_sign_change:
+        dipole_loc, _, dipole_success = _fit_dipole_location(ch_amps)
+        if dipole_success:
+            return dipole_loc
+    return gaussian_loc
+
+
+def _select_best_singleended_channel(data, n_channels, peaks, troughs, search_window=200):
+    """
+    Select the best single-ended channel for each pulse when `return_differential=False`.
+    Unlike `_select_differential_channel_pointwise()`, this never rejects a pulse as noise -
+    every candidate is force-assigned to a channel; `filter_waveforms()` downstream is the
+    sole quality gate. Picks the channel with the largest ABSOLUTE PEAK (not amplitude range,
+    which can be inflated by DC drift/noise on a channel with no real pulse) within a window
+    around each candidate, then re-detects the true dominant peak/trough on that channel within
+    the same window - this allows for the pulse's apparent timing to shift slightly across
+    channels (e.g. propagation delay for a large fish near one end of the array).
+
+    Parameters
+    ----------
+    data : 2-D array
+        Multi-channel recording (samples x channels).
+    n_channels : int
+        Number of channels.
+    peaks : 1-D array
+        Candidate peak indices.
+    troughs : 1-D array
+        Candidate trough indices.
+    search_window : int, optional
+        Half-width (in samples) of the window used both to pick the winning channel and to
+        re-detect the dominant peak/trough on it (default 200).
+
+    Returns
+    -------
+    eod_chan : 1-D array
+        Winning channel index for each pulse (always a valid channel, never -1).
+    is_differential : 1-D array
+        Always 0 (single-ended) for every pulse.
+    refined_peaks : 1-D array
+        Re-detected peak index (on the winning channel) for each pulse.
+    refined_troughs : 1-D array
+        Re-detected trough index (on the winning channel) for each pulse.
+    """
+    n_pulses = len(peaks)
+    n_samples = data.shape[0]
+    eod_chan = np.zeros(n_pulses, dtype=int)
+    is_differential = np.zeros(n_pulses, dtype=int)
+    refined_peaks = np.zeros(n_pulses, dtype=int)
+    refined_troughs = np.zeros(n_pulses, dtype=int)
+
+    for i in range(n_pulses):
+        center_idx = (peaks[i] + troughs[i]) // 2
+        win_start = max(0, center_idx - search_window)
+        win_end = min(n_samples, center_idx + search_window)
+        window = data[win_start:win_end, :]
+
+        winning_ch = int(np.argmax(np.max(np.abs(window), axis=0)))
+        eod_chan[i] = winning_ch
+
+        win_signal = window[:, winning_ch]
+        local_idx = int(np.argmax(np.abs(win_signal)))
+        dom_idx = win_start + local_idx
+
+        if win_signal[local_idx] >= 0:
+            refined_peaks[i] = dom_idx
+            refined_troughs[i] = win_start + int(np.argmin(win_signal))
+        else:
+            refined_troughs[i] = dom_idx
+            refined_peaks[i] = win_start + int(np.argmax(win_signal))
+
+    return eod_chan, is_differential, refined_peaks, refined_troughs
 
 
 def _extract_pca_waveform(snippet_multichannel, pca_component=0, interp_points=300, 
@@ -2936,7 +3050,7 @@ def reclassify_session(input_path, output_path, species_classifier, lda_min_prob
 
 
 ############################### EVENT EXTRACTION ######################################
-def create_channel_events(eod_table, max_ipi_seconds, verbose=False):
+def create_channel_events(eod_table, max_ipi_seconds, ignore_channel=False, verbose=False):
     """
     Create channel-wise events from EOD detections using temporal clustering.
     
@@ -2946,6 +3060,13 @@ def create_channel_events(eod_table, max_ipi_seconds, verbose=False):
         DataFrame containing EOD detections with columns: 'timestamp', 'eod_channel', 'eod_amplitude'
     max_ipi_seconds : float
         Maximum inter-pulse interval for temporal clustering
+    ignore_channel : bool, default False
+        If True, cluster by time only across ALL pulses regardless of `eod_channel` (set this
+        for single-ended/monophasic extraction, where `_select_best_singleended_channel()`
+        assigns each pulse independently to whichever raw channel has the loudest peak at that
+        instant - channel identity is NOT spatially stable pulse-to-pulse the way it is for
+        differential tracking, so grouping strictly by channel fragments one continuous pulse
+        train into many small events that then fail min_eods_premerge/min_eods_postmerge).
     verbose : bool, default False
         Whether to print detailed processing information
         
@@ -2961,23 +3082,25 @@ def create_channel_events(eod_table, max_ipi_seconds, verbose=False):
     sorted_table = eod_table.sort_values('timestamp').copy()
     sorted_table['timestamp_dt'] = pd.to_datetime(sorted_table['timestamp'])
 
-    # STAGE 1: Extract channel-wise events using temporal criteria only
-    print("  Extracting events per channel ...")
-
     channel_events_list = []
     channel_event_counter = 0
 
-    # Get unique channels
-    channels = sorted(sorted_table['eod_channel'].unique())
-    print(f"  Processing {len(channels)} channels: {channels}")
+    if ignore_channel:
+        print("  Clustering by time only (ignore_channel=True - single-ended eod_channel is not spatially stable)...")
+        # Use a single pseudo-channel (0, not -1) so merge_channel_events' neighbour-channel
+        # logic (which skips channel < 0) still re-clusters this chain via max_merge_gap_seconds.
+        channel_groups = [(0, sorted_table)]
+    else:
+        # STAGE 1: Extract channel-wise events using temporal criteria only
+        print("  Extracting events per channel ...")
+        channels = sorted(sorted_table['eod_channel'].unique())
+        print(f"  Processing {len(channels)} channels: {channels}")
+        channel_groups = [(channel, sorted_table[sorted_table['eod_channel'] == channel].copy()) for channel in channels]
 
-    for channel in channels:
+    for channel, channel_eods in channel_groups:
         if verbose:
             print(f"    Processing channel {channel}...")
-        
-        # Get EODs for this channel
-        channel_eods = sorted_table[sorted_table['eod_channel'] == channel].copy()
-        
+
         if len(channel_eods) == 0:
             if verbose:
                 print(f"      No EODs found for channel {channel}")
