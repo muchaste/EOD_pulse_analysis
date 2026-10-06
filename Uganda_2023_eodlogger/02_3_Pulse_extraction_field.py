@@ -93,6 +93,8 @@ os.makedirs(output_path, exist_ok=True)
 # Load calibration factors
 cor_factors_all = pd.read_csv(cal_file)
 
+_total_eods_kept = 0  # Across all files - used for the zero-pulse guard rail at the end
+
 # Parameters for event creation
 if parameters['create_events']:
     print("Setting event extraction parameters...")
@@ -332,14 +334,20 @@ for n, filepath in enumerate(file_set['filename']):
         file_start_time = file_set['timestamp'][n]
         print(f"    Using file timestamp: {file_start_time}")
         
-    # Create differential data and determine detection channels
+    # Create detection signal(s) and determine which channels/pairs to scan.
+    # return_diff selects WHICH signal the loop below detects on (differential pairs vs
+    # raw single-ended channels); pulse_mode independently selects WHICH algorithm runs on it.
     if parameters['source'] == 'multich_linear':
-        data_diff = np.diff(detection_data, axis=1)
-        # Use only live adjacent pairs; _live_pair_indices preserves physical channel numbering
-        detect_pair_indices = _live_pair_indices
+        if parameters['return_diff']:
+            data_diff = np.diff(detection_data, axis=1)
+            # Use only live adjacent pairs; _live_pair_indices preserves physical channel numbering
+            detect_indices = _live_pair_indices
+        else:
+            data_diff = detection_data
+            detect_indices = list(_live_ch_0idx)
     elif parameters['source'] == '1ch_diff':
         data_diff = detection_data
-        detect_pair_indices = [0]
+        detect_indices = [0]
     else:
         raise ValueError(f"Unknown source: {parameters['source']}")
 
@@ -356,9 +364,9 @@ for n, filepath in enumerate(file_set['filename']):
     if enable_bp:
         print(f"    Applying bandpass filter ({bp_low}-{bp_high} Hz) for detection")
 
-    for pair_idx in detect_pair_indices:
+    for ch_idx in detect_indices:
         # Prepare signal for detection (optionally filtered)
-        detection_signal = data_diff[:, pair_idx]
+        detection_signal = data_diff[:, ch_idx]
         if enable_bp:
             detection_signal = bandpass_filter(detection_signal, rate, bp_low, bp_high)
 
@@ -545,6 +553,8 @@ for n, filepath in enumerate(file_set['filename']):
             print("    No valid EOD snippets remaining after duplicate removal")
             continue
 
+        _total_eods_kept += len(eod_snippets)
+
         # Build eod_table from post-filter, post-dedup arrays
         raw_midpoint_idc = (raw_p1_idc + raw_p2_idc) // 2
         snippet_midpoint_idc = (snippet_p1_idc + snippet_p2_idc) // 2
@@ -639,10 +649,8 @@ for n, filepath in enumerate(file_set['filename']):
                     eod_idc = np.arange(len(filtered_eod_waveforms))
 
                     offset = np.max(eod_table['eod_amplitude']) * 1.5
-                    filteredout_is_differential = pd.Series([], dtype=int)
                     if len(filtered_out_indices) > 0:
                         filteredout_eod_chan = filteredout_eod_table['eod_channel']
-                        filteredout_is_differential = filteredout_eod_table['is_differential']
                         filteredout_final_p1_idc = filteredout_eod_table['p1_idx']
                         filteredout_final_p2_idc = filteredout_eod_table['p2_idx']
 
@@ -692,34 +700,32 @@ for n, filepath in enumerate(file_set['filename']):
                                 fo_mask
                             )
                         plot_title = f'{fname} - Single-Ended EOD Detections (PCA) - Red=P1, Blue=P2, Grey=Filtered Out (n={len(eod_idc)} kept, {len(filtered_out_indices)} filtered)'
+                    elif parameters['return_diff']:
+                        # A differential run only ever produces is_differential in {1, -1}
+                        # (noise is already excluded from eod_table), so a single set of
+                        # differential-pair lanes covers every kept/filtered-out pulse.
+                        n_plot_lanes = data.shape[1] - 1
+                        for ch in range(n_plot_lanes):
+                            fo_mask = filteredout_eod_chan.values == ch if len(filtered_out_indices) > 0 else np.array([])
+                            _plot_channel_lane(
+                                np.diff(data[:, ch:ch+2]).flatten(), f'Ch{ch}-{ch+1}', ch,
+                                eod_table['eod_channel'].values == ch,
+                                fo_mask
+                            )
+                        plot_title = f'{fname} - Differential EOD Detections - Red=P1, Blue=P2, Grey=Filtered Out (n={len(eod_idc)} kept, {len(filtered_out_indices)} filtered)'
                     else:
-                        # Differential extraction can still contain single-ended fallback
-                        # pulses (is_differential==0) when return_diff=False - eod_channel
-                        # then means a raw channel index, not a differential pair index, so
-                        # those pulses need their own lanes instead of being plotted (wrongly)
-                        # on the differential-pair trace.
-                        n_diff_lanes = data.shape[1] - 1
-                        n_single_lanes = data.shape[1]
-                        n_plot_lanes = n_diff_lanes + n_single_lanes
-
-                        for ch in range(n_diff_lanes):
-                            fo_mask = ((filteredout_eod_chan.values == ch) & (filteredout_is_differential.values == 1)) \
-                                if len(filtered_out_indices) > 0 else np.array([])
+                        # A single-ended run (return_diff=False) always assigns a real raw
+                        # channel (_select_best_singleended_channel never returns -1), so a
+                        # single set of single-ended lanes covers every pulse.
+                        n_plot_lanes = data.shape[1]
+                        for ch in range(n_plot_lanes):
+                            fo_mask = filteredout_eod_chan.values == ch if len(filtered_out_indices) > 0 else np.array([])
                             _plot_channel_lane(
-                                np.diff(data[:, ch:ch+2]).flatten(), f'Ch{ch}-{ch+1} (diff)', ch,
-                                (eod_table['eod_channel'].values == ch) & (eod_table['is_differential'].values == 1),
+                                data[:, ch], f'Ch{ch}', ch,
+                                eod_table['eod_channel'].values == ch,
                                 fo_mask
                             )
-                        for ch in range(n_single_lanes):
-                            fo_mask = ((filteredout_eod_chan.values == ch) & (filteredout_is_differential.values == 0)) \
-                                if len(filtered_out_indices) > 0 else np.array([])
-                            _plot_channel_lane(
-                                data[:, ch], f'Ch{ch} (single)', n_diff_lanes + ch,
-                                (eod_table['eod_channel'].values == ch) & (eod_table['is_differential'].values == 0),
-                                fo_mask
-                            )
-                        plot_title = (f'{fname} - Differential + Single-Ended Fallback EOD Detections - '
-                                      f'Red=P1, Blue=P2, Grey=Filtered Out (n={len(eod_idc)} kept, {len(filtered_out_indices)} filtered)')
+                        plot_title = f'{fname} - Single-Ended EOD Detections - Red=P1, Blue=P2, Grey=Filtered Out (n={len(eod_idc)} kept, {len(filtered_out_indices)} filtered)'
 
                     plt.ylim(bottom=None, top=(n_plot_lanes-0.5)*offset)
                     plt.title(plot_title)
@@ -763,9 +769,15 @@ for n, filepath in enumerate(file_set['filename']):
                 continue
 
             # Create Channel Events
+            # ignore_channel is a user-set checkbox (Event Processing Options) - single-ended
+            # extraction (return_diff=False) assigns eod_channel independently per pulse
+            # (whichever raw channel has the loudest peak that instant), which is not
+            # spatially stable pulse-to-pulse like differential tracking, so it defaults to
+            # True for that mode in the GUI presets (see create_channel_events docstring).
             channel_events = create_channel_events(
                 combined_eod_table,
-                parameters['max_ipi_seconds']
+                parameters['max_ipi_seconds'],
+                ignore_channel=parameters['ignore_channel']
             )
 
             if len(channel_events) == 0:
@@ -1093,6 +1105,13 @@ if parameters['create_events'] and len(event_summaries) > 0:
     event_summary_file = os.path.join(output_path, 'all_event_summaries.csv')
     event_summary_df.to_csv(event_summary_file, index=False)
     print(f"\nSaved all event summaries to: {event_summary_file}")
+
+if _total_eods_kept == 0:
+    print(f"\n*** No pulses survived filtering across the whole run (pulse_mode="
+          f"{parameters.get('pulse_mode', 'biphasic')}, return_diff={parameters['return_diff']}). "
+          f"This combination may not suit the data - e.g. monophasic signals rarely produce "
+          f"clean differential flips, so try toggling return_diff or loosening width/"
+          f"amplitude_ratio/fft bounds. ***")
 
 # Save dead channel log
 if len(_dead_channel_log) > 0:
