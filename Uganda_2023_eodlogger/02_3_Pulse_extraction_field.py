@@ -38,7 +38,8 @@ from pulse_functions import (
     merge_channel_events,
     filter_events,
     create_event_plots,
-    calc_fwhm_width
+    calc_fwhm_width,
+    detect_monophasic_pulses
 )
 
 # Import parameter configuration GUI
@@ -361,15 +362,25 @@ for n, filepath in enumerate(file_set['filename']):
         if enable_bp:
             detection_signal = bandpass_filter(detection_signal, rate, bp_low, bp_high)
 
-        ch_peaks, ch_troughs, _, ch_pulse_widths = \
-            pulses.detect_pulses(detection_signal, rate,
-                                    thresh=parameters['thresh'],
-                                    min_rel_slope_diff=parameters['min_rel_slope_diff'],
-                                    min_width=parameters['min_width_us'] / 1e6,
-                                    max_width=parameters['max_width_us'] / 1e6,
-                                    width_fac=parameters['width_fac_detection'],
-                                    verbose=0,
-                                    return_data=False)
+        if parameters.get('pulse_mode', 'biphasic') == 'monophasic':
+            # Simple threshold peak-finding instead of thunderfish's biphasic
+            # peak-trough slope-pairing model (see detect_monophasic_pulses docstring).
+            ch_peaks, ch_troughs, _, ch_pulse_widths = detect_monophasic_pulses(
+                detection_signal, rate,
+                thresh=parameters['thresh'],
+                min_width_us=parameters['min_width_us'],
+                max_width_us=parameters['max_width_us'],
+                min_distance_us=parameters['min_distance_us'])
+        else:
+            ch_peaks, ch_troughs, _, ch_pulse_widths = \
+                pulses.detect_pulses(detection_signal, rate,
+                                        thresh=parameters['thresh'],
+                                        min_rel_slope_diff=parameters['min_rel_slope_diff'],
+                                        min_width=parameters['min_width_us'] / 1e6,
+                                        max_width=parameters['max_width_us'] / 1e6,
+                                        width_fac=parameters['width_fac_detection'],
+                                        verbose=0,
+                                        return_data=False)
         peaks.append(ch_peaks)
         troughs.append(ch_troughs)
         pulse_widths.append(ch_pulse_widths)
@@ -481,6 +492,7 @@ for n, filepath in enumerate(file_set['filename']):
             'p1_idx': raw_p1_idc,
             'p2_idx': raw_p2_idc,
             'eod_channel': eod_chan,
+            'is_differential': is_differential,
             'pulse_location': pulse_locations,
             'snippet_p1_idx': snippet_p1_idc,
             'snippet_p2_idx': snippet_p2_idc,
@@ -545,6 +557,7 @@ for n, filepath in enumerate(file_set['filename']):
             'p1_idx': raw_p1_idc,
             'p2_idx': raw_p2_idc,
             'eod_channel': eod_chan,
+            'is_differential': is_differential,
             'pulse_location': pulse_locations,
             'snippet_p1_idx': snippet_p1_idc,
             'snippet_p2_idx': snippet_p2_idc,
@@ -624,78 +637,93 @@ for n, filepath in enumerate(file_set['filename']):
                 if len(keep_indices) > 0:
                     # Plot: EOD detections with appropriate data based on extraction method
                     eod_idc = np.arange(len(filtered_eod_waveforms))
-                    
-                    # Determine what to plot based on extraction method
-                    if parameters['waveform_extraction'] == 'PCA':
-                        # Plot single-ended multi-channel data
-                        plot_data = data
-                        n_plot_channels = data.shape[1]
-                        channel_label_prefix = 'Ch'
-                        plot_title = f'{fname} - Single-Ended EOD Detections (PCA) - Red=P1, Blue=P2, Grey=Filtered Out (n={len(eod_idc)} kept, {len(filtered_out_indices)} filtered)'
-                    else:  # Differential
-                        # Plot differential data
-                        n_plot_channels = data.shape[1] - 1
-                        channel_label_prefix = 'Ch'
-                        plot_title = f'{fname} - Differential EOD Detections - Red=P1, Blue=P2, Grey=Filtered Out (n={len(eod_idc)} kept, {len(filtered_out_indices)} filtered)'
-                    
+
                     offset = np.max(eod_table['eod_amplitude']) * 1.5
+                    filteredout_is_differential = pd.Series([], dtype=int)
                     if len(filtered_out_indices) > 0:
                         filteredout_eod_chan = filteredout_eod_table['eod_channel']
+                        filteredout_is_differential = filteredout_eod_table['is_differential']
                         filteredout_final_p1_idc = filteredout_eod_table['p1_idx']
                         filteredout_final_p2_idc = filteredout_eod_table['p2_idx']
+
                     plt.figure(figsize=(20, 8))
-                    for ch in range(n_plot_channels):
-                        if parameters['waveform_extraction'] == 'PCA':
-                            # Plot single-ended channel
-                            plot_ch_data = data[:, ch]
-                            ch_label = f'{channel_label_prefix}{ch}'
-                        else:
-                            # Plot differential channel
-                            plot_ch_data = np.diff(data[:, ch:ch+2]).flatten()
-                            ch_label = f'{channel_label_prefix}{ch}-{ch+1}'
-                        
+
+                    def _plot_channel_lane(plot_ch_data, ch_label, lane_idx, kept_mask, filteredout_mask):
                         # Downsample for plotting if needed
                         step = max(1, len(plot_ch_data) // 15000000)
                         x_coords = np.arange(0, len(plot_ch_data), step)
-                        plt.plot(x_coords, plot_ch_data[::step] + ((ch + 0.5) * offset), linewidth=0.5, label=ch_label)
-                        
-                        # Find pulses on this channel and plot them
-                        ch_idc = np.where(eod_table['eod_channel'] == ch)[0]
-                        actual_idc = eod_idc[ch_idc]
-                        
+                        plt.plot(x_coords, plot_ch_data[::step] + ((lane_idx + 0.5) * offset), linewidth=0.5, label=ch_label)
+
+                        actual_idc = eod_idc[np.where(kept_mask)[0]]
                         if len(actual_idc) > 0:
-                            plt.plot(eod_table['p1_idx'].iloc[actual_idc], 
-                                    plot_ch_data[eod_table['p1_idx'].iloc[actual_idc]] + ((ch + 0.5) * offset), 
+                            plt.plot(eod_table['p1_idx'].iloc[actual_idc],
+                                    plot_ch_data[eod_table['p1_idx'].iloc[actual_idc]] + ((lane_idx + 0.5) * offset),
                                     'o', markersize=1, color='red')
-                            plt.plot(eod_table['p2_idx'].iloc[actual_idc], 
-                                    plot_ch_data[eod_table['p2_idx'].iloc[actual_idc]] + ((ch + 0.5) * offset), 
+                            plt.plot(eod_table['p2_idx'].iloc[actual_idc],
+                                    plot_ch_data[eod_table['p2_idx'].iloc[actual_idc]] + ((lane_idx + 0.5) * offset),
                                     'o', markersize=1, color='blue')
-                            
-                            # Plot pulse_location visualization for this channel
+
                             if 'pulse_location' in eod_table.columns:
                                 for idx in actual_idc:
                                     peak_loc = pulse_locations[idx]
                                     p1_idx = eod_table['p1_idx'].iloc[idx]
-                                    # Draw thin line from channel offset to pulse_location offset
-                                    plt.plot([p1_idx, p1_idx], [(ch + 0.5) * offset, peak_loc * offset], 
+                                    plt.plot([p1_idx, p1_idx], [(lane_idx + 0.5) * offset, peak_loc * offset],
                                             'k-', linewidth=0.5, alpha=0.6)
-                                    # Mark pulse_location with small black marker
                                     plt.plot(p1_idx, peak_loc * offset, 'ko', markersize=2, alpha=0.8)
-                        
-                        # Plot filtered-out pulses in grey
+
                         if len(filtered_out_indices) > 0:
-                            filteredout_ch_idc = np.where(filteredout_eod_chan == ch)[0]
+                            filteredout_ch_idc = np.where(filteredout_mask)[0]
                             if len(filteredout_ch_idc) > 0:
-                                plt.plot(filteredout_final_p1_idc.iloc[filteredout_ch_idc], 
-                                        plot_ch_data[filteredout_final_p1_idc.iloc[filteredout_ch_idc]] + ((ch + 0.5) * offset), 
+                                plt.plot(filteredout_final_p1_idc.iloc[filteredout_ch_idc],
+                                        plot_ch_data[filteredout_final_p1_idc.iloc[filteredout_ch_idc]] + ((lane_idx + 0.5) * offset),
                                         'o', markersize=1, color='grey', alpha=0.6)
-                                plt.plot(filteredout_final_p2_idc.iloc[filteredout_ch_idc], 
-                                        plot_ch_data[filteredout_final_p2_idc.iloc[filteredout_ch_idc]] + ((ch + 0.5) * offset), 
+                                plt.plot(filteredout_final_p2_idc.iloc[filteredout_ch_idc],
+                                        plot_ch_data[filteredout_final_p2_idc.iloc[filteredout_ch_idc]] + ((lane_idx + 0.5) * offset),
                                         'o', markersize=1, color='grey', alpha=0.6)
-                    
-                    plt.ylim(bottom=None, top=(n_plot_channels-0.5)*offset)
+
+                    if parameters['waveform_extraction'] == 'PCA':
+                        # Single-ended multi-channel data; eod_channel always a raw channel index.
+                        n_plot_lanes = data.shape[1]
+                        for ch in range(n_plot_lanes):
+                            fo_mask = filteredout_eod_chan.values == ch if len(filtered_out_indices) > 0 else np.array([])
+                            _plot_channel_lane(
+                                data[:, ch], f'Ch{ch}', ch,
+                                eod_table['eod_channel'].values == ch,
+                                fo_mask
+                            )
+                        plot_title = f'{fname} - Single-Ended EOD Detections (PCA) - Red=P1, Blue=P2, Grey=Filtered Out (n={len(eod_idc)} kept, {len(filtered_out_indices)} filtered)'
+                    else:
+                        # Differential extraction can still contain single-ended fallback
+                        # pulses (is_differential==0) when return_diff=False - eod_channel
+                        # then means a raw channel index, not a differential pair index, so
+                        # those pulses need their own lanes instead of being plotted (wrongly)
+                        # on the differential-pair trace.
+                        n_diff_lanes = data.shape[1] - 1
+                        n_single_lanes = data.shape[1]
+                        n_plot_lanes = n_diff_lanes + n_single_lanes
+
+                        for ch in range(n_diff_lanes):
+                            fo_mask = ((filteredout_eod_chan.values == ch) & (filteredout_is_differential.values == 1)) \
+                                if len(filtered_out_indices) > 0 else np.array([])
+                            _plot_channel_lane(
+                                np.diff(data[:, ch:ch+2]).flatten(), f'Ch{ch}-{ch+1} (diff)', ch,
+                                (eod_table['eod_channel'].values == ch) & (eod_table['is_differential'].values == 1),
+                                fo_mask
+                            )
+                        for ch in range(n_single_lanes):
+                            fo_mask = ((filteredout_eod_chan.values == ch) & (filteredout_is_differential.values == 0)) \
+                                if len(filtered_out_indices) > 0 else np.array([])
+                            _plot_channel_lane(
+                                data[:, ch], f'Ch{ch} (single)', n_diff_lanes + ch,
+                                (eod_table['eod_channel'].values == ch) & (eod_table['is_differential'].values == 0),
+                                fo_mask
+                            )
+                        plot_title = (f'{fname} - Differential + Single-Ended Fallback EOD Detections - '
+                                      f'Red=P1, Blue=P2, Grey=Filtered Out (n={len(eod_idc)} kept, {len(filtered_out_indices)} filtered)')
+
+                    plt.ylim(bottom=None, top=(n_plot_lanes-0.5)*offset)
                     plt.title(plot_title)
-                    plt.legend(loc='upper right')
+                    plt.legend(loc='upper right', fontsize=7)
                     plt.xlabel('Sample')
                     plt.ylabel('Voltage')
                     plt.savefig(f'{output_path}\\{fname[:-4]}_detection_plot.png', dpi=150, bbox_inches='tight')
