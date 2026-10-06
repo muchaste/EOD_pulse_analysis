@@ -51,6 +51,7 @@ BIPHASIC_PRESET = {
     'save_filtered_out': False,
     'peak_fft_freq_min': 50,
     'peak_fft_freq_max': 13000,
+    'return_diff': True,
     'use_pca': False,
     'pca_interp_points': 300,
     'pca_component': 0,
@@ -75,6 +76,7 @@ MONOPHASIC_PRESET = {
     'save_filtered_out': False,
     'peak_fft_freq_min': 40,
     'peak_fft_freq_max': 400,
+    'return_diff': False,
     'use_pca': False,
     'pca_interp_points': 300,
     'pca_component': 0,
@@ -82,7 +84,7 @@ MONOPHASIC_PRESET = {
     'length': 3000,
     'length_extraction': 'fixed',
     'length_factor': 10,
-    'search_window': 15
+    'search_window': 200
 }
 
 # ML-related imports for classifier functionality
@@ -1151,8 +1153,11 @@ class PulseDiagnosticTool:
             
             print(f"Detecting pulses on {n_channels} channels...")
             
-            # Create differential data for detection (if multi-channel linear)
-            if self.data_source == 'multich_linear' and self.plot_mode.get() == 'differential':
+            # Create detection signal(s). return_diff selects WHICH signal detection runs on
+            # (differential pairs vs raw single-ended channels) - independent of the raw-data
+            # preview's plot_mode toggle above. pulse_mode (below) independently selects the
+            # detection algorithm applied to whichever signal is chosen here.
+            if self.data_source == 'multich_linear' and self.parameters['return_diff']:
                 data_detect = np.diff(data, axis=1)
                 n_detect_channels = n_channels - 1
                 detect_pair_indices = [i for i in range(n_detect_channels)
@@ -1162,10 +1167,10 @@ class PulseDiagnosticTool:
                     print("    *** DEAD CHANNEL(S) %s — skipping detection pairs: %s ***" %
                           (", ".join("ch%d" % (c + 1) for c in self.dead_ch_0idx),
                            ", ".join(str(p) for p in dead_pairs)))
-            elif self.data_source == 'multich_linear' and self.plot_mode.get() == 'single_ended':
+            elif self.data_source == 'multich_linear' and not self.parameters['return_diff']:
                 data_detect = data  # Use single-ended data for detection
                 n_detect_channels = n_channels
-                detect_pair_indices = list(range(n_detect_channels))
+                detect_pair_indices = [i for i in range(n_detect_channels) if i not in self.dead_ch_0idx]
             elif self.data_source == '1ch_diff':
                 # Single-channel differential - data is already differential
                 data_detect = data
@@ -1397,6 +1402,13 @@ class PulseDiagnosticTool:
                 
                 print(f"    Filtering result: {len(keep_indices)} kept, {len(filtered_out_indices)} filtered out of {len(eod_waveforms)} total")
                 
+                if len(keep_indices) == 0:
+                    mode_desc = f"pulse_mode={self.parameters['pulse_mode']}, return_diff={self.parameters['return_diff']}"
+                    print(f"    *** No pulses survived filtering. Current combination ({mode_desc}) "
+                          f"may not suit this data - e.g. monophasic signals rarely produce clean "
+                          f"differential flips, so try toggling return_diff or loosening width/"
+                          f"amplitude_ratio/fft bounds. ***")
+                
                 # Split data into kept and filtered_out sets
                 kept_data = {
                     'eod_waveforms': [eod_waveforms[i] for i in keep_indices],
@@ -1436,14 +1448,21 @@ class PulseDiagnosticTool:
                     'pulse_location': kept_data['pulse_location']
                 }
                 
-                # Clear existing markers from previous detections
-                # Find and remove all scatter plot markers (red, blue, grey circles)
-                for artist in self.ax.get_children():
-                    if hasattr(artist, 'get_marker') and artist.get_marker() == 'o':
-                        artist.remove()
+                # The marker overlay's coordinates (eod_chan semantics, differential-pair vs
+                # raw channel) are only valid against a background plot of the SAME mode, so
+                # force the background + plot_mode toggle to match return_diff rather than
+                # trusting whatever view was last manually selected before detection ran.
+                target_plot_mode = 'differential' if self.parameters['return_diff'] else 'single_ended'
+                if self.plot_mode.get() != target_plot_mode:
+                    self.plot_mode.set(target_plot_mode)
+                self.ax.clear()
+                if target_plot_mode == 'single_ended':
+                    self.plot_data_single_ended(data, rate, start_sec, n_channels)
+                else:
+                    self.plot_data_differential(data, rate, start_sec, n_channels)
                 
                 # Plot with pulse markers (don't clear, just add markers)
-                if self.plot_mode.get() == "single_ended":
+                if target_plot_mode == 'single_ended':
                     self.add_pulse_markers_single_ended(data, rate, start_sec, n_channels, 
                                          kept_data, filtered_out_data)
                 else:
@@ -1569,74 +1588,56 @@ class PulseDiagnosticTool:
         self.ax.set_title(title)
     
     def add_pulse_markers_single_ended(self, data, rate, start_sec, n_channels, kept_data, filtered_out_data):
-        """Add pulse markers to existing single-ended plot without re-plotting the data"""
-        
+        """Add pulse markers to existing single-ended plot without re-plotting the data.
+        Used when return_diff=False - eod_chan is a raw channel index (0..n_channels-1),
+        not a differential-pair index, so each pulse gets exactly one marker on its own
+        winning channel (not duplicated across a pair's two neighbours)."""
+
         # Handle single-channel differential data
         if self.data_source == '1ch_diff':
             # Update title to show this view is not applicable
             self.ax.set_title('Single-Ended view not applicable for Single-Channel Differential data')
             return
-        
+
         # Calculate offset for stacking channels (same as original plotting)
         offset_se = np.max(abs(data)) * 1.2
-        
-        # Mark peaks and troughs on the appropriate single-ended channels
-        for diff_ch in range(n_channels - 1):
-            se_ch1 = diff_ch      # First single-ended channel
-            se_ch2 = diff_ch + 1  # Second single-ended channel
-            
-            # Plot kept pulses on both single-ended channels that form this differential pair
-            kept_ch_mask = (kept_data['eod_chan'] == diff_ch)
+
+        for ch in range(n_channels):
+            kept_ch_mask = (kept_data['eod_chan'] == ch)
             for idx in np.where(kept_ch_mask)[0]:
                 p1_idx = int(kept_data['final_p1_idc'][idx])
                 p2_idx = int(kept_data['final_p2_idc'][idx])
-                
-                # Mark on first single-ended channel (se_ch1)
+                pulse_location = kept_data['pulse_location'][idx]
+
                 if p1_idx < len(data):
-                    self.ax.plot((p1_idx / rate) + start_sec, 
-                               data[p1_idx, se_ch1] + se_ch1 * offset_se, 
+                    self.ax.plot((p1_idx / rate) + start_sec,
+                               data[p1_idx, ch] + ch * offset_se,
                                'o', markersize=5, color='red')
+                    time_coord = (p1_idx / rate) + start_sec
+                    self.ax.plot([time_coord, time_coord],
+                               [ch * offset_se, pulse_location * offset_se],
+                               'k-', linewidth=0.5, alpha=0.6)
+                    self.ax.plot(time_coord, pulse_location * offset_se,
+                               'ko', markersize=2, alpha=0.8)
                 if p2_idx < len(data):
-                    self.ax.plot((p2_idx / rate) + start_sec, 
-                               data[p2_idx, se_ch1] + se_ch1 * offset_se, 
+                    self.ax.plot((p2_idx / rate) + start_sec,
+                               data[p2_idx, ch] + ch * offset_se,
                                'o', markersize=5, color='blue')
-                
-                # Mark on second single-ended channel (se_ch2)
-                if p1_idx < len(data):
-                    self.ax.plot((p1_idx / rate) + start_sec, 
-                               data[p1_idx, se_ch2] + se_ch2 * offset_se, 
-                               'o', markersize=5, color='red')
-                if p2_idx < len(data):
-                    self.ax.plot((p2_idx / rate) + start_sec, 
-                               data[p2_idx, se_ch2] + se_ch2 * offset_se, 
-                               'o', markersize=5, color='blue')
-            
-            # Plot filtered out pulses (grey) on both single-ended channels
-            filtered_ch_mask = (filtered_out_data['eod_chan'] == diff_ch)
+
+            filtered_ch_mask = (filtered_out_data['eod_chan'] == ch)
             for idx in np.where(filtered_ch_mask)[0]:
                 p1_idx = int(filtered_out_data['final_p1_idc'][idx])
                 p2_idx = int(filtered_out_data['final_p2_idc'][idx])
-                
-                # Mark on first single-ended channel (se_ch1)
+
                 if p1_idx < len(data):
-                    self.ax.plot((p1_idx / rate) + start_sec, 
-                               data[p1_idx, se_ch1] + se_ch1 * offset_se, 
+                    self.ax.plot((p1_idx / rate) + start_sec,
+                               data[p1_idx, ch] + ch * offset_se,
                                'o', markersize=5, color='grey', alpha=0.6)
                 if p2_idx < len(data):
-                    self.ax.plot((p2_idx / rate) + start_sec, 
-                               data[p2_idx, se_ch1] + se_ch1 * offset_se, 
+                    self.ax.plot((p2_idx / rate) + start_sec,
+                               data[p2_idx, ch] + ch * offset_se,
                                'o', markersize=5, color='grey', alpha=0.6)
-                
-                # Mark on second single-ended channel (se_ch2)
-                if p1_idx < len(data):
-                    self.ax.plot((p1_idx / rate) + start_sec, 
-                               data[p1_idx, se_ch2] + se_ch2 * offset_se, 
-                               'o', markersize=5, color='grey', alpha=0.6)
-                if p2_idx < len(data):
-                    self.ax.plot((p2_idx / rate) + start_sec, 
-                               data[p2_idx, se_ch2] + se_ch2 * offset_se, 
-                               'o', markersize=5, color='grey', alpha=0.6)
-        
+
         # Update title to show detection results
         n_kept = len(kept_data['eod_chan'])
         n_filtered = len(filtered_out_data['eod_chan'])
