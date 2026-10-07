@@ -115,7 +115,7 @@ class PulseDiagnosticTool:
         self.source_file_type = None  # 'audio', 'precalibrated', '1ch_diff', 'ni_source'
         self.calibration_file_path = None
         self.loaded_time_window = {'start_sec': 0.0, 'end_sec': 0.0}  # Currently loaded window
-        self.full_data = None  # Store full data for subsetting (if reasonable size)
+        self.source_file_duration = None  # Total recording duration, read from header/metadata only
         
         # Default parameters (exactly from Script 03)
         self.parameters = dict(BIPHASIC_PRESET)
@@ -472,6 +472,7 @@ class PulseDiagnosticTool:
             self.source_file_path = file_path
             self.source_file_type = 'audio'
             self.file_name = os.path.basename(file_path)
+            self._update_source_file_duration()
             self.update_file_info()
             print(f"Selected audio file: {file_path}")
             print("Click 'Load Data' to load the audio file")
@@ -501,6 +502,7 @@ class PulseDiagnosticTool:
             self.source_file_type = 'precalibrated'
             self.file_name = os.path.basename(file_path)
             self.calibration_file_path = None  # Clear any calibration file
+            self._update_source_file_duration()
             self.update_file_info()
             print(f"Selected pre-calibrated audio: {file_path}")
             print("Click 'Load Data' to load the pre-calibrated audio")
@@ -517,6 +519,7 @@ class PulseDiagnosticTool:
             self.source_file_type = '1ch_diff'
             self.file_name = os.path.basename(file_path)
             self.calibration_file_path = None  # Clear any calibration file
+            self._update_source_file_duration()
             self.update_file_info()
             print(f"Selected single-channel differential data: {file_path}")
             print("Click 'Load Data' to load the differential recording")
@@ -533,6 +536,7 @@ class PulseDiagnosticTool:
             self.source_file_type = 'ni_source'
             self.file_name = os.path.basename(file_path).replace('log_', '').replace('.txt', '')
             self.calibration_file_path = None  # Clear any calibration file
+            self._update_source_file_duration()
             self.update_file_info()
             print(f"Selected NI source data: {file_path}")
             print("Click 'Load Data' to load from NI source")
@@ -574,22 +578,23 @@ class PulseDiagnosticTool:
             traceback.print_exc()
     
     def _load_audio_data(self, start_sec, end_sec):
-        """Load audio data (handles audio, precalibrated, and 1ch_diff types)"""
+        """Load audio data (handles audio, precalibrated, and 1ch_diff types).
+        Seeks directly to the requested time window via AudioLoader instead of
+        reading the whole file and subsetting afterward."""
         try:
-            # Load full audio file
-            audio_data, sample_rate = aio.load_audio(self.source_file_path)
+            # AudioLoader seeks/reads only the requested window from disk (see
+            # bufferedarray.BufferedArray.update_buffer) rather than loading the full file.
+            with aio.AudioLoader(self.source_file_path) as sf:
+                sample_rate = sf.rate
+                total_duration = len(sf) / sample_rate
+                if end_sec <= 0 or end_sec > total_duration:
+                    end_sec = total_duration
+                start_idx = int(start_sec * sample_rate)
+                end_idx = int(end_sec * sample_rate)
+                audio_data = sf[start_idx:end_idx, :]
             
             self.raw_data = audio_data
             self.sample_rate = sample_rate
-            
-            # Cache full data if reasonable size
-            data_size_gb = audio_data.nbytes / (1024**3)
-            if data_size_gb < 10:
-                self.full_data = audio_data.copy()
-                print(f"Cached full data in memory ({data_size_gb:.2f} GB)")
-            else:
-                self.full_data = None
-                print(f"Data too large to cache ({data_size_gb:.2f} GB)")
             
             # Apply calibration if needed (for 'audio' type with calibration file)
             if self.source_file_type == 'audio' and self.calibration_file_path is not None:
@@ -602,10 +607,6 @@ class PulseDiagnosticTool:
                           ", ".join("ch%d" % (c + 1) for c in self.dead_ch_0idx))
                 
                 self.calibrated_data = self._apply_calibration(audio_data, cf_values, self.dead_ch_0idx)
-                
-                if self.full_data is not None:
-                    self.full_data = self._apply_calibration(self.full_data, cf_values, self.dead_ch_0idx)
-                
                 self.data_source = 'multich_linear'
                 print("Applied calibration to audio data")
                 
@@ -620,16 +621,6 @@ class PulseDiagnosticTool:
                     self.data_source = '1ch_diff'
                 else:
                     self.data_source = 'multich_linear'
-            
-            # Subset to requested time window
-            total_duration = len(self.calibrated_data) / self.sample_rate
-            if end_sec <= 0 or end_sec > total_duration:
-                end_sec = total_duration
-            
-            if start_sec > 0 or end_sec < total_duration:
-                start_idx = int(start_sec * self.sample_rate)
-                end_idx = int(end_sec * self.sample_rate)
-                self.calibrated_data = self.calibrated_data[start_idx:end_idx, :]
             
             self.loaded_time_window = {'start_sec': start_sec, 'end_sec': end_sec}
             
@@ -735,7 +726,6 @@ class PulseDiagnosticTool:
             self.raw_data = audio_data
             self.calibrated_data = audio_data.copy()
             self.calibration_factors = None
-            self.full_data = None  # NI source: don't cache, reload on demand
             
             actual_end = (len(audio_data) / sample_rate) + start_sec if end_sec == 0 else end_sec
             self.loaded_time_window = {'start_sec': start_sec, 'end_sec': actual_end}
@@ -753,6 +743,51 @@ class PulseDiagnosticTool:
             print(f"Error loading NI source: {e}")
             messagebox.showerror("Error", f"Failed to load NI source:\n{str(e)}")
             return False
+    
+    def _update_source_file_duration(self):
+        """Determine total recording duration from file headers/metadata only, without
+        reading any sample data (so it's safe to call right after file selection)."""
+        self.source_file_duration = None
+        try:
+            if self.source_file_type in ('audio', 'precalibrated', '1ch_diff'):
+                with aio.AudioLoader(self.source_file_path) as sf:
+                    self.source_file_duration = len(sf) / sf.rate
+            elif self.source_file_type == 'ni_source':
+                with open(self.source_file_path, 'r') as file:
+                    log_data = {line.split(": ")[0]: line.split(": ")[1].strip() for line in file.readlines()}
+                if "Sample_Rate" in log_data:
+                    sample_rate = int(log_data["Sample_Rate"])
+                elif "Sample Rate" in log_data:
+                    sample_rate = int(log_data["Sample Rate"])
+                else:
+                    return
+                if "N_Input_Channels" in log_data:
+                    n_channels = int(log_data["N_Input_Channels"])
+                elif "Input_Channels" in log_data:
+                    n_channels = len(log_data["Input_Channels"].split(","))
+                elif "Number of Input Channels" in log_data:
+                    n_channels = int(log_data["Number of Input Channels"])
+                else:
+                    n_channels = 1
+                n_cols = n_channels + 1  # time_ms + channels
+
+                base_filepath = self.source_file_path.split('log_')[0] + self.source_file_path.split('log_')[-1].split('.')[0]
+                bin_filepath = base_filepath + '.bin'
+                parquet_filepath = base_filepath + '.parquet'
+                feather_filepath = base_filepath + '.feather'
+                if os.path.exists(bin_filepath):
+                    n_frames = os.path.getsize(bin_filepath) // (n_cols * 8)
+                elif os.path.exists(parquet_filepath):
+                    import pyarrow.parquet as pq
+                    n_frames = pq.ParquetFile(parquet_filepath).metadata.num_rows  # footer metadata only
+                elif os.path.exists(feather_filepath):
+                    import pyarrow.feather as feather
+                    n_frames = feather.read_table(feather_filepath, memory_map=True).num_rows
+                else:
+                    return
+                self.source_file_duration = n_frames / sample_rate
+        except Exception as e:
+            print(f"Could not determine file duration: {e}")
     
     def update_file_info(self):
         info = ""
@@ -775,6 +810,10 @@ class PulseDiagnosticTool:
                 info += "Type: Single-channel differential\n"
             elif self.source_file_type == 'ni_source':
                 info += "Type: NI source (binary)\n"
+            
+            if self.source_file_duration is not None:
+                mins, secs = divmod(self.source_file_duration, 60)
+                info += f"Total duration: {self.source_file_duration:.2f}s ({int(mins)}m {secs:.1f}s)\n"
         
         # Show loaded data info if available
         if self.raw_data is not None:
@@ -909,10 +948,6 @@ class PulseDiagnosticTool:
                   ", ".join("ch%d" % (c + 1) for c in self.dead_ch_0idx))
             
         self.calibrated_data = self._apply_calibration(self.raw_data, cf_values, self.dead_ch_0idx)
-        
-        # Also update full_data cache if it exists
-        if self.full_data is not None:
-            self.full_data = self._apply_calibration(self.full_data, cf_values, self.dead_ch_0idx)
         
         # Set data source to multi-channel linear (calibrated data)
         self.data_source = 'multich_linear'
