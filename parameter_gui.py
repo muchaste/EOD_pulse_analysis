@@ -33,8 +33,8 @@ FIELD_BIPHASIC_PRESET = {
     'extraction_window_factor': 10.0,
     'search_window': 10,
     'extraction_window': 'fixed',
-    'return_diff': True,
-    'waveform_extraction': 'Differential',
+    'extraction_method': 'differential',
+    'location_method': 'auto',
     'ignore_channel': False,
 }
 
@@ -57,9 +57,19 @@ FIELD_MONOPHASIC_PRESET = {
     'extraction_window_factor': 10.0,
     'search_window': 200,
     'extraction_window': 'fixed',
-    'return_diff': False,
-    'waveform_extraction': 'Differential',
+    'extraction_method': 'single_channel',
+    'location_method': 'auto',
     'ignore_channel': True,
+}
+
+
+# Mirrors pulse_functions._VALID_LOCATION_METHODS - duplicated here (rather than imported)
+# to keep this GUI module free of pulse_functions' heavy third-party dependencies. Keep in
+# sync if the valid combinations in pulse_functions.py change.
+VALID_LOCATION_METHODS = {
+    'differential':   ['auto', 'flip_weighted', 'gaussian', 'dipole'],
+    'single_channel': ['auto', 'gaussian', 'dipole'],
+    'pca':            ['auto', 'pca_spatial', 'gaussian', 'dipole'],
 }
 
 
@@ -232,19 +242,24 @@ class ParameterConfigGUI:
             ttk.Entry(pulse_frame, textvariable=self.param_vars[key], width=12).grid(
                 row=i, column=4, sticky=tk.W, padx=5)
         
-        # Waveform extraction method dropdown
+        # Extraction method dropdown (replaces the old waveform_extraction + return_diff pair) -
+        # determines which channel(s) the waveform is built from: differential flip-pair,
+        # single largest-amplitude channel, or PCA projection across all channels.
         next_row = len(filter_params)
-        ttk.Label(pulse_frame, text="Waveform Extraction:").grid(row=next_row, column=3, sticky=tk.W, pady=2)
-        self.param_vars['waveform_extraction'] = tk.StringVar(value='Differential')
-        waveform_combo = ttk.Combobox(pulse_frame, textvariable=self.param_vars['waveform_extraction'], 
-                                      values=['Differential', 'PCA'], state='readonly', width=12)
-        waveform_combo.grid(row=next_row, column=4, sticky=tk.W, padx=5)
-        
-        # Return only Head-to-Tail checkbox
-        self.param_vars['return_diff'] = tk.BooleanVar(value=True)
-        ttk.Checkbutton(pulse_frame, text="Return only Head-to-Tail", 
-                       variable=self.param_vars['return_diff']).grid(
-            row=next_row+1, column=3, columnspan=2, sticky=tk.W, pady=2)
+        ttk.Label(pulse_frame, text="Extraction Method:").grid(row=next_row, column=3, sticky=tk.W, pady=2)
+        self.param_vars['extraction_method'] = tk.StringVar(value='differential')
+        extraction_combo = ttk.Combobox(pulse_frame, textvariable=self.param_vars['extraction_method'],
+                                        values=['differential', 'single_channel', 'pca'], state='readonly', width=12)
+        extraction_combo.grid(row=next_row, column=4, sticky=tk.W, padx=5)
+        extraction_combo.bind('<<ComboboxSelected>>', self.update_location_method_options)
+
+        # Location method dropdown - valid options depend on extraction_method (see
+        # VALID_LOCATION_METHODS and pulse_functions._VALID_LOCATION_METHODS)
+        ttk.Label(pulse_frame, text="Location Method:").grid(row=next_row+1, column=3, sticky=tk.W, pady=2)
+        self.param_vars['location_method'] = tk.StringVar(value='auto')
+        self.location_method_combo = ttk.Combobox(pulse_frame, textvariable=self.param_vars['location_method'],
+                                                  values=VALID_LOCATION_METHODS['differential'], state='readonly', width=12)
+        self.location_method_combo.grid(row=next_row+1, column=4, sticky=tk.W, padx=5)
 
         ttk.Label(pulse_frame, text="Symmetry Threshold:").grid(row=next_row+2, column=3, sticky=tk.W, pady=2)
         self.param_vars['symmetry_threshold'] = tk.DoubleVar(value=0.3)
@@ -387,6 +402,21 @@ class ParameterConfigGUI:
         for key, value in preset.items():
             if key in self.param_vars:
                 self.param_vars[key].set(value)
+        self.update_location_method_options()
+
+    def update_location_method_options(self, event=None):
+        """Restrict location_method choices to those valid for the selected extraction_method.
+        TODO (future step): extend this pattern to also enable/disable the fixed-length
+        (extraction_window_length_us) vs variable-length (extraction_window_factor) fields
+        based on the extraction_window ('fixed'/'variable') selection, so only the input(s)
+        actually used by the current extraction_method + location_method + extraction_window
+        combination are active - mirrors toggle_event_fields()'s enable/disable pattern.
+        """
+        extraction_method = self.param_vars['extraction_method'].get()
+        valid_options = VALID_LOCATION_METHODS.get(extraction_method, ['auto'])
+        self.location_method_combo.config(values=valid_options)
+        if self.param_vars['location_method'].get() not in valid_options:
+            self.param_vars['location_method'].set('auto')
     
     def browse_folder(self, var_name):
         """Open folder selection dialog."""
@@ -717,16 +747,19 @@ class ControlParameterConfigGUI:
 
         next_row = max(len(detection_params), len(filter_params))
 
-        ttk.Label(pulse_frame, text="Waveform Extraction:").grid(row=next_row, column=3, sticky=tk.W, pady=2)
-        self.param_vars['waveform_extraction'] = tk.StringVar(value='Differential')
-        waveform_combo = ttk.Combobox(pulse_frame, textvariable=self.param_vars['waveform_extraction'],
-                                      values=['Differential', 'PCA'], state='readonly', width=12)
-        waveform_combo.grid(row=next_row, column=4, sticky=tk.W, padx=5)
+        # Extraction method dropdown (replaces the old waveform_extraction + return_diff pair)
+        ttk.Label(pulse_frame, text="Extraction Method:").grid(row=next_row, column=3, sticky=tk.W, pady=2)
+        self.param_vars['extraction_method'] = tk.StringVar(value='differential')
+        extraction_combo = ttk.Combobox(pulse_frame, textvariable=self.param_vars['extraction_method'],
+                                        values=['differential', 'single_channel', 'pca'], state='readonly', width=12)
+        extraction_combo.grid(row=next_row, column=4, sticky=tk.W, padx=5)
+        extraction_combo.bind('<<ComboboxSelected>>', self.update_location_method_options)
 
-        self.param_vars['return_diff'] = tk.BooleanVar(value=True)
-        ttk.Checkbutton(pulse_frame, text="Return only Head-to-Tail",
-                        variable=self.param_vars['return_diff']).grid(
-            row=next_row + 1, column=3, columnspan=2, sticky=tk.W, pady=2)
+        ttk.Label(pulse_frame, text="Location Method:").grid(row=next_row + 1, column=3, sticky=tk.W, pady=2)
+        self.param_vars['location_method'] = tk.StringVar(value='auto')
+        self.location_method_combo = ttk.Combobox(pulse_frame, textvariable=self.param_vars['location_method'],
+                                                  values=VALID_LOCATION_METHODS['differential'], state='readonly', width=12)
+        self.location_method_combo.grid(row=next_row + 1, column=4, sticky=tk.W, padx=5)
 
         ttk.Label(pulse_frame, text="Symmetry Threshold:").grid(row=next_row + 2, column=3, sticky=tk.W, pady=2)
         self.param_vars['symmetry_threshold'] = tk.DoubleVar(value=0.3)
@@ -757,6 +790,14 @@ class ControlParameterConfigGUI:
         ttk.Button(button_frame, text="Cancel", command=self.on_cancel).grid(row=0, column=1, padx=5)
 
         self.result = None
+
+    def update_location_method_options(self, event=None):
+        """Restrict location_method choices to those valid for the selected extraction_method."""
+        extraction_method = self.param_vars['extraction_method'].get()
+        valid_options = VALID_LOCATION_METHODS.get(extraction_method, ['auto'])
+        self.location_method_combo.config(values=valid_options)
+        if self.param_vars['location_method'].get() not in valid_options:
+            self.param_vars['location_method'].set('auto')
 
     def browse_folder(self, var_name):
         folder = filedialog.askdirectory(title=f"Select {var_name.replace('_', ' ').title()}")

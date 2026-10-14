@@ -339,10 +339,11 @@ for n, filepath in enumerate(file_set['filename']):
         print(f"    Using file timestamp: {file_start_time}")
         
     # Create detection signal(s) and determine which channels/pairs to scan.
-    # return_diff selects WHICH signal the loop below detects on (differential pairs vs
-    # raw single-ended channels); pulse_mode independently selects WHICH algorithm runs on it.
+    # extraction_method selects WHICH signal the loop below detects on (differential pairs
+    # vs raw single-ended channels, matching whichever signal channel-selection will use);
+    # pulse_mode independently selects WHICH algorithm runs on it.
     if parameters['source'] == 'multich_linear':
-        if parameters['return_diff']:
+        if parameters['extraction_method'] == 'differential':
             data_diff = np.diff(detection_data, axis=1)
             # Use only live adjacent pairs; _live_pair_indices preserves physical channel numbering
             detect_indices = _live_pair_indices
@@ -409,41 +410,24 @@ for n, filepath in enumerate(file_set['filename']):
     if len(unique_midpoints) > 0:
         # Extract variable-width snippets and analyze them
 
-        if parameters['waveform_extraction'] == 'Differential':
-            (
-                eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
-                snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc, 
-                pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations,
-                wf_lengths, snippet_p3_idc, final_p3_idc
-            ) = extract_pulse_snippets(
-                detection_data, unique_peaks, unique_troughs, rate=rate,
-                source='multich_linear', return_differential=parameters['return_diff'],
-                interp_factor=parameters['interp_factor'],
-                use_pca=False,
-                window_mode = parameters['extraction_window'],
-                window_factor = parameters['extraction_window_factor'],
-                window_length = parameters['extraction_window_length_us'],
-                search_window = parameters['search_window'],
-                symmetry_threshold=parameters.get('symmetry_threshold', 0.3),
-                pulse_mode=parameters.get('pulse_mode', 'biphasic')
-            )
-        elif parameters['waveform_extraction'] == 'PCA':
-            (
-                eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
-                snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc, 
-                pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations,
-                wf_lengths, snippet_p3_idc, final_p3_idc
-            ) = extract_pulse_snippets(
-                detection_data, unique_peaks, unique_troughs, rate=rate,
-                source='multich_linear', return_differential=parameters['return_diff'],
-                interp_factor=parameters['interp_factor'],
-                use_pca=True, pca_interp_points=300,
-                window_mode = parameters['extraction_window'],
-                window_factor = parameters['extraction_window_factor'],
-                window_length = parameters['extraction_window_length_us'],
-                search_window = parameters['search_window'],
-                pulse_mode=parameters.get('pulse_mode', 'biphasic')
-            )
+        (
+            eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
+            snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc, 
+            pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations,
+            wf_lengths, snippet_p3_idc, final_p3_idc
+        ) = extract_pulse_snippets(
+            detection_data, unique_peaks, unique_troughs, rate=rate,
+            source='multich_linear', extraction_method=parameters['extraction_method'],
+            location_method=parameters.get('location_method', 'auto'),
+            interp_factor=parameters['interp_factor'],
+            pca_interp_points=300,
+            window_mode = parameters['extraction_window'],
+            window_factor = parameters['extraction_window_factor'],
+            window_length = parameters['extraction_window_length_us'],
+            search_window = parameters['search_window'],
+            symmetry_threshold=parameters.get('symmetry_threshold', 0.3),
+            pulse_mode=parameters.get('pulse_mode', 'biphasic')
+        )
 
         if len(eod_snippets) == 0:
             print("    No valid EOD snippets extracted after waveform extraction")
@@ -693,7 +677,7 @@ for n, filepath in enumerate(file_set['filename']):
                                         plot_ch_data[filteredout_final_p2_idc.iloc[filteredout_ch_idc]] + ((lane_idx + 0.5) * offset),
                                         'o', markersize=1, color='grey', alpha=0.6)
 
-                    if parameters['waveform_extraction'] == 'PCA':
+                    if parameters['extraction_method'] == 'pca':
                         # Single-ended multi-channel data; eod_channel always a raw channel index.
                         n_plot_lanes = data.shape[1]
                         for ch in range(n_plot_lanes):
@@ -704,7 +688,7 @@ for n, filepath in enumerate(file_set['filename']):
                                 fo_mask
                             )
                         plot_title = f'{fname} - Single-Ended EOD Detections (PCA) - Red=P1, Blue=P2, Grey=Filtered Out (n={len(eod_idc)} kept, {len(filtered_out_indices)} filtered)'
-                    elif parameters['return_diff']:
+                    elif parameters['extraction_method'] == 'differential':
                         # A differential run only ever produces is_differential in {1, -1}
                         # (noise is already excluded from eod_table), so a single set of
                         # differential-pair lanes covers every kept/filtered-out pulse.
@@ -718,9 +702,9 @@ for n, filepath in enumerate(file_set['filename']):
                             )
                         plot_title = f'{fname} - Differential EOD Detections - Red=P1, Blue=P2, Grey=Filtered Out (n={len(eod_idc)} kept, {len(filtered_out_indices)} filtered)'
                     else:
-                        # A single-ended run (return_diff=False) always assigns a real raw
-                        # channel (_select_best_singleended_channel never returns -1), so a
-                        # single set of single-ended lanes covers every pulse.
+                        # A single-ended run (extraction_method='single_channel') always assigns
+                        # a real raw channel (_select_best_singleended_channel never returns -1),
+                        # so a single set of single-ended lanes covers every pulse.
                         n_plot_lanes = data.shape[1]
                         for ch in range(n_plot_lanes):
                             fo_mask = filteredout_eod_chan.values == ch if len(filtered_out_indices) > 0 else np.array([])
@@ -774,8 +758,8 @@ for n, filepath in enumerate(file_set['filename']):
 
             # Create Channel Events
             # ignore_channel is a user-set checkbox (Event Processing Options) - single-ended
-            # extraction (return_diff=False) assigns eod_channel independently per pulse
-            # (whichever raw channel has the loudest peak that instant), which is not
+            # extraction (extraction_method='single_channel') assigns eod_channel independently
+            # per pulse (whichever raw channel has the loudest peak that instant), which is not
             # spatially stable pulse-to-pulse like differential tracking, so it defaults to
             # True for that mode in the GUI presets (see create_channel_events docstring).
             channel_events = create_channel_events(
@@ -880,7 +864,7 @@ for n, filepath in enumerate(file_set['filename']):
                                     event_start_time=part_wall_start,
                                     sample_rate=rate,
                                     output_path=output_path,
-                                    extraction_method=parameters['waveform_extraction'],
+                                    extraction_method=parameters['extraction_method'],
                                     part_suffix=f'_part_{part_num}'
                                 )
                         # Track unsaved start for buffer trimming
@@ -1074,7 +1058,7 @@ for n, filepath in enumerate(file_set['filename']):
                                 event_start_time=part_wall_start,
                                 sample_rate=rate,
                                 output_path=output_path,
-                                extraction_method=parameters['waveform_extraction'],
+                                extraction_method=parameters['extraction_method'],
                                 part_suffix=f'_part_{part_num}'
                             )
                 else:
@@ -1091,7 +1075,7 @@ for n, filepath in enumerate(file_set['filename']):
                             event_start_time=event_start_time,
                             sample_rate=rate,
                             output_path=output_path,
-                            extraction_method=parameters['waveform_extraction'],
+                            extraction_method=parameters['extraction_method'],
                             part_suffix=part_suffix
                         )
                 del event_eods, event_eod_waveforms, event_data
@@ -1112,9 +1096,9 @@ if parameters['create_events'] and len(event_summaries) > 0:
 
 if _total_eods_kept == 0:
     print(f"\n*** No pulses survived filtering across the whole run (pulse_mode="
-          f"{parameters.get('pulse_mode', 'biphasic')}, return_diff={parameters['return_diff']}). "
+          f"{parameters.get('pulse_mode', 'biphasic')}, extraction_method={parameters['extraction_method']}). "
           f"This combination may not suit the data - e.g. monophasic signals rarely produce "
-          f"clean differential flips, so try toggling return_diff or loosening width/"
+          f"clean differential flips, so try switching extraction_method or loosening width/"
           f"amplitude_ratio/fft bounds. ***")
 
 # Save dead channel log

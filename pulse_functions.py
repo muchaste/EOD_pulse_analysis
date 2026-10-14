@@ -192,9 +192,64 @@ def unify_across_channels(peaks, troughs, pulse_widths, proximity_threshold=3):
 
     return unique_midpoints, unique_peaks, unique_troughs, unique_widths
 
+# Orthogonal design: pulse_mode (detection + P1/P2 orientation) and extraction_method +
+# location_method (how the waveform / location are derived from the selected channel(s))
+# vary independently - not every location_method applies to every extraction_method, since
+# 'flip_weighted' needs a real differential channel pair and 'pca_spatial' needs the PCA
+# spatial-amplitude profile. channel_selection is intentionally NOT a separate axis: it is
+# fully determined by extraction_method (differential -> flip-pair, single_channel ->
+# largest-amplitude channel, pca -> all channels), and keeping it folded in means eod_chan
+# always reflects exactly the channel(s) the waveform/plot markers came from.
+_VALID_LOCATION_METHODS = {
+    'differential':   {'auto', 'flip_weighted', 'gaussian', 'dipole'},
+    'single_channel': {'auto', 'gaussian', 'dipole'},
+    'pca':            {'auto', 'pca_spatial', 'gaussian', 'dipole'},
+}
+
+
+def _dispatch_location_estimate(data, peak_idx, trough_idx, channel_idx, n_channels, location_method):
+    """
+    Compute pulse location via an explicitly selected estimator. All three read directly
+    from the raw multi-channel `data`, so this is independent of which extraction_method
+    produced the waveform - used whenever location_method is NOT 'auto' (the 'auto'/
+    'pca_spatial' defaults replicate the original per-extraction-method behavior and are
+    handled inline in extract_pulse_snippets instead, for exact backward compatibility).
+
+    Parameters
+    ----------
+    data : 2-D array
+        Multi-channel recording (samples x channels).
+    peak_idx, trough_idx : int
+        Peak/trough sample indices in the full recording.
+    channel_idx : int or None
+        Differential channel-pair index (channel_idx, channel_idx+1). Only used by
+        'flip_weighted'; ignored by 'gaussian'/'dipole'.
+    n_channels : int
+        Number of recording channels.
+    location_method : str
+        'flip_weighted', 'gaussian', or 'dipole'.
+
+    Returns
+    -------
+    location : float
+        Estimated location in electrode units [0, n_channels-1].
+    """
+    if location_method == 'flip_weighted':
+        return _estimate_differential_pulse_location(data, peak_idx, trough_idx, channel_idx, n_channels)
+    elif location_method == 'gaussian':
+        loc, _, _ = _estimate_gaussian_pulse_location(data, peak_idx, trough_idx, n_channels)
+        return loc
+    elif location_method == 'dipole':
+        _, ch_amps, _ = _estimate_gaussian_pulse_location(data, peak_idx, trough_idx, n_channels)
+        dipole_x0, _, _ = _fit_dipole_location(ch_amps)
+        return dipole_x0
+    raise ValueError(f"Invalid location_method for _dispatch_location_estimate: {location_method!r}")
+
+
 def extract_pulse_snippets(data, peaks, troughs, rate, 
-                           source, return_differential=True, interp_factor=1,
-                           use_pca=False, pca_component=0, pca_interp_points=100,
+                           source, extraction_method=None, location_method='auto',
+                           return_differential=None, use_pca=None, interp_factor=1,
+                           pca_component=0, pca_interp_points=100,
                            window_mode="fixed", window_factor=7, window_length = 4000,
                            search_window=10, symmetry_threshold=0.3, pulse_mode='biphasic'):
     """
@@ -218,8 +273,38 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
         - '1ch_diff' : single-channel differential data (control recordings)
         - 'multich_linear' : multi-channel data with linear electrode arrangement (field recordings)
         - 'shuttlebox_matlab' : multi-channel data from shuttlebox experiments (MATLAB format)
-    return_differential : bool
-        Whether to keep only differential pulses (default True, ignored if use_pca=True)
+    extraction_method : str, optional
+        How the 1-D waveform (and its source channel(s)) is derived from multi-channel data:
+        - 'differential' (default) : select the adjacent channel pair with the largest
+          polarity flip (`_select_differential_channel_pointwise`) and extract their
+          difference. Only pulses with a reliable flip are kept.
+        - 'single_channel' : select the single channel with the largest absolute peak
+          (`_select_best_singleended_channel`) and extract it directly, no differencing.
+        - 'pca' : project all channels onto their first principal component
+          (`_extract_pca_waveform`) and extract the reconstructed signal; uses all channels
+          at once rather than pre-selecting one/two.
+        Only used for source='multich_linear' (ignored/forced for '1ch_diff', 'shuttlebox_matlab').
+    location_method : str, optional
+        How the pulse's location along the electrode array is estimated, independent of
+        extraction_method:
+        - 'auto' (default) : reproduces the original per-extraction_method default -
+          'flip_weighted' for differential, the gaussian-primary/dipole-fallback dispatcher
+          for single_channel, and the PCA spatial-amplitude dipole/spline fit for pca.
+        - 'flip_weighted' : parabolic/weighted-centroid model over the flip pair and its
+          neighbours (`_estimate_differential_pulse_location`). Only valid for
+          extraction_method='differential' (requires a real channel pair).
+        - 'gaussian' : Gaussian fit to the per-channel amplitude profile
+          (`_estimate_gaussian_pulse_location`). Valid for any extraction_method.
+        - 'dipole' : 1-D dipole zero-crossing fit (`_fit_dipole_location`). Valid for any
+          extraction_method.
+        - 'pca_spatial' : dipole fit on the PCA spatial-amplitude profile itself (the method
+          already embedded in `_extract_pca_waveform`). Only valid for extraction_method='pca'.
+        See `_VALID_LOCATION_METHODS` for the full validity table; an invalid combination
+        raises ValueError.
+    return_differential, use_pca : bool, optional
+        Deprecated - use extraction_method instead. Translated automatically if passed
+        (use_pca=True -> 'pca'; return_differential=False -> 'single_channel'; otherwise
+        'differential'), with a one-line migration notice printed.
     interp_factor : int
         Interpolation factor for waveform extraction (default 1, no interpolation)
     pulse_mode : str, optional
@@ -228,18 +313,13 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
         'monophasic' : P1/P2 and orientation assigned by amplitude dominance (the larger-
         magnitude extremum is P1 regardless of time order) - for electric eel pulses, where
         the dominant phase is not necessarily first in time.
-    use_pca : bool
-        If True, use PCA-based extraction with spatial interpolation instead of differential.
-        This method reduces noise by projecting multi-channel data onto principal components
-        and reconstructing the signal with spatial interpolation (Zlenko et al., 2024).
-        Default False for backward compatibility.
     pca_component : int
         Which principal component to use for signal reconstruction (default 0 = first component).
-        Only used when use_pca=True.
+        Only used when extraction_method='pca'.
     pca_interp_points : int
         Number of interpolation points for 1D spatial interpolation along electrode array.
         Default 100 provides high spatial resolution for locating signal maxima.
-        Only used when use_pca=True.
+        Only used when extraction_method='pca'.
     window_mode : str, optional
         Method for determining snippet length:
         - 'fixed' : Use fixed length specified by 'window_length' parameter (default)
@@ -256,8 +336,9 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
     -------
     eod_waveforms : list of 1-D arrays
         Variable-length EOD waveform snippets (no zero-padding).
-        If use_pca=True: PCA-reconstructed waveforms with spatial interpolation.
-        If use_pca=False: Differential waveforms from adjacent channel pairs.
+        If extraction_method='pca': PCA-reconstructed waveforms with spatial interpolation.
+        If extraction_method='differential': differential waveforms from adjacent channel pairs.
+        If extraction_method='single_channel': raw single-channel waveforms.
     eod_amps : 1-D array
         Amplitude of extracted waveform
     eod_widths : 1-D array
@@ -293,9 +374,29 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
     waveform_lengths : 1-D array
         Actual length (in samples) of each extracted waveform snippet.
     """
-    
+    # --- Back-compat shim: translate deprecated return_differential/use_pca into extraction_method ---
+    if return_differential is not None or use_pca is not None:
+        print("    [deprecated] 'return_differential'/'use_pca' are deprecated - pass "
+              "extraction_method='differential'/'single_channel'/'pca' instead.")
+        if use_pca:
+            extraction_method = 'pca'
+        elif return_differential is False:
+            extraction_method = 'single_channel'
+        else:
+            extraction_method = 'differential'
+    if extraction_method is None:
+        extraction_method = 'differential'
+
+    if extraction_method not in ('differential', 'single_channel', 'pca'):
+        raise ValueError(f"Invalid extraction_method: {extraction_method!r}. "
+                         "Use 'differential', 'single_channel', or 'pca'.")
+    valid_location_methods = _VALID_LOCATION_METHODS[extraction_method]
+    if location_method not in valid_location_methods:
+        raise ValueError(f"location_method={location_method!r} is not valid for "
+                         f"extraction_method={extraction_method!r}. Valid options: {sorted(valid_location_methods)}")
+
     if source == '1ch_diff':
-        return_differential = True
+        extraction_method = 'differential'
         print("    Single-channel differential data source detected...")
         n_channels = 1
         # Single channel case
@@ -307,11 +408,11 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
         print("    Multi-channel linear data source detected...")
         
         # PCA extraction requires multi-channel data
-        if use_pca and n_channels < 2:
+        if extraction_method == 'pca' and n_channels < 2:
             print("    Warning: PCA extraction requires multi-channel data. Falling back to standard extraction.")
-            use_pca = False
+            extraction_method = 'single_channel'
         
-        if use_pca:
+        if extraction_method == 'pca':
             print(f"    Using PCA-based extraction with spatial interpolation from {n_channels}-channel data...")
             print(f"    PCA settings: component={pca_component}, interpolation points={pca_interp_points}")
             # For PCA, we don't need differential channel selection
@@ -319,7 +420,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
             eod_chans = np.zeros(n_pulses, dtype=int)  # Will be updated with peak electrode
             is_differential = np.full(n_pulses, 2, dtype=int)  # 2 = PCA method
         elif n_channels > 1:
-            if return_differential:
+            if extraction_method == 'differential':
                 print(f"    Extracting differential waveforms from {n_channels}-channel data...")
                 # Find differential channel with polarity flip
                 eod_chans, is_differential, _, cor_coefs = _select_differential_channel_pointwise(
@@ -347,7 +448,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
         is_differential = np.ones(n_pulses, dtype=int)  # 1 - all differential
 
 
-    if return_differential and not use_pca:
+    if extraction_method == 'differential':
         print("    Filtering to keep only differential pulses...")
         # Filter non-differential pulses
         keep_mask = is_differential == 1
@@ -360,9 +461,9 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
     filtered_is_differential = is_differential[keep_mask]
     n_pulses_diff = len(filtered_peak_idc)
 
-    if return_differential and not use_pca:
+    if extraction_method == 'differential':
         print(f"    Found {n_pulses_diff} differential pulses out of {n_pulses} total")
-    elif use_pca:
+    elif extraction_method == 'pca':
         print(f"    Processing {n_pulses_diff} pulses with PCA extraction")
         
 
@@ -407,7 +508,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
             start_idx = max(0, center_idx - wf_length // 2)
             end_idx = min(data.shape[0], center_idx + wf_length // 2)
 
-            if use_pca and source == 'multich_linear':
+            if extraction_method == 'pca' and source == 'multich_linear':
                 snippet_multichannel = data[start_idx:end_idx, :]
                 try:
                     snippet, _, _, peak_ch, peak_loc = _extract_pca_waveform(
@@ -416,6 +517,12 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
                         interp_points=pca_interp_points,
                         apply_common_average=True
                     )
+                    # 'auto'/'pca_spatial' keep the spatial-amplitude-based location already
+                    # computed above; 'gaussian'/'dipole' instead re-estimate directly from
+                    # the raw per-channel amplitude profile around peak_idx/trough_idx.
+                    if location_method in ('gaussian', 'dipole'):
+                        peak_loc = _dispatch_location_estimate(
+                            data, peak_idx, trough_idx, None, n_channels, location_method)
                     if attempt == 0:
                         pulse_locations.append(peak_loc)
                         location_appended = True
@@ -442,14 +549,24 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
                 # silently returns an empty snippet (e.g. when the edge channel is selected).
                 if filtered_is_differential[i] == 1:
                     snippet = np.diff(data[start_idx:end_idx, filtered_eod_chans[i]:filtered_eod_chans[i]+2]).flatten()
-                    diff_location = _estimate_differential_pulse_location(
-                        data, peak_idx, trough_idx, filtered_eod_chans[i], n_channels
-                    )
+                    if location_method == 'auto':
+                        diff_location = _estimate_differential_pulse_location(
+                            data, peak_idx, trough_idx, filtered_eod_chans[i], n_channels
+                        )
+                    else:
+                        diff_location = _dispatch_location_estimate(
+                            data, peak_idx, trough_idx, filtered_eod_chans[i], n_channels, location_method
+                        )
                 elif filtered_is_differential[i] == 0:
                     snippet = data[start_idx:end_idx, filtered_eod_chans[i]].flatten()
-                    diff_location = _estimate_location_dipole_or_gaussian(
-                        data, peak_idx, trough_idx, n_channels
-                    )
+                    if location_method == 'auto':
+                        diff_location = _estimate_location_dipole_or_gaussian(
+                            data, peak_idx, trough_idx, n_channels
+                        )
+                    else:
+                        diff_location = _dispatch_location_estimate(
+                            data, peak_idx, trough_idx, filtered_eod_chans[i], n_channels, location_method
+                        )
                 else:
                     snippet = np.array([])
                     diff_location = -1.0
@@ -480,7 +597,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
                 fft_peak_freqs.append(0.0)
                 waveform_lengths.append(0)
                 eod_chans_out.append(filtered_eod_chans[i])
-                is_differential_out.append(filtered_is_differential[i] if not use_pca else 2)
+                is_differential_out.append(filtered_is_differential[i] if extraction_method != 'pca' else 2)
                 snippet_p3_idc.append(-1)
                 final_p3_idc.append(-1)
                 skip_pulse = True
@@ -674,7 +791,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
         fft_peak_freqs.append(fft_peak_snippet)
         waveform_lengths.append(len(snippet))
         eod_chans_out.append(filtered_eod_chans[i])
-        is_differential_out.append(filtered_is_differential[i] if not use_pca else 2)
+        is_differential_out.append(filtered_is_differential[i] if extraction_method != 'pca' else 2)
         # Convert absolute P3 index to final-snippet-relative using the last attempt's start_idx.
         snippet_p3_idx = abs_p3_idx - start_idx if abs_p3_idx >= 0 else -1
         snippet_p3_idc.append(snippet_p3_idx * interp_factor if interp_factor > 1 and snippet_p3_idx >= 0 else snippet_p3_idx)
@@ -683,7 +800,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
     # Filter out any empty waveforms
     if len(eod_waveforms) == 0:
         # No valid waveforms found
-        if use_pca:
+        if extraction_method == 'pca':
             print("    No valid PCA-extracted waveforms found.")
         else:
             print("    No valid differential waveforms found.")
@@ -746,7 +863,7 @@ def _select_differential_channel_pointwise(data, n_channels, peaks, troughs, sym
     eod_chan : 1-D array
         Selected differential channel-pair index, or -1 if no reliable flip found (noise).
         Has no single-ended fallback - use `_select_best_singleended_channel()` instead
-        when `return_differential=False`.
+        when `extraction_method='single_channel'`.
     is_differential : 1-D array
         1 if a reliable polarity flip was found, -1 if not (noise)
     amps : 1-D array
@@ -807,7 +924,7 @@ def _select_differential_channel_pointwise(data, n_channels, peaks, troughs, sym
                 # print(f"Pulse {i}: Multiple flips, chosing highest amplitude difference")         
             elif len(flips) == 0:
                 # No flip anywhere: noise. Differential mode has no single-ended fallback -
-                # use return_differential=False / _select_best_singleended_channel() for that.
+                # use extraction_method='single_channel' / _select_best_singleended_channel() for that.
                 eod_chan[i] = -1
                 is_differential[i] = -1
                 # print(f"Pulse {i}: No flips, noise")
@@ -1129,7 +1246,7 @@ def _estimate_location_dipole_or_gaussian(data, ref_p1_idx, ref_p2_idx, n_channe
 
 def _select_best_singleended_channel(data, n_channels, peaks, troughs, search_window=200):
     """
-    Select the best single-ended channel for each pulse when `return_differential=False`.
+    Select the best single-ended channel for each pulse when `extraction_method='single_channel'`.
     Unlike `_select_differential_channel_pointwise()`, this never rejects a pulse as noise -
     every candidate is force-assigned to a channel; `filter_waveforms()` downstream is the
     sole quality gate. Picks the channel with the largest ABSOLUTE PEAK (not amplitude range,
@@ -3447,7 +3564,7 @@ def filter_events(events_to_filter, min_eods_per_event, min_amplitude):
     return events_filtered
 
 
-def create_event_plots(event_id, event_eods, event_data, event_start_time, sample_rate, output_path, max_plot_duration=300, extraction_method='Differential', part_suffix=''):
+def create_event_plots(event_id, event_eods, event_data, event_start_time, sample_rate, output_path, max_plot_duration=300, extraction_method='differential', part_suffix=''):
     """
     Create detection plots for EOD events with memory-efficient handling.
     Adapts to PCA (single-ended) or Differential extraction methods.
@@ -3530,12 +3647,16 @@ def create_event_plots(event_id, event_eods, event_data, event_start_time, sampl
         plot_step = 1  # Original resolution for shorter events
         print(f"        Normal event - using original resolution")
     
-    # Determine data format and plotting parameters based on extraction method
+    # Determine data format and plotting parameters based on extraction method.
+    # 'single_channel' and 'pca' both plot raw per-channel data (n_channels lanes, eod_channel
+    # is a raw channel index); only 'differential' plots diff pairs (n_channels-1 lanes,
+    # eod_channel is a pair index). Old 'PCA'/'Differential' strings accepted for backward compat.
+    is_single_ended = extraction_method in ('pca', 'single_channel', 'PCA')
     n_channels = event_data.shape[1]
-    if extraction_method == 'PCA':
+    if is_single_ended:
         n_plot_channels = n_channels
         channel_label_prefix = 'Ch'
-        plot_title_method = 'Single-Ended (PCA)'
+        plot_title_method = 'PCA' if extraction_method in ('pca', 'PCA') else 'Single-Ended'
     else:  # Differential
         n_plot_channels = n_channels - 1
         channel_label_prefix = 'Ch'
@@ -3547,7 +3668,7 @@ def create_event_plots(event_id, event_eods, event_data, event_start_time, sampl
     # Plot signals for each channel
     for ch in range(n_plot_channels):
         # Calculate signal data based on extraction method
-        if extraction_method == 'PCA':
+        if is_single_ended:
             # Use single-ended channel data
             channel_data = event_data[::plot_step, ch]
             ch_label = f'{channel_label_prefix}{ch}'
@@ -3577,7 +3698,7 @@ def create_event_plots(event_id, event_eods, event_data, event_start_time, sampl
                     valid_peak_samples = peak_sample_indices[valid_peaks]
                     peak_timestamps = event_start_time + pd.to_timedelta(valid_peak_samples / sample_rate, unit='s')
                     
-                    if extraction_method == 'PCA':
+                    if is_single_ended:
                         peak_values = event_data[valid_peak_samples, ch]
                     else:
                         peak_values = np.diff(event_data[valid_peak_samples, ch:ch+2], axis=1).flatten()
@@ -3597,7 +3718,7 @@ def create_event_plots(event_id, event_eods, event_data, event_start_time, sampl
                     valid_trough_samples = trough_sample_indices[valid_troughs]
                     trough_timestamps = event_start_time + pd.to_timedelta(valid_trough_samples / sample_rate, unit='s')
                     
-                    if extraction_method == 'PCA':
+                    if is_single_ended:
                         trough_values = event_data[valid_trough_samples, ch]
                     else:
                         trough_values = np.diff(event_data[valid_trough_samples, ch:ch+2], axis=1).flatten()
@@ -4098,7 +4219,7 @@ def plot_normalization_comparison(original_snippets, normalized_snippets,
     
     return fig
 
-def create_tracking_plot(event_id, event_eods, event_data, event_start_time, sample_rate, output_path, max_plot_duration=300, extraction_method='Differential'):
+def create_tracking_plot(event_id, event_eods, event_data, event_start_time, sample_rate, output_path, max_plot_duration=300, extraction_method='differential'):
     """
     Create tracking plots for EOD events with memory-efficient handling.
     Adapts to PCA (single-ended) or Differential extraction methods.
@@ -4165,12 +4286,14 @@ def create_tracking_plot(event_id, event_eods, event_data, event_start_time, sam
         plot_step = 1  # Original resolution for shorter events
         print(f"        Normal event - using original resolution")
     
-    # Determine data format and plotting parameters based on extraction method
+    # Determine data format and plotting parameters based on extraction method.
+    # See create_event_plots for why 'single_channel' and 'pca' share plotting logic.
+    is_single_ended = extraction_method in ('pca', 'single_channel', 'PCA')
     n_channels = event_data.shape[1]
-    if extraction_method == 'PCA':
+    if is_single_ended:
         n_plot_channels = n_channels
         channel_label_prefix = 'Ch'
-        plot_title_method = 'Single-Ended (PCA)'
+        plot_title_method = 'PCA' if extraction_method in ('pca', 'PCA') else 'Single-Ended'
     else:  # Differential
         n_plot_channels = n_channels - 1
         channel_label_prefix = 'Ch'
@@ -4182,7 +4305,7 @@ def create_tracking_plot(event_id, event_eods, event_data, event_start_time, sam
     # Plot signals for each channel
     for i in range(n_plot_channels):
         # Calculate signal data based on extraction method
-        if extraction_method == 'PCA':
+        if is_single_ended:
             # Use single-ended channel data
             channel_data = event_data[::plot_step, i]
             ch_label = f'{channel_label_prefix}{i}'
@@ -4214,7 +4337,7 @@ def create_tracking_plot(event_id, event_eods, event_data, event_start_time, sam
                         valid_peak_samples = peak_sample_indices[valid_peaks]
                         peak_timestamps = event_start_time + pd.to_timedelta(valid_peak_samples / sample_rate, unit='s')
                         
-                        if extraction_method == 'PCA':
+                        if is_single_ended:
                             peak_values = event_data[valid_peak_samples, i]
                         else:
                             peak_values = np.diff(event_data[valid_peak_samples, i:i+2], axis=1).flatten()
@@ -4234,7 +4357,7 @@ def create_tracking_plot(event_id, event_eods, event_data, event_start_time, sam
                         valid_trough_samples = trough_sample_indices[valid_troughs]
                         trough_timestamps = event_start_time + pd.to_timedelta(valid_trough_samples / sample_rate, unit='s')
                         
-                        if extraction_method == 'PCA':
+                        if is_single_ended:
                             trough_values = event_data[valid_trough_samples, i]
                         else:
                             trough_values = np.diff(event_data[valid_trough_samples, i:i+2], axis=1).flatten()

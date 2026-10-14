@@ -284,9 +284,9 @@ for n, individual in enumerate(individual_info):
         ) = extract_pulse_snippets(
                 data, peaks, troughs, rate = rate,
                 source = parameters['source'], 
-                return_differential = parameters['return_diff'], 
+                extraction_method = parameters.get('extraction_method', 'differential'),
+                location_method = parameters.get('location_method', 'auto'),
                 interp_factor=parameters['interp_factor'],
-                use_pca=False,
                 window_mode = parameters['extraction_window'],
                 window_factor = parameters['extraction_window_factor'],
                 window_length = parameters['extraction_window_length_us'],

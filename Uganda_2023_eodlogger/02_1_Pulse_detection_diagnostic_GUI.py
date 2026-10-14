@@ -51,8 +51,8 @@ BIPHASIC_PRESET = {
     'save_filtered_out': False,
     'peak_fft_freq_min': 50,
     'peak_fft_freq_max': 13000,
-    'return_diff': True,
-    'use_pca': False,
+    'extraction_method': 'differential',
+    'location_method': 'auto',
     'pca_interp_points': 300,
     'pca_component': 0,
     'symmetry_threshold': 0.2,
@@ -76,8 +76,8 @@ MONOPHASIC_PRESET = {
     'save_filtered_out': False,
     'peak_fft_freq_min': 40,
     'peak_fft_freq_max': 400,
-    'return_diff': False,
-    'use_pca': False,
+    'extraction_method': 'single_channel',
+    'location_method': 'auto',
     'pca_interp_points': 300,
     'pca_component': 0,
     'symmetry_threshold': 0.2,
@@ -85,6 +85,14 @@ MONOPHASIC_PRESET = {
     'length_extraction': 'fixed',
     'length_factor': 10,
     'search_window': 200
+}
+
+# Mirrors pulse_functions._VALID_LOCATION_METHODS - duplicated here to avoid importing
+# pulse_functions' heavy third-party dependencies just for the GUI widget. Keep in sync.
+VALID_LOCATION_METHODS = {
+    'differential':   ['auto', 'flip_weighted', 'gaussian', 'dipole'],
+    'single_channel': ['auto', 'gaussian', 'dipole'],
+    'pca':            ['auto', 'pca_spatial', 'gaussian', 'dipole'],
 }
 
 # ML-related imports for classifier functionality
@@ -249,7 +257,8 @@ class PulseDiagnosticTool:
         # Parameter inputs split into two columns
         self.param_vars = {}
         # Exclude length_extraction and pulse_mode from automatic generation (dropdowns instead)
-        param_items = [(k, v) for k, v in self.parameters.items() if k not in ('length_extraction', 'pulse_mode')]
+        param_items = [(k, v) for k, v in self.parameters.items()
+                       if k not in ('length_extraction', 'pulse_mode', 'extraction_method', 'location_method')]
         mid_point = (len(param_items) + 1) // 2
         
         # Left column parameters
@@ -276,19 +285,34 @@ class PulseDiagnosticTool:
             entry.bind('<Return>', lambda e: self.detect_pulses())
             self.param_vars[param] = var
 
-        # Add differential/non-differential detection mode as dropdown at the right column
-        diff_return_frame = ttk.Frame(right_param_frame)
-        diff_return_frame.pack(fill=tk.X, pady=1)
-        ttk.Label(diff_return_frame, text="return_diff", width=18).pack(side=tk.LEFT)
-        self.return_diff_var = tk.StringVar(value=str(self.parameters['return_diff']))
-        return_diff_dropdown = ttk.Combobox(
-            diff_return_frame,
-            textvariable=self.return_diff_var,
-            values=['True', 'False'],
+        # Add extraction_method / location_method dropdowns at the right column (replaces
+        # the old return_diff / use_pca pair - see pulse_functions._VALID_LOCATION_METHODS)
+        extraction_frame = ttk.Frame(right_param_frame)
+        extraction_frame.pack(fill=tk.X, pady=1)
+        ttk.Label(extraction_frame, text="extraction_method", width=18).pack(side=tk.LEFT)
+        self.extraction_method_var = tk.StringVar(value=str(self.parameters['extraction_method']))
+        extraction_method_dropdown = ttk.Combobox(
+            extraction_frame,
+            textvariable=self.extraction_method_var,
+            values=['differential', 'single_channel', 'pca'],
             state='readonly',
             width=12
         )
-        return_diff_dropdown.pack(side=tk.RIGHT)
+        extraction_method_dropdown.pack(side=tk.RIGHT)
+        extraction_method_dropdown.bind('<<ComboboxSelected>>', self.update_location_method_options)
+
+        location_frame = ttk.Frame(right_param_frame)
+        location_frame.pack(fill=tk.X, pady=1)
+        ttk.Label(location_frame, text="location_method", width=18).pack(side=tk.LEFT)
+        self.location_method_var = tk.StringVar(value=str(self.parameters['location_method']))
+        self.location_method_dropdown = ttk.Combobox(
+            location_frame,
+            textvariable=self.location_method_var,
+            values=VALID_LOCATION_METHODS[self.parameters['extraction_method']],
+            state='readonly',
+            width=12
+        )
+        self.location_method_dropdown.pack(side=tk.RIGHT)
         
         # Add length_extraction as a dropdown at the bottom of right column
         length_extr_frame = ttk.Frame(right_param_frame)
@@ -1118,8 +1142,18 @@ class PulseDiagnosticTool:
         for param, var in self.param_vars.items():
             if param in self.parameters:
                 var.set(str(self.parameters[param]))
-        self.return_diff_var.set(str(self.parameters['return_diff']))
+        self.extraction_method_var.set(str(self.parameters['extraction_method']))
+        self.update_location_method_options()
+        self.location_method_var.set(str(self.parameters['location_method']))
         self.length_extraction_var.set(self.parameters['length_extraction'])
+
+    def update_location_method_options(self, event=None):
+        """Restrict location_method choices to those valid for the selected extraction_method."""
+        extraction_method = self.extraction_method_var.get()
+        valid_options = VALID_LOCATION_METHODS.get(extraction_method, ['auto'])
+        self.location_method_dropdown.config(values=valid_options)
+        if self.location_method_var.get() not in valid_options:
+            self.location_method_var.set('auto')
 
     def update_parameters(self):
         """Update parameters from GUI inputs"""
@@ -1127,7 +1161,7 @@ class PulseDiagnosticTool:
             for param, var in self.param_vars.items():
                 value_str = var.get().strip()
                 
-                if param in ['save_filtered_out', 'return_diff','use_pca']:
+                if param == 'save_filtered_out':
                     self.parameters[param] = value_str.lower() in ['true', '1', 'yes', 'on']
                 elif param in ['interp_factor', 'min_width_us', 'max_width_us', 'peak_fft_freq_min', 
                                'peak_fft_freq_max', 'length', 'length_factor', 'search_window', 
@@ -1136,8 +1170,9 @@ class PulseDiagnosticTool:
                 else:
                     self.parameters[param] = float(value_str)
             
-            # Update return_diff from dropdown
-            self.parameters['return_diff'] = self.return_diff_var.get() == 'True'
+            # Update extraction_method / location_method from dropdowns
+            self.parameters['extraction_method'] = self.extraction_method_var.get()
+            self.parameters['location_method'] = self.location_method_var.get()
 
             # Update length_extraction from dropdown
             self.parameters['length_extraction'] = self.length_extraction_var.get()
@@ -1188,11 +1223,11 @@ class PulseDiagnosticTool:
             
             print(f"Detecting pulses on {n_channels} channels...")
             
-            # Create detection signal(s). return_diff selects WHICH signal detection runs on
-            # (differential pairs vs raw single-ended channels) - independent of the raw-data
+            # Create detection signal(s). extraction_method selects WHICH signal detection runs
+            # on (differential pairs vs raw single-ended channels) - independent of the raw-data
             # preview's plot_mode toggle above. pulse_mode (below) independently selects the
             # detection algorithm applied to whichever signal is chosen here.
-            if self.data_source == 'multich_linear' and self.parameters['return_diff']:
+            if self.data_source == 'multich_linear' and self.parameters['extraction_method'] == 'differential':
                 data_detect = np.diff(data, axis=1)
                 n_detect_channels = n_channels - 1
                 detect_pair_indices = [i for i in range(n_detect_channels)
@@ -1202,7 +1237,7 @@ class PulseDiagnosticTool:
                     print("    *** DEAD CHANNEL(S) %s — skipping detection pairs: %s ***" %
                           (", ".join("ch%d" % (c + 1) for c in self.dead_ch_0idx),
                            ", ".join(str(p) for p in dead_pairs)))
-            elif self.data_source == 'multich_linear' and not self.parameters['return_diff']:
+            elif self.data_source == 'multich_linear' and self.parameters['extraction_method'] != 'differential':
                 data_detect = data  # Use single-ended data for detection
                 n_detect_channels = n_channels
                 detect_pair_indices = [i for i in range(n_detect_channels) if i not in self.dead_ch_0idx]
@@ -1283,20 +1318,9 @@ class PulseDiagnosticTool:
                 troughs = np.array([p[2] for p in unique_pulses])
                 widths = np.array([p[3] for p in unique_pulses])
 
-                if self.parameters['return_diff'] and not self.parameters['use_pca']:
-                    return_diff = True
-                    use_pca = False
-                elif not self.parameters['return_diff'] and not self.parameters['use_pca']:
-                    return_diff = False
-                    use_pca = False
-                elif not self.parameters['return_diff'] and self.parameters['use_pca']:
-                    return_diff = False
-                    use_pca = True
-                elif self.parameters['return_diff'] and self.parameters['use_pca']:
-                    messagebox.showwarning("Parameter Warning", "Both 'Return Differential' and 'Use PCA' are enabled. PCA will be applied to single-ended data, ignoring the differential return setting.")
-                    return_diff = False
-                    use_pca = True
-                
+                if self.parameters['extraction_method'] == 'pca':
+                    messagebox.showwarning("Parameter Warning", "PCA extraction uses all channels at once (not a pre-selected pair or single channel).")
+
                 # Extract waveforms
                 (
                     eod_waveforms, eod_amps, eod_widths, eod_chan, is_differential,
@@ -1305,7 +1329,8 @@ class PulseDiagnosticTool:
                     wf_lengths, snippet_p3_idc, final_p3_idc
                 ) = extract_pulse_snippets(
                     data, peaks, troughs, rate = rate,  
-                    source=self.data_source, return_differential=return_diff, use_pca=use_pca,
+                    source=self.data_source, extraction_method=self.parameters['extraction_method'],
+                    location_method=self.parameters.get('location_method', 'auto'),
                     pca_interp_points=self.parameters['pca_interp_points'],
                     pca_component=self.parameters['pca_component'],
                     interp_factor=self.parameters['interp_factor'],
@@ -1438,10 +1463,10 @@ class PulseDiagnosticTool:
                 print(f"    Filtering result: {len(keep_indices)} kept, {len(filtered_out_indices)} filtered out of {len(eod_waveforms)} total")
                 
                 if len(keep_indices) == 0:
-                    mode_desc = f"pulse_mode={self.parameters['pulse_mode']}, return_diff={self.parameters['return_diff']}"
+                    mode_desc = f"pulse_mode={self.parameters['pulse_mode']}, extraction_method={self.parameters['extraction_method']}"
                     print(f"    *** No pulses survived filtering. Current combination ({mode_desc}) "
                           f"may not suit this data - e.g. monophasic signals rarely produce clean "
-                          f"differential flips, so try toggling return_diff or loosening width/"
+                          f"differential flips, so try switching extraction_method or loosening width/"
                           f"amplitude_ratio/fft bounds. ***")
                 
                 # Split data into kept and filtered_out sets
@@ -1485,9 +1510,9 @@ class PulseDiagnosticTool:
                 
                 # The marker overlay's coordinates (eod_chan semantics, differential-pair vs
                 # raw channel) are only valid against a background plot of the SAME mode, so
-                # force the background + plot_mode toggle to match return_diff rather than
+                # force the background + plot_mode toggle to match extraction_method rather than
                 # trusting whatever view was last manually selected before detection ran.
-                target_plot_mode = 'differential' if self.parameters['return_diff'] else 'single_ended'
+                target_plot_mode = 'differential' if self.parameters['extraction_method'] == 'differential' else 'single_ended'
                 if self.plot_mode.get() != target_plot_mode:
                     self.plot_mode.set(target_plot_mode)
                 self.ax.clear()
@@ -1624,9 +1649,9 @@ class PulseDiagnosticTool:
     
     def add_pulse_markers_single_ended(self, data, rate, start_sec, n_channels, kept_data, filtered_out_data):
         """Add pulse markers to existing single-ended plot without re-plotting the data.
-        Used when return_diff=False - eod_chan is a raw channel index (0..n_channels-1),
-        not a differential-pair index, so each pulse gets exactly one marker on its own
-        winning channel (not duplicated across a pair's two neighbours)."""
+        Used when extraction_method='single_channel' - eod_chan is a raw channel index
+        (0..n_channels-1), not a differential-pair index, so each pulse gets exactly one
+        marker on its own winning channel (not duplicated across a pair's two neighbours)."""
 
         # Handle single-channel differential data
         if self.data_source == '1ch_diff':
