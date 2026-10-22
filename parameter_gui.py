@@ -11,9 +11,11 @@ import configparser
 import json
 import os
 
-# Field-extraction parameter presets per pulse_mode. Monophasic (eel) values are
-# first-pass estimates ported from Suriname_2024_eodlogger/old/1_Extract Eel EODs main.py
-# and will likely need hands-on retuning against real recordings.
+# Field-extraction parameter presets per pulse_mode. The monophasic (eel) values use the
+# envelope detection route; they were tuned on Suriname 2024 events (see
+# Suriname_2024_eodlogger/05_1_Validate_envelope_route.py) and may need retuning elsewhere.
+# extraction_window 'variable' only selects the concatenated npz + json waveform output; the
+# envelope route itself always uses extraction_window_length_us.
 FIELD_BIPHASIC_PRESET = {
     'thresh': 0.02,
     'bandpass_low_cutoff': 100,
@@ -34,12 +36,24 @@ FIELD_BIPHASIC_PRESET = {
     'search_window': 10,
     'extraction_window': 'fixed',
     'extraction_method': 'differential',
+    'detection_method': 'per_channel',
     'location_method': 'auto',
     'ignore_channel': False,
+    'envelope_peak_window_us': 1000,
+    'envelope_shadow_us': 5000,
+    'envelope_shadow_fraction': 0.4,
+    'envelope_highpass_hz': 8.0,
+    'envelope_biphasic_merge_us': 2000,
+    'min_amplitude': 0.04,
+    'max_ipi_seconds': 5.0,
+    'min_eods_premerge': 5,
+    'max_merge_gap_seconds': 0.5,
+    'min_eods_postmerge': 30,
+    'margin': 1.0,
 }
 
 FIELD_MONOPHASIC_PRESET = {
-    'thresh': 0.01,
+    'thresh': 0.001,
     'bandpass_low_cutoff': 20,
     'bandpass_high_cutoff': 500,
     'min_rel_slope_diff': 0.25,
@@ -52,14 +66,26 @@ FIELD_MONOPHASIC_PRESET = {
     'amplitude_ratio_min': 1.0,
     'amplitude_ratio_max': 50.0,
     'peak_fft_freq_min': 40,
-    'peak_fft_freq_max': 400,
-    'extraction_window_length_us': 3000,
+    'peak_fft_freq_max': 3000,
+    'extraction_window_length_us': 8000,
     'extraction_window_factor': 10.0,
     'search_window': 200,
-    'extraction_window': 'fixed',
+    'extraction_window': 'variable',
     'extraction_method': 'single_channel',
+    'detection_method': 'envelope',
     'location_method': 'auto',
     'ignore_channel': True,
+    'envelope_peak_window_us': 1000,
+    'envelope_shadow_us': 5000,
+    'envelope_shadow_fraction': 0.4,
+    'envelope_highpass_hz': 8.0,
+    'envelope_biphasic_merge_us': 2000,
+    'min_amplitude': 0.001,
+    'max_ipi_seconds': 20.0,
+    'min_eods_premerge': 5,
+    'max_merge_gap_seconds': 20.0,
+    'min_eods_postmerge': 30,
+    'margin': 1.0,
 }
 
 
@@ -70,6 +96,16 @@ VALID_LOCATION_METHODS = {
     'differential':   ['auto', 'flip_weighted', 'gaussian', 'dipole'],
     'single_channel': ['auto', 'gaussian', 'dipole'],
     'pca':            ['auto', 'pca_spatial', 'gaussian', 'dipole'],
+}
+
+# detection_method: 'per_channel' (thunderfish / detect_monophasic_pulses on each channel or pair)
+# or 'envelope' (one pass on the channel-wide envelope, P1-only; monophasic pulses - on biphasic
+# pulses each phase registers as its own fast double pulse, a separate project). The envelope
+# route supports single_channel and pca extraction (P1-only variants).
+# TODO: after a successful test, drop the per_channel monophasic route (detect_monophasic_pulses).
+VALID_EXTRACTION_FOR_DETECTION = {
+    'per_channel': ['differential', 'single_channel', 'pca'],
+    'envelope':    ['single_channel', 'pca'],
 }
 
 
@@ -192,9 +228,9 @@ class ParameterConfigGUI:
         # Left column 
         # Bandpass Filter Option
         self.param_vars['enable_bandpass_filter'] = tk.BooleanVar(value=False)
-        ttk.Checkbutton(pulse_frame, text="Bandpass Filter (Detection Only)", 
-                       variable=self.param_vars['enable_bandpass_filter']).grid(
-            row=0, column=0, columnspan=2, sticky=tk.W, pady=2)
+        self.bandpass_check = ttk.Checkbutton(pulse_frame, text="Bandpass Filter (Detection Only)",
+                                              variable=self.param_vars['enable_bandpass_filter'])
+        self.bandpass_check.grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=2)
         
         detection_params = [
             ('thresh', 'Detection Threshold:', 0.02, float),
@@ -205,17 +241,24 @@ class ParameterConfigGUI:
             ('max_width_us', 'Max Pulse Width (μs):', 1000, float),
             ('width_fac_detection', 'Width Factor for Detection:', 7.0, float),
             ('min_distance_us', 'Min Pulse Distance (μs, monophasic only):', 2000, float),
-            ('duplicate_samples', 'Duplicate Removal Samples:', 5, int)
+            ('duplicate_samples', 'Duplicate Removal Samples:', 5, int),
+            ('envelope_peak_window_us', 'Envelope: Peak Window (μs):', 1000, float),
+            ('envelope_shadow_us', 'Envelope: Shadow Window (μs):', 5000, float),
+            ('envelope_shadow_fraction', 'Envelope: Shadow Fraction:', 0.4, float),
+            ('envelope_highpass_hz', 'Envelope: High-pass (Hz):', 8.0, float),
+            ('envelope_biphasic_merge_us', 'Envelope: Biphasic Merge (μs, 0=off):', 2000, float)
         ]
         
+        self.pulse_entries = {}
         for i, (key, label, default, dtype) in enumerate(detection_params):
             ttk.Label(pulse_frame, text=label).grid(row=i+1, column=0, sticky=tk.W, pady=2)
             if dtype == float:
                 self.param_vars[key] = tk.DoubleVar(value=default)
             else:
                 self.param_vars[key] = tk.IntVar(value=default)
-            ttk.Entry(pulse_frame, textvariable=self.param_vars[key], width=12).grid(
-                row=i+1, column=1, sticky=tk.W, padx=5)
+            entry = ttk.Entry(pulse_frame, textvariable=self.param_vars[key], width=12)
+            entry.grid(row=i+1, column=1, sticky=tk.W, padx=5)
+            self.pulse_entries[key] = entry
         
         # Add vertical separator
         ttk.Separator(pulse_frame, orient='vertical').grid(row=0, column=2, rowspan=15, sticky='ns', padx=10)
@@ -248,10 +291,11 @@ class ParameterConfigGUI:
         next_row = len(filter_params)
         ttk.Label(pulse_frame, text="Extraction Method:").grid(row=next_row, column=3, sticky=tk.W, pady=2)
         self.param_vars['extraction_method'] = tk.StringVar(value='differential')
-        extraction_combo = ttk.Combobox(pulse_frame, textvariable=self.param_vars['extraction_method'],
-                                        values=['differential', 'single_channel', 'pca'], state='readonly', width=12)
-        extraction_combo.grid(row=next_row, column=4, sticky=tk.W, padx=5)
-        extraction_combo.bind('<<ComboboxSelected>>', self.update_location_method_options)
+        self.extraction_combo = ttk.Combobox(pulse_frame, textvariable=self.param_vars['extraction_method'],
+                                             values=VALID_EXTRACTION_FOR_DETECTION['per_channel'],
+                                             state='readonly', width=12)
+        self.extraction_combo.grid(row=next_row, column=4, sticky=tk.W, padx=5)
+        self.extraction_combo.bind('<<ComboboxSelected>>', self.update_location_method_options)
 
         # Location method dropdown - valid options depend on extraction_method (see
         # VALID_LOCATION_METHODS and pulse_functions._VALID_LOCATION_METHODS)
@@ -281,8 +325,18 @@ class ParameterConfigGUI:
                                         values=['biphasic', 'monophasic'], state='readonly', width=12)
         pulse_mode_combo.grid(row=next_row+4, column=4, sticky=tk.W, padx=5)
         pulse_mode_combo.bind('<<ComboboxSelected>>', self.apply_pulse_mode_preset)
+
+        # Detection method (see VALID_EXTRACTION_FOR_DETECTION); selecting 'envelope' restricts
+        # the extraction methods to those it supports
+        ttk.Label(pulse_frame, text="Detection Method:").grid(row=next_row+5, column=3, sticky=tk.W, pady=2)
+        self.param_vars['detection_method'] = tk.StringVar(value='per_channel')
+        detection_combo = ttk.Combobox(pulse_frame, textvariable=self.param_vars['detection_method'],
+                                       values=list(VALID_EXTRACTION_FOR_DETECTION), state='readonly', width=12)
+        detection_combo.grid(row=next_row+5, column=4, sticky=tk.W, padx=5)
+        detection_combo.bind('<<ComboboxSelected>>', self.update_extraction_method_options)
         if self.default_mode == 'monophasic':
             self.apply_pulse_mode_preset()
+        self.update_detection_field_states()
         
         # ===== EVENT CREATION PARAMETERS =====
         event_frame = ttk.LabelFrame(scrollable_frame, text="Event Creation Parameters", padding="10")
@@ -402,7 +456,28 @@ class ParameterConfigGUI:
         for key, value in preset.items():
             if key in self.param_vars:
                 self.param_vars[key].set(value)
+        self.update_extraction_method_options()
+
+    def update_extraction_method_options(self, event=None):
+        """Restrict extraction_method choices to those supported by the selected detection_method."""
+        valid_options = VALID_EXTRACTION_FOR_DETECTION[self.param_vars['detection_method'].get()]
+        self.extraction_combo.config(values=valid_options)
+        if self.param_vars['extraction_method'].get() not in valid_options:
+            self.param_vars['extraction_method'].set(valid_options[0])
         self.update_location_method_options()
+        self.update_detection_field_states()
+
+    def update_detection_field_states(self):
+        """Envelope detection uses its own high-pass and ignores the band-pass; per-channel detection ignores the envelope_* fields."""
+        envelope = self.param_vars['detection_method'].get() == 'envelope'
+        if envelope:
+            self.param_vars['enable_bandpass_filter'].set(False)
+        self.bandpass_check.config(state='disabled' if envelope else 'normal')
+        for key, entry in self.pulse_entries.items():
+            if key.startswith('bandpass_'):
+                entry.config(state='disabled' if envelope else 'normal')
+            elif key.startswith('envelope_'):
+                entry.config(state='normal' if envelope else 'disabled')
 
     def update_location_method_options(self, event=None):
         """Restrict location_method choices to those valid for the selected extraction_method.
@@ -525,6 +600,7 @@ class ParameterConfigGUI:
                             var.set(float(value_str))
                         else:  # StringVar
                             var.set(value_str)
+            self.update_extraction_method_options()
             
             messagebox.showinfo("Success", f"Configuration loaded from:\n{filename}")
             
