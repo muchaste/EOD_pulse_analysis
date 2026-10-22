@@ -32,7 +32,9 @@ from pulse_functions import (extract_pulse_snippets,
                              unify_across_channels,
                              normalize_waveforms,
                              calc_fwhm_width,
-                             detect_monophasic_pulses)
+                             detect_monophasic_pulses,
+                             detect_pulses_envelope,
+                             extract_pulse_snippets_p1)
 
 # Parameter presets per pulse_mode. Monophasic (eel) values are first-pass estimates
 # ported from Suriname_2024_eodlogger/old/1_Extract Eel EODs main.py and will likely
@@ -52,6 +54,7 @@ BIPHASIC_PRESET = {
     'peak_fft_freq_min': 50,
     'peak_fft_freq_max': 13000,
     'extraction_method': 'differential',
+    'detection_method': 'per_channel',
     'location_method': 'auto',
     'pca_interp_points': 300,
     'pca_component': 0,
@@ -59,11 +62,16 @@ BIPHASIC_PRESET = {
     'length': 2000,
     'length_extraction': 'variable',
     'length_factor': 10,
-    'search_window': 10
+    'search_window': 10,
+    'envelope_peak_window_us': 1000,
+    'envelope_shadow_us': 5000,
+    'envelope_shadow_fraction': 0.4,
+    'envelope_highpass_hz': 8.0,
+    'envelope_biphasic_merge_us': 2000
 }
 
 MONOPHASIC_PRESET = {
-    'thresh': 0.5,
+    'thresh': 0.001,
     'min_rel_slope_diff': 0.25,
     'min_width_us': 300,
     'max_width_us': 2000,
@@ -75,16 +83,22 @@ MONOPHASIC_PRESET = {
     'amplitude_ratio_max': 50.0,
     'save_filtered_out': False,
     'peak_fft_freq_min': 40,
-    'peak_fft_freq_max': 400,
+    'peak_fft_freq_max': 3000,
     'extraction_method': 'single_channel',
+    'detection_method': 'envelope',
     'location_method': 'auto',
     'pca_interp_points': 300,
     'pca_component': 0,
     'symmetry_threshold': 0.2,
-    'length': 3000,
-    'length_extraction': 'fixed',
+    'length': 8000,
+    'length_extraction': 'variable',
     'length_factor': 10,
-    'search_window': 200
+    'search_window': 200,
+    'envelope_peak_window_us': 1000,
+    'envelope_shadow_us': 5000,
+    'envelope_shadow_fraction': 0.4,
+    'envelope_highpass_hz': 8.0,
+    'envelope_biphasic_merge_us': 2000
 }
 
 # Mirrors pulse_functions._VALID_LOCATION_METHODS - duplicated here to avoid importing
@@ -93,6 +107,14 @@ VALID_LOCATION_METHODS = {
     'differential':   ['auto', 'flip_weighted', 'gaussian', 'dipole'],
     'single_channel': ['auto', 'gaussian', 'dipole'],
     'pca':            ['auto', 'pca_spatial', 'gaussian', 'dipole'],
+}
+
+# Mirrors pulse_functions._VALID_EXTRACTION_FOR_DETECTION (see the notes there: envelope detection
+# is for monophasic pulses and supports only single_channel extraction; TODO remove the
+# per_channel monophasic route after successful tests).
+VALID_EXTRACTION_FOR_DETECTION = {
+    'per_channel': ['differential', 'single_channel', 'pca'],
+    'envelope':    ['single_channel', 'pca'],
 }
 
 # ML-related imports for classifier functionality
@@ -163,15 +185,32 @@ class PulseDiagnosticTool:
         main_paned = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
         main_paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # Left panel for controls
+        # Left panel for controls (scrollable: canvas + scrollbar around an inner frame)
         left_frame = ttk.Frame(main_paned, width=400)
         main_paned.add(left_frame, weight=0)
+
+        left_canvas = tk.Canvas(left_frame, highlightthickness=0, width=400)
+        left_scrollbar = ttk.Scrollbar(left_frame, orient=tk.VERTICAL, command=left_canvas.yview)
+        left_canvas.configure(yscrollcommand=left_scrollbar.set)
+        left_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        left_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        control_frame = ttk.Frame(left_canvas)
+        control_window = left_canvas.create_window((0, 0), window=control_frame, anchor=tk.NW)
+        control_frame.bind('<Configure>', lambda e: left_canvas.configure(scrollregion=left_canvas.bbox('all')))
+        left_canvas.bind('<Configure>', lambda e: left_canvas.itemconfigure(control_window, width=e.width))
+
+        def _on_left_mousewheel(event):
+            left_canvas.yview_scroll(int(-event.delta / 120), 'units')
+
+        left_canvas.bind('<Enter>', lambda e: left_canvas.bind_all('<MouseWheel>', _on_left_mousewheel))
+        left_canvas.bind('<Leave>', lambda e: left_canvas.unbind_all('<MouseWheel>'))
         
         # Right panel for plot
         right_frame = ttk.Frame(main_paned)
         main_paned.add(right_frame, weight=1)
         
-        self.setup_control_panel(left_frame)
+        self.setup_control_panel(control_frame)
         self.setup_plot_panel(right_frame)
         
     def setup_control_panel(self, parent):
@@ -258,7 +297,8 @@ class PulseDiagnosticTool:
         self.param_vars = {}
         # Exclude length_extraction and pulse_mode from automatic generation (dropdowns instead)
         param_items = [(k, v) for k, v in self.parameters.items()
-                       if k not in ('length_extraction', 'pulse_mode', 'extraction_method', 'location_method')]
+                       if k not in ('length_extraction', 'pulse_mode', 'extraction_method',
+                                    'detection_method', 'location_method')]
         mid_point = (len(param_items) + 1) // 2
         
         # Left column parameters
@@ -285,21 +325,36 @@ class PulseDiagnosticTool:
             entry.bind('<Return>', lambda e: self.detect_pulses())
             self.param_vars[param] = var
 
-        # Add extraction_method / location_method dropdowns at the right column (replaces
-        # the old return_diff / use_pca pair - see pulse_functions._VALID_LOCATION_METHODS)
+        # Add detection_method / extraction_method / location_method dropdowns at the right
+        # column (replaces the old return_diff / use_pca pair - see
+        # pulse_functions._VALID_LOCATION_METHODS / _VALID_EXTRACTION_FOR_DETECTION)
+        detection_frame = ttk.Frame(right_param_frame)
+        detection_frame.pack(fill=tk.X, pady=1)
+        ttk.Label(detection_frame, text="detection_method", width=18).pack(side=tk.LEFT)
+        self.detection_method_var = tk.StringVar(value=str(self.parameters['detection_method']))
+        detection_method_dropdown = ttk.Combobox(
+            detection_frame,
+            textvariable=self.detection_method_var,
+            values=list(VALID_EXTRACTION_FOR_DETECTION),
+            state='readonly',
+            width=12
+        )
+        detection_method_dropdown.pack(side=tk.RIGHT)
+        detection_method_dropdown.bind('<<ComboboxSelected>>', self.update_extraction_method_options)
+
         extraction_frame = ttk.Frame(right_param_frame)
         extraction_frame.pack(fill=tk.X, pady=1)
         ttk.Label(extraction_frame, text="extraction_method", width=18).pack(side=tk.LEFT)
         self.extraction_method_var = tk.StringVar(value=str(self.parameters['extraction_method']))
-        extraction_method_dropdown = ttk.Combobox(
+        self.extraction_method_dropdown = ttk.Combobox(
             extraction_frame,
             textvariable=self.extraction_method_var,
-            values=['differential', 'single_channel', 'pca'],
+            values=VALID_EXTRACTION_FOR_DETECTION[self.parameters['detection_method']],
             state='readonly',
             width=12
         )
-        extraction_method_dropdown.pack(side=tk.RIGHT)
-        extraction_method_dropdown.bind('<<ComboboxSelected>>', self.update_location_method_options)
+        self.extraction_method_dropdown.pack(side=tk.RIGHT)
+        self.extraction_method_dropdown.bind('<<ComboboxSelected>>', self.update_location_method_options)
 
         location_frame = ttk.Frame(right_param_frame)
         location_frame.pack(fill=tk.X, pady=1)
@@ -1143,9 +1198,18 @@ class PulseDiagnosticTool:
             if param in self.parameters:
                 var.set(str(self.parameters[param]))
         self.extraction_method_var.set(str(self.parameters['extraction_method']))
-        self.update_location_method_options()
+        self.detection_method_var.set(str(self.parameters['detection_method']))
+        self.update_extraction_method_options()
         self.location_method_var.set(str(self.parameters['location_method']))
         self.length_extraction_var.set(self.parameters['length_extraction'])
+
+    def update_extraction_method_options(self, event=None):
+        """Restrict extraction_method choices to those supported by the selected detection_method."""
+        valid_options = VALID_EXTRACTION_FOR_DETECTION[self.detection_method_var.get()]
+        self.extraction_method_dropdown.config(values=valid_options)
+        if self.extraction_method_var.get() not in valid_options:
+            self.extraction_method_var.set(valid_options[0])
+        self.update_location_method_options()
 
     def update_location_method_options(self, event=None):
         """Restrict location_method choices to those valid for the selected extraction_method."""
@@ -1170,7 +1234,8 @@ class PulseDiagnosticTool:
                 else:
                     self.parameters[param] = float(value_str)
             
-            # Update extraction_method / location_method from dropdowns
+            # Update extraction_method / detection_method / location_method from dropdowns
+            self.parameters['detection_method'] = self.detection_method_var.get()
             self.parameters['extraction_method'] = self.extraction_method_var.get()
             self.parameters['location_method'] = self.location_method_var.get()
 
@@ -1247,7 +1312,12 @@ class PulseDiagnosticTool:
                 n_detect_channels = 1
                 detect_pair_indices = [0]
 
-            # Detect pulses on each channel
+            # The envelope route detects on all channels at once (below), not per channel/pair
+            use_envelope_detection = self.parameters['detection_method'] == 'envelope'
+            if use_envelope_detection and self.parameters['extraction_method'] not in ('single_channel', 'pca'):
+                raise ValueError("detection_method='envelope' supports only extraction_method='single_channel' or 'pca'")
+            if use_envelope_detection:
+                detect_pair_indices = []
             all_peaks = []
             all_troughs = []
             all_widths = []
@@ -1295,6 +1365,25 @@ class PulseDiagnosticTool:
                 # Unify pulses across channels
                 unique_midpoints, unique_peaks, unique_troughs, unique_widths = unify_across_channels(
                     all_peaks, all_troughs, all_widths, proximity_threshold=self.parameters['duplicate_samples'])
+
+                # Envelope route (monophasic pulses): one P1 per pulse from the channel-wide
+                # envelope. Dead channels are zeroed so they cannot win the envelope.
+                if use_envelope_detection:
+                    envelope_data = data
+                    if len(self.dead_ch_0idx) > 0:
+                        envelope_data = data.copy()
+                        envelope_data[:, self.dead_ch_0idx] = 0
+                    unique_peaks, envelope_channels, _ = detect_pulses_envelope(
+                        envelope_data, rate,
+                        thresh=self.parameters['thresh'],
+                        peak_window_us=self.parameters['envelope_peak_window_us'],
+                        shadow_us=self.parameters['envelope_shadow_us'],
+                        shadow_fraction=self.parameters['envelope_shadow_fraction'],
+                        highpass_hz=self.parameters['envelope_highpass_hz'],
+                        biphasic_merge_us=self.parameters.get('envelope_biphasic_merge_us', 2000))
+                    unique_midpoints = unique_peaks
+                    unique_troughs = unique_peaks
+                    unique_widths = np.zeros(len(unique_peaks))
                 
                 print(f"    Detected {len(unique_midpoints)} unified pulses across channels")
                 # Create unique pulses list
@@ -1322,25 +1411,41 @@ class PulseDiagnosticTool:
                     messagebox.showwarning("Parameter Warning", "PCA extraction uses all channels at once (not a pre-selected pair or single channel).")
 
                 # Extract waveforms
-                (
-                    eod_waveforms, eod_amps, eod_widths, eod_chan, is_differential,
-                    snippet_p1_idc, snippet_p2_idc, final_p1_idc, final_p2_idc, 
-                    pulse_orientation, amplitude_ratios, fft_peak_freqs, pulse_locations,
-                    wf_lengths, snippet_p3_idc, final_p3_idc
-                ) = extract_pulse_snippets(
-                    data, peaks, troughs, rate = rate,  
-                    source=self.data_source, extraction_method=self.parameters['extraction_method'],
-                    location_method=self.parameters.get('location_method', 'auto'),
-                    pca_interp_points=self.parameters['pca_interp_points'],
-                    pca_component=self.parameters['pca_component'],
-                    interp_factor=self.parameters['interp_factor'],
-                    window_mode=self.parameters['length_extraction'],
-                    window_factor=int(self.parameters['length_factor']),
-                    window_length=self.parameters['length'],
-                    search_window=self.parameters['search_window'],
-                    symmetry_threshold=self.parameters.get('symmetry_threshold', 0.3),
-                    pulse_mode=self.parameters['pulse_mode']
-                )
+                if use_envelope_detection:
+                    (
+                        eod_waveforms, eod_amps, eod_widths, eod_chan, is_differential,
+                        snippet_p1_idc, snippet_p2_idc, final_p1_idc, final_p2_idc,
+                        pulse_orientation, amplitude_ratios, fft_peak_freqs, pulse_locations,
+                        wf_lengths, snippet_p3_idc, final_p3_idc, _
+                    ) = extract_pulse_snippets_p1(
+                        envelope_data, peaks, envelope_channels, rate=rate,
+                        window_length=self.parameters['length'],
+                        interp_factor=self.parameters['interp_factor'],
+                        location_method=self.parameters.get('location_method', 'auto'),
+                        extraction_method=self.parameters['extraction_method'],
+                        pca_component=self.parameters['pca_component'],
+                        pca_interp_points=self.parameters['pca_interp_points']
+                    )
+                else:
+                    (
+                        eod_waveforms, eod_amps, eod_widths, eod_chan, is_differential,
+                        snippet_p1_idc, snippet_p2_idc, final_p1_idc, final_p2_idc,
+                        pulse_orientation, amplitude_ratios, fft_peak_freqs, pulse_locations,
+                        wf_lengths, snippet_p3_idc, final_p3_idc
+                    ) = extract_pulse_snippets(
+                        data, peaks, troughs, rate = rate,
+                        source=self.data_source, extraction_method=self.parameters['extraction_method'],
+                        location_method=self.parameters.get('location_method', 'auto'),
+                        pca_interp_points=self.parameters['pca_interp_points'],
+                        pca_component=self.parameters['pca_component'],
+                        interp_factor=self.parameters['interp_factor'],
+                        window_mode=self.parameters['length_extraction'],
+                        window_factor=int(self.parameters['length_factor']),
+                        window_length=self.parameters['length'],
+                        search_window=self.parameters['search_window'],
+                        symmetry_threshold=self.parameters.get('symmetry_threshold', 0.3),
+                        pulse_mode=self.parameters['pulse_mode']
+                    )
 
                 print(f"    Filtering for differential pulses...{len(unique_pulses)} total, {np.sum(is_differential)} differential")
 
@@ -1348,23 +1453,25 @@ class PulseDiagnosticTool:
                     messagebox.showwarning("    No valid EOD snippets extracted after waveform extraction")
                     return
 
-                # Remove duplicates
-                (
-                    eod_waveforms, eod_amps, eod_widths, eod_chan, is_differential,
-                    snippet_p1_idc, snippet_p2_idc, 
-                    final_p1_idc, final_p2_idc,
-                    pulse_orientation, amplitude_ratios, fft_peak_freqs, pulse_locations,
-                    wf_lengths, snippet_p3_idc, final_p3_idc
-                ) = remove_duplicates(
-                    eod_waveforms, eod_amps, eod_widths, eod_chan, is_differential,
-                    snippet_p1_idc, snippet_p2_idc, final_p1_idc, final_p2_idc,
-                    pulse_orientation, amplitude_ratios, fft_peak_freqs, pulse_locations,
-                    wf_lengths, snippet_p3_idc, final_p3_idc, self.parameters
-                )
+                # Remove duplicates (the envelope route yields one unique P1 per pulse)
+                if not use_envelope_detection:
+                    (
+                        eod_waveforms, eod_amps, eod_widths, eod_chan, is_differential,
+                        snippet_p1_idc, snippet_p2_idc, 
+                        final_p1_idc, final_p2_idc,
+                        pulse_orientation, amplitude_ratios, fft_peak_freqs, pulse_locations,
+                        wf_lengths, snippet_p3_idc, final_p3_idc
+                    ) = remove_duplicates(
+                        eod_waveforms, eod_amps, eod_widths, eod_chan, is_differential,
+                        snippet_p1_idc, snippet_p2_idc, final_p1_idc, final_p2_idc,
+                        pulse_orientation, amplitude_ratios, fft_peak_freqs, pulse_locations,
+                        wf_lengths, snippet_p3_idc, final_p3_idc, self.parameters
+                    )
 
                 # Monophasic pulses: peak-to-trough distance misrepresents true pulse
                 # duration (small second phase), so use FWHM of the dominant phase instead.
-                if self.parameters['pulse_mode'] == 'monophasic':
+                # The envelope route already returns FWHM in eod_widths.
+                if self.parameters['pulse_mode'] == 'monophasic' and not use_envelope_detection:
                     eod_widths = calc_fwhm_width(
                         eod_waveforms, snippet_p1_idc, rate, interp_factor=self.parameters['interp_factor'])
 
@@ -1679,7 +1786,7 @@ class PulseDiagnosticTool:
                                'k-', linewidth=0.5, alpha=0.6)
                     self.ax.plot(time_coord, pulse_location * offset_se,
                                'ko', markersize=2, alpha=0.8)
-                if p2_idx < len(data):
+                if 0 <= p2_idx < len(data):
                     self.ax.plot((p2_idx / rate) + start_sec,
                                data[p2_idx, ch] + ch * offset_se,
                                'o', markersize=5, color='blue')
@@ -1693,7 +1800,7 @@ class PulseDiagnosticTool:
                     self.ax.plot((p1_idx / rate) + start_sec,
                                data[p1_idx, ch] + ch * offset_se,
                                'o', markersize=5, color='grey', alpha=0.6)
-                if p2_idx < len(data):
+                if 0 <= p2_idx < len(data):
                     self.ax.plot((p2_idx / rate) + start_sec,
                                data[p2_idx, ch] + ch * offset_se,
                                'o', markersize=5, color='grey', alpha=0.6)
@@ -1913,15 +2020,22 @@ Current Parameters:
         
         # Normalize waveforms for overlay plot with normalize_waveforms function
         # Use crop_and_interpolate=True to ensure fixed-length output for variable-length extraction
-        normalized_waveforms = np.array(normalize_waveforms(
+        normalized_list, normalization_info = normalize_waveforms(
             waveforms, snippet_p1_idc, snippet_p2_idc, 
             crop_and_interpolate=True, crop_factor=self.crop_factor.get(),
-            target_length=self.target_samples.get()
-        ))
+            target_length=self.target_samples.get(), return_normalization_info=True
+        )
+        normalized_waveforms = np.array(normalized_list)
         
-        # Time axis for waveforms (centered around 0)
+        # Time axis (centered on P1): every waveform was resampled from its own crop window
+        # (crop_factor x pulse width, limited by the snippet), so the axis spans the median
+        # crop window; waveforms with a different window are only approximately aligned in time.
+        # Snippets are interpolated by interp_factor, hence the effective rate.
         n_samples = normalized_waveforms.shape[1]
-        time_axis = (np.arange(n_samples) - n_samples//2) / rate * 1000  # in ms
+        crop_windows = normalization_info['crop_window_samples']
+        median_window_s = np.median(crop_windows[crop_windows > 0]) / (rate * self.parameters['interp_factor'])
+        time_axis = (np.arange(n_samples) - n_samples // 2) / n_samples * median_window_s * 1000  # in ms
+        effective_rate = n_samples / median_window_s
         
         # 1. Overlay plot of normalized waveforms
         for i, wf in enumerate(normalized_waveforms):
@@ -1973,7 +2087,7 @@ Current Parameters:
         # Calculate PSD for each waveform and average
         psd_list = []
         for wf in normalized_waveforms:
-            freqs_psd, psd = signal.welch(wf, fs=rate, nperseg=min(len(wf), 1024))
+            freqs_psd, psd = signal.welch(wf, fs=effective_rate, nperseg=min(len(wf), 1024))
             psd_list.append(psd)
         
         # Average PSD across all waveforms
