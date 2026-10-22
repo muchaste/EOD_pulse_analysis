@@ -39,7 +39,9 @@ from pulse_functions import (
     filter_events,
     create_event_plots,
     calc_fwhm_width,
-    detect_monophasic_pulses
+    detect_monophasic_pulses,
+    detect_pulses_envelope,
+    extract_pulse_snippets_p1
 )
 
 # Import parameter configuration GUI
@@ -352,13 +354,20 @@ for n, filepath in enumerate(file_set['filename']):
     else:
         raise ValueError(f"Unknown source: {parameters['source']}")
 
+    # The envelope route detects on all channels at once (below), not per channel/pair
+    use_envelope_detection = parameters.get('detection_method', 'per_channel') == 'envelope'
+    if use_envelope_detection and parameters['extraction_method'] not in ('single_channel', 'pca'):
+        raise ValueError("detection_method='envelope' supports only extraction_method='single_channel' or 'pca'")
+    if use_envelope_detection:
+        detect_indices = []
+
     # Detect pulses across appropriate channels
     peaks = []
     troughs = []
     pulse_widths = []
     
     # Check for bandpass filter settings
-    enable_bp = parameters.get('enable_bandpass_filter', False)
+    enable_bp = parameters.get('enable_bandpass_filter', False) and not use_envelope_detection
     bp_low = parameters.get('bandpass_low_cutoff', 300)
     bp_high = parameters.get('bandpass_high_cutoff', 2000)
 
@@ -398,6 +407,24 @@ for n, filepath in enumerate(file_set['filename']):
     unique_midpoints, unique_peaks, unique_troughs, unique_widths = unify_across_channels(
         peaks, troughs, pulse_widths, proximity_threshold=parameters['duplicate_samples'])
 
+    # Envelope route (monophasic pulses): one P1 per pulse from the channel-wide envelope.
+    # Dead channels are zeroed so they cannot win the envelope or enter the location profile.
+    if use_envelope_detection:
+        envelope_data = detection_data
+        if len(_dead_ch_0idx) > 0:
+            envelope_data = detection_data.copy()
+            envelope_data[:, _dead_ch_0idx] = 0
+        unique_peaks, envelope_channels, _ = detect_pulses_envelope(
+            envelope_data, rate,
+            thresh=parameters['thresh'],
+            peak_window_us=parameters['envelope_peak_window_us'],
+            shadow_us=parameters['envelope_shadow_us'],
+            shadow_fraction=parameters['envelope_shadow_fraction'],
+            highpass_hz=parameters['envelope_highpass_hz'],
+            biphasic_merge_us=parameters.get('envelope_biphasic_merge_us', 2000))
+        unique_midpoints = unique_peaks
+        unique_troughs = unique_peaks
+
     print(f"  Found {len(unique_midpoints)} unique pulses")
     del peaks, troughs, pulse_widths
     gc.collect()
@@ -405,33 +432,49 @@ for n, filepath in enumerate(file_set['filename']):
     # Extract and analyze waveforms
     if len(unique_midpoints) > 0:
         # Extract variable-width snippets and analyze them
-
-        (
-            eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
-            snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc, 
-            pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations,
-            wf_lengths, snippet_p3_idc, final_p3_idc
-        ) = extract_pulse_snippets(
-            detection_data, unique_peaks, unique_troughs, rate=rate,
-            source='multich_linear', extraction_method=parameters['extraction_method'],
-            location_method=parameters.get('location_method', 'auto'),
-            interp_factor=parameters['interp_factor'],
-            pca_interp_points=300,
-            window_mode = parameters['extraction_window'],
-            window_factor = parameters['extraction_window_factor'],
-            window_length = parameters['extraction_window_length_us'],
-            search_window = parameters['search_window'],
-            symmetry_threshold=parameters.get('symmetry_threshold', 0.3),
-            pulse_mode=parameters.get('pulse_mode', 'biphasic')
-        )
+        if use_envelope_detection:
+            (
+                eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
+                snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc,
+                pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations,
+                wf_lengths, snippet_p3_idc, final_p3_idc, p1_amplitudes
+            ) = extract_pulse_snippets_p1(
+                envelope_data, unique_peaks, envelope_channels, rate=rate,
+                window_length=parameters['extraction_window_length_us'],
+                interp_factor=parameters['interp_factor'],
+                location_method=parameters.get('location_method', 'auto'),
+                extraction_method=parameters['extraction_method'],
+                pca_interp_points=300
+            )
+        else:
+            p1_amplitudes = None
+            (
+                eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
+                snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc, 
+                pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations,
+                wf_lengths, snippet_p3_idc, final_p3_idc
+            ) = extract_pulse_snippets(
+                detection_data, unique_peaks, unique_troughs, rate=rate,
+                source='multich_linear', extraction_method=parameters['extraction_method'],
+                location_method=parameters.get('location_method', 'auto'),
+                interp_factor=parameters['interp_factor'],
+                pca_interp_points=300,
+                window_mode = parameters['extraction_window'],
+                window_factor = parameters['extraction_window_factor'],
+                window_length = parameters['extraction_window_length_us'],
+                search_window = parameters['search_window'],
+                symmetry_threshold=parameters.get('symmetry_threshold', 0.3),
+                pulse_mode=parameters.get('pulse_mode', 'biphasic')
+            )
 
         if len(eod_snippets) == 0:
             print("    No valid EOD snippets extracted after waveform extraction")
             continue
 
         # Monophasic pulses: peak-to-trough distance misrepresents true pulse duration
-        # (small second phase), so use FWHM of the dominant phase instead.
-        if parameters.get('pulse_mode', 'biphasic') == 'monophasic':
+        # (small second phase), so use FWHM of the dominant phase instead. The envelope
+        # route already returns FWHM in eod_widths.
+        if parameters.get('pulse_mode', 'biphasic') == 'monophasic' and not use_envelope_detection:
             eod_widths = calc_fwhm_width(
                 eod_snippets, snippet_p1_idc, rate, interp_factor=parameters['interp_factor'])
 
@@ -473,8 +516,9 @@ for n, filepath in enumerate(file_set['filename']):
 
         # Build QC table from full pre-filter set and extract filtered-out rows
         filtered_out_indices = np.setdiff1d(np.arange(len(eod_snippets)), keep_indices)
-        raw_midpoint_idc = (raw_p1_idc + raw_p2_idc) // 2
-        snippet_midpoint_idc = (snippet_p1_idc + snippet_p2_idc) // 2
+        # P2 is -1 for the envelope route (P1-only): the pulse position is then P1 itself
+        raw_midpoint_idc = np.where(raw_p2_idc >= 0, (raw_p1_idc + raw_p2_idc) // 2, raw_p1_idc)
+        snippet_midpoint_idc = np.where(snippet_p2_idc >= 0, (snippet_p1_idc + snippet_p2_idc) // 2, snippet_p1_idc)
         pre_filter_table = pd.DataFrame({
             'timestamp': [file_set['timestamp'][n] + dt.timedelta(seconds=t) for t in raw_midpoint_idc / rate],
             'file_timestamp': [file_set['timestamp'][n]] * len(raw_midpoint_idc),
@@ -499,6 +543,8 @@ for n, filepath in enumerate(file_set['filename']):
             'p3_idx': final_p3_idc,
             'dead_channels_file': [_dead_channels_file_str] * len(raw_midpoint_idc)
         })
+        if p1_amplitudes is not None:
+            pre_filter_table['p1_amplitude'] = p1_amplitudes
         filteredout_eod_table = pre_filter_table.iloc[filtered_out_indices].copy().reset_index(drop=True)
         del pre_filter_table
 
@@ -519,19 +565,23 @@ for n, filepath in enumerate(file_set['filename']):
         wf_lengths = wf_lengths[keep_indices]
         snippet_p3_idc = snippet_p3_idc[keep_indices]
         final_p3_idc = final_p3_idc[keep_indices]
+        if p1_amplitudes is not None:
+            p1_amplitudes = p1_amplitudes[keep_indices]
 
-        (
-            eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
-            snippet_p1_idc, snippet_p2_idc,
-            raw_p1_idc, raw_p2_idc,
-            pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations, wf_lengths,
-            snippet_p3_idc, final_p3_idc
-        ) = remove_duplicates(
-            eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
-            snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc,
-            pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations, wf_lengths,
-            snippet_p3_idc, final_p3_idc, parameters
-        )
+        # The envelope route yields one unique P1 per pulse, so it needs no duplicate removal
+        if not use_envelope_detection:
+            (
+                eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
+                snippet_p1_idc, snippet_p2_idc,
+                raw_p1_idc, raw_p2_idc,
+                pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations, wf_lengths,
+                snippet_p3_idc, final_p3_idc
+            ) = remove_duplicates(
+                eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
+                snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc,
+                pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations, wf_lengths,
+                snippet_p3_idc, final_p3_idc, parameters
+            )
 
         if len(eod_snippets) == 0:
             print("    No valid EOD snippets remaining after duplicate removal")
@@ -540,8 +590,8 @@ for n, filepath in enumerate(file_set['filename']):
         _total_eods_kept += len(eod_snippets)
 
         # Build eod_table from post-filter, post-dedup arrays
-        raw_midpoint_idc = (raw_p1_idc + raw_p2_idc) // 2
-        snippet_midpoint_idc = (snippet_p1_idc + snippet_p2_idc) // 2
+        raw_midpoint_idc = np.where(raw_p2_idc >= 0, (raw_p1_idc + raw_p2_idc) // 2, raw_p1_idc)
+        snippet_midpoint_idc = np.where(snippet_p2_idc >= 0, (snippet_p1_idc + snippet_p2_idc) // 2, snippet_p1_idc)
         eod_table = pd.DataFrame({
             'timestamp': [file_set['timestamp'][n] + dt.timedelta(seconds=t) for t in raw_midpoint_idc / rate],
             'file_timestamp': [file_set['timestamp'][n]] * len(raw_midpoint_idc),
@@ -566,6 +616,8 @@ for n, filepath in enumerate(file_set['filename']):
             'p3_idx': final_p3_idc,
             'dead_channels_file': [_dead_channels_file_str] * len(raw_midpoint_idc)
         })
+        if p1_amplitudes is not None:
+            eod_table['p1_amplitude'] = p1_amplitudes
         filtered_eod_waveforms = eod_snippets
 
         # Combine with EODs retained from the previous file (event-creation mode only).
@@ -579,12 +631,13 @@ for n, filepath in enumerate(file_set['filename']):
             ret_adj = retained_eod_table.drop(columns=['original_index'], errors='ignore').copy()
             for col in idx_cols:
                 if col in ret_adj.columns:
-                    ret_adj[col] -= retained_audio_start_idx
+                    # negative values (-1 = P2/P3 not set) are not sample indices; leave them
+                    ret_adj[col] = ret_adj[col].where(ret_adj[col] < 0, ret_adj[col] - retained_audio_start_idx)
             ret_adj['relative_time_s'] -= retained_audio_start_idx / rate
             new_adj = eod_table.copy()
             for col in idx_cols:
                 if col in new_adj.columns:
-                    new_adj[col] += retain_len
+                    new_adj[col] = new_adj[col].where(new_adj[col] < 0, new_adj[col] + retain_len)
             new_adj['relative_time_s'] += retain_len / rate
             combined_eod_table = pd.concat([ret_adj, new_adj]).reset_index(drop=True)
             combined_eod_waveforms = retained_eod_waveforms + filtered_eod_waveforms
@@ -651,8 +704,10 @@ for n, filepath in enumerate(file_set['filename']):
                             plt.plot(eod_table['p1_idx'].iloc[actual_idc],
                                     plot_ch_data[eod_table['p1_idx'].iloc[actual_idc]] + ((lane_idx + 0.5) * offset),
                                     'o', markersize=1, color='red')
-                            plt.plot(eod_table['p2_idx'].iloc[actual_idc],
-                                    plot_ch_data[eod_table['p2_idx'].iloc[actual_idc]] + ((lane_idx + 0.5) * offset),
+                            kept_p2 = eod_table['p2_idx'].iloc[actual_idc]
+                            kept_p2 = kept_p2[kept_p2 >= 0]  # -1 = no P2 (envelope route)
+                            plt.plot(kept_p2,
+                                    plot_ch_data[kept_p2] + ((lane_idx + 0.5) * offset),
                                     'o', markersize=1, color='blue')
 
                             if 'pulse_location' in eod_table.columns:
@@ -669,8 +724,10 @@ for n, filepath in enumerate(file_set['filename']):
                                 plt.plot(filteredout_final_p1_idc.iloc[filteredout_ch_idc],
                                         plot_ch_data[filteredout_final_p1_idc.iloc[filteredout_ch_idc]] + ((lane_idx + 0.5) * offset),
                                         'o', markersize=1, color='grey', alpha=0.6)
-                                plt.plot(filteredout_final_p2_idc.iloc[filteredout_ch_idc],
-                                        plot_ch_data[filteredout_final_p2_idc.iloc[filteredout_ch_idc]] + ((lane_idx + 0.5) * offset),
+                                filteredout_p2 = filteredout_final_p2_idc.iloc[filteredout_ch_idc]
+                                filteredout_p2 = filteredout_p2[filteredout_p2 >= 0]
+                                plt.plot(filteredout_p2,
+                                        plot_ch_data[filteredout_p2] + ((lane_idx + 0.5) * offset),
                                         'o', markersize=1, color='grey', alpha=0.6)
 
                     if parameters['extraction_method'] == 'pca':
@@ -846,7 +903,7 @@ for n, filepath in enumerate(file_set['filename']):
                             ].copy()
                             for col in ['p1_idx', 'p2_idx', 'midpoint_idx']:
                                 if col in part_eods.columns:
-                                    part_eods[col] = part_eods[col] - abs_part_start
+                                    part_eods[col] = part_eods[col].where(part_eods[col] < 0, part_eods[col] - abs_part_start)
                             part_num = retained_part_counts[mid]
                             event_num = retained_event_ids[mid]
                             part_audio_file = os.path.join(output_path, f'{fname[:-4]}_event_{event_num}_part_{part_num}.wav')
@@ -1001,7 +1058,7 @@ for n, filepath in enumerate(file_set['filename']):
                 event_eods['original_p2_idx'] = event_eods['p2_idx']
                 event_eods['original_midpoint_idx'] = event_eods['midpoint_idx']
                 event_eods['p1_idx'] = event_eods['p1_idx'] - event_audio_start_idx
-                event_eods['p2_idx'] = event_eods['p2_idx'] - event_audio_start_idx
+                event_eods['p2_idx'] = event_eods['p2_idx'].where(event_eods['p2_idx'] < 0, event_eods['p2_idx'] - event_audio_start_idx)
                 event_eods['midpoint_idx'] = event_eods['midpoint_idx'] - event_audio_start_idx
 
                 # Compute part boundaries and assign audio_part + part_audio_start_sample columns
@@ -1041,7 +1098,7 @@ for n, filepath in enumerate(file_set['filename']):
                             (event_eods['midpoint_idx'] < part_end)
                         ].copy()
                         part_eods['p1_idx'] = part_eods['p1_idx'] - part_start
-                        part_eods['p2_idx'] = part_eods['p2_idx'] - part_start
+                        part_eods['p2_idx'] = part_eods['p2_idx'].where(part_eods['p2_idx'] < 0, part_eods['p2_idx'] - part_start)
                         part_eods['midpoint_idx'] = part_eods['midpoint_idx'] - part_start
                         part_audio_file = os.path.join(output_path, f'{fname[:-4]}_event_{event_id}_part_{part_num}.wav')
                         aio.write_audio(part_audio_file, part_audio, rate)
