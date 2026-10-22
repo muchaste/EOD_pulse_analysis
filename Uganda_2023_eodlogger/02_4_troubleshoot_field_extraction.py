@@ -32,6 +32,8 @@ from pulse_functions import (
     filter_waveforms_with_classifier,
     detect_monophasic_pulses,
     calc_fwhm_width,
+    detect_pulses_envelope,
+    extract_pulse_snippets_p1,
 )
 
 root = tk.Tk()
@@ -55,7 +57,7 @@ int_keys = {
     "duplicate_samples", "interp_factor", "search_window",
     "min_eods_premerge", "min_eods_postmerge"
 }
-str_keys = {"source", "extraction_method", "location_method", "extraction_window", "pulse_mode"}
+str_keys = {"source", "extraction_method", "detection_method", "location_method", "extraction_window", "pulse_mode"}
 
 parameters = {}
 if "Parameters" in config:
@@ -74,6 +76,12 @@ parameters.setdefault("pulse_mode", "biphasic")
 parameters.setdefault("min_distance_us", 2000)
 parameters.setdefault("extraction_method", "differential")
 parameters.setdefault("location_method", "auto")
+parameters.setdefault("detection_method", "per_channel")
+parameters.setdefault("envelope_peak_window_us", 1000.0)
+parameters.setdefault("envelope_shadow_us", 5000.0)
+parameters.setdefault("envelope_shadow_fraction", 0.4)
+parameters.setdefault("envelope_highpass_hz", 8.0)
+parameters.setdefault("envelope_biphasic_merge_us", 2000.0)
 
 use_ml_filtering = False
 classifier_path = ""
@@ -214,6 +222,13 @@ else:
     detect_signal_source = detection_data
     detect_indices = list(range(n_channels))
 
+# The envelope route detects on all channels at once (below), not per channel/pair
+use_envelope_detection = parameters["detection_method"] == "envelope"
+if use_envelope_detection and extraction_method_override not in ("single_channel", "pca"):
+    raise ValueError("detection_method='envelope' supports only extraction_method='single_channel' or 'pca'")
+if use_envelope_detection:
+    detect_indices = []
+
 peaks_list = []
 troughs_list = []
 widths_list = []
@@ -252,36 +267,66 @@ unique_midpoints, unique_peaks, unique_troughs, unique_widths = unify_across_cha
     peaks_list, troughs_list, widths_list,
     proximity_threshold=parameters["duplicate_samples"]
 )
+
+# Envelope route (monophasic pulses): one P1 per pulse from the channel-wide envelope
+if use_envelope_detection:
+    unique_peaks, envelope_channels, _ = detect_pulses_envelope(
+        detection_data, rate,
+        thresh=parameters["thresh"],
+        peak_window_us=parameters["envelope_peak_window_us"],
+        shadow_us=parameters["envelope_shadow_us"],
+        shadow_fraction=parameters["envelope_shadow_fraction"],
+        highpass_hz=parameters["envelope_highpass_hz"],
+        biphasic_merge_us=parameters["envelope_biphasic_merge_us"]
+    )
+    unique_midpoints = unique_peaks
+    unique_troughs = unique_peaks
 print(f"After unification: {len(unique_midpoints)} unique pulses")
 del peaks_list, troughs_list, widths_list
 
 #%% -- EXTRACT ---------------------------------------------------------------
 
-(
-    eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
-    snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc,
-    pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations,
-    wf_lengths, snippet_p3_idc, final_p3_idc
-) = extract_pulse_snippets(
-    detection_data, unique_peaks, unique_troughs, rate=rate,
-    source="multich_linear",
-    extraction_method=extraction_method_override,
-    location_method=location_method_override,
-    interp_factor=int(parameters["interp_factor"]),
-    window_mode=parameters.get("extraction_window", "fixed"),
-    window_factor=int(parameters.get("extraction_window_factor", 10)),
-    window_length=parameters.get("extraction_window_length_us", 4000),
-    search_window=int(parameters["search_window"]),
-    symmetry_threshold=parameters.get("symmetry_threshold", 0.3),
-    pulse_mode=pulse_mode_override
-)
+if use_envelope_detection:
+    (
+        eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
+        snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc,
+        pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations,
+        wf_lengths, snippet_p3_idc, final_p3_idc, p1_amplitudes
+    ) = extract_pulse_snippets_p1(
+        detection_data, unique_peaks, envelope_channels, rate=rate,
+        window_length=parameters.get("extraction_window_length_us", 4000),
+        interp_factor=int(parameters["interp_factor"]),
+        location_method=location_method_override,
+        extraction_method=extraction_method_override
+    )
+else:
+    p1_amplitudes = None
+    (
+        eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
+        snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc,
+        pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations,
+        wf_lengths, snippet_p3_idc, final_p3_idc
+    ) = extract_pulse_snippets(
+        detection_data, unique_peaks, unique_troughs, rate=rate,
+        source="multich_linear",
+        extraction_method=extraction_method_override,
+        location_method=location_method_override,
+        interp_factor=int(parameters["interp_factor"]),
+        window_mode=parameters.get("extraction_window", "fixed"),
+        window_factor=int(parameters.get("extraction_window_factor", 10)),
+        window_length=parameters.get("extraction_window_length_us", 4000),
+        search_window=int(parameters["search_window"]),
+        symmetry_threshold=parameters.get("symmetry_threshold", 0.3),
+        pulse_mode=pulse_mode_override
+    )
 
 print(f"Snippets extracted: {len(eod_snippets)}")
 print(f"  is_differential: -1={np.sum(is_differential==-1)}  0={np.sum(is_differential==0)}  1={np.sum(is_differential==1)}  2={np.sum(is_differential==2)}")
 
 # Monophasic pulses: peak-to-trough distance misrepresents true pulse duration (small
-# second phase), so use FWHM of the dominant phase instead - same as 02_3.
-if pulse_mode_override == "monophasic":
+# second phase), so use FWHM of the dominant phase instead - same as 02_3. The envelope
+# route already returns FWHM in eod_widths.
+if pulse_mode_override == "monophasic" and not use_envelope_detection:
     eod_widths = calc_fwhm_width(eod_snippets, snippet_p1_idc, rate, interp_factor=int(parameters["interp_factor"]))
 
 #%% -- FILTER + DEDUP --------------------------------------------------------
@@ -328,20 +373,25 @@ pulse_locations = pulse_locations[keep_indices]
 wf_lengths      = wf_lengths[keep_indices]
 snippet_p3_idc  = snippet_p3_idc[keep_indices]
 final_p3_idc    = final_p3_idc[keep_indices]
+if p1_amplitudes is not None:
+    p1_amplitudes = p1_amplitudes[keep_indices]
 
-(
-    eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
-    snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc,
-    pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations, wf_lengths,
-    snippet_p3_idc, final_p3_idc
-) = remove_duplicates(
-    eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
-    snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc,
-    pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations, wf_lengths,
-    snippet_p3_idc, final_p3_idc, parameters
-)
+# The envelope route yields one unique P1 per pulse, so it needs no duplicate removal
+if not use_envelope_detection:
+    (
+        eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
+        snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc,
+        pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations, wf_lengths,
+        snippet_p3_idc, final_p3_idc
+    ) = remove_duplicates(
+        eod_snippets, eod_amps, eod_widths, eod_chan, is_differential,
+        snippet_p1_idc, snippet_p2_idc, raw_p1_idc, raw_p2_idc,
+        pulse_orientations, amp_ratios, fft_peak_freqs, pulse_locations, wf_lengths,
+        snippet_p3_idc, final_p3_idc, parameters
+    )
 
-raw_midpoint_idc = (raw_p1_idc + raw_p2_idc) // 2
+# P2 is -1 for the envelope route (P1-only): the pulse position is then P1 itself
+raw_midpoint_idc = np.where(raw_p2_idc >= 0, (raw_p1_idc + raw_p2_idc) // 2, raw_p1_idc)
 print(f"After dedup: {len(eod_snippets)} pulses")
 
 #%% -- DIAGNOSTIC TABLE ------------------------------------------------------
@@ -368,6 +418,8 @@ eod_table = pd.DataFrame({
     "fft_freq_max":       fft_peak_freqs,
     "pulse_location":     pulse_locations,
 })
+if p1_amplitudes is not None:
+    eod_table["p1_amplitude"] = p1_amplitudes
 
 print(f"\npulse_mode={pulse_mode_override}  extraction_method={extraction_method_override}  "
       f"location_method={location_method_override}")
@@ -402,6 +454,7 @@ for ch in range(n_plot_ch):
     if ch_mask.any():
         p1 = raw_p1_idc[ch_mask]
         p2 = raw_p2_idc[ch_mask]
+        p2 = p2[p2 >= 0]  # -1 = no P2 (envelope route)
         plt.plot((p1 + s_idx) / rate, plot_data[p1, ch] + ch * offset,
                  "o", markersize=5, color="red", zorder=3)
         plt.plot((p2 + s_idx) / rate, plot_data[p2, ch] + ch * offset,
@@ -411,6 +464,7 @@ for ch in range(n_plot_ch):
     if fo_ch_mask.any():
         p1_fo = fo_raw_p1[fo_ch_mask]
         p2_fo = fo_raw_p2[fo_ch_mask]
+        p2_fo = p2_fo[p2_fo >= 0]
         plt.plot((p1_fo + s_idx) / rate, plot_data[p1_fo, ch] + ch * offset,
                  "o", markersize=4, color="grey", alpha=0.6, zorder=2)
         plt.plot((p2_fo + s_idx) / rate, plot_data[p2_fo, ch] + ch * offset,
