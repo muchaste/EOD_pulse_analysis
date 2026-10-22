@@ -206,6 +206,18 @@ _VALID_LOCATION_METHODS = {
     'pca':            {'auto', 'pca_spatial', 'gaussian', 'dipole'},
 }
 
+# detection_method is a third, separate axis: 'per_channel' (thunderfish / detect_monophasic_pulses
+# on each channel or pair) or 'envelope' (detect_pulses_envelope: one pass on the channel-wide
+# envelope, P1-only; paired with extract_pulse_snippets_p1, which implements single_channel and
+# pca extraction). The envelope route is meant for monophasic pulses - on biphasic pulses each
+# phase registers as its own pulse (fast double pulses); adapting it is a separate project.
+# TODO: once the envelope route is validated on real data, remove the per_channel monophasic route
+# (detect_monophasic_pulses + the monophasic branch of extract_pulse_snippets).
+_VALID_EXTRACTION_FOR_DETECTION = {
+    'per_channel': {'differential', 'single_channel', 'pca'},
+    'envelope':    {'single_channel', 'pca'},
+}
+
 
 def _dispatch_location_estimate(data, peak_idx, trough_idx, channel_idx, n_channels, location_method):
     """
@@ -389,7 +401,8 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
 
     if extraction_method not in ('differential', 'single_channel', 'pca'):
         raise ValueError(f"Invalid extraction_method: {extraction_method!r}. "
-                         "Use 'differential', 'single_channel', or 'pca'.")
+                         "Use 'differential', 'single_channel', or 'pca' (the envelope detection route "
+                         "uses detect_pulses_envelope + extract_pulse_snippets_p1 instead).")
     valid_location_methods = _VALID_LOCATION_METHODS[extraction_method]
     if location_method not in valid_location_methods:
         raise ValueError(f"location_method={location_method!r} is not valid for "
@@ -840,7 +853,123 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
             final_p1_idc, final_p2_idc, 
             pulse_orientations, amplitude_ratios, fft_peak_freqs, peak_locations_array,
             waveform_lengths_array, snippet_p3_idc, final_p3_idc)
-    
+
+
+def extract_pulse_snippets_p1(data, p1_idc, channels, rate, window_length=4000,
+                              interp_factor=1, location_method='auto',
+                              extraction_method='single_channel', pca_component=0,
+                              pca_interp_points=300):
+    """
+    P1-only snippet extraction for monophasic (electric eel) pulses on single-ended channels.
+
+    Each snippet is centred exactly on P1 (the dominant extremum) and baseline-corrected with
+    the median of the snippet window (per channel). There is no P2/P3 search. Snippets always
+    have the same length (edge-padded at file borders), so they can be stacked.
+
+    Parameters
+    ----------
+    data : 2-D array (n_samples, n_channels)
+    p1_idc : 1-D array of int
+        P1 sample index of each pulse (e.g. from `detect_pulses_envelope`).
+    channels : 1-D array of int or None
+        Channel to extract each pulse from ('single_channel'). Ignored for 'pca' (may be None):
+        the channel with the largest PCA loading is reported instead.
+    rate : float
+        Sampling rate in Hz.
+    window_length : float
+        Snippet length in microseconds (default 4000). The baseline is the median of the
+        snippet, so the window must be well beyond the pulse (about 3x its support, i.e.
+        8000 or more for eel pulses with a 1 ms FWHM) or the baseline sits on the pulse flanks.
+    interp_factor : int
+        Cubic interpolation factor (default 1, none). P1 stays exactly at the centre.
+    location_method : str
+        'auto' (Gaussian profile fit, dipole only if the profile changes sign), 'gaussian'
+        or 'dipole'. The profile is the per-channel P1 amplitude for both extraction methods
+        (not the PCA spatial amplitudes, whose dipole fit assumes a bipolar field).
+    extraction_method : str
+        'single_channel' (the given channel) or 'pca' (projection of all channels onto the
+        first principal component, scaled to physical units as in `_extract_pca_waveform`,
+        but without common-average removal since eel pulses share one sign across channels).
+    pca_component, pca_interp_points : int
+        Passed to `_extract_pca_waveform` (only for extraction_method='pca').
+
+    Returns
+    -------
+    The same 16 outputs as `extract_pulse_snippets`, followed by `p1_amplitudes`, the signed
+    baseline-corrected P1 amplitude. Differences from the biphasic outputs: `eod_amps` is
+    |P1|, `eod_widths` is the FWHM in microseconds, `amplitude_ratios` is 1.0 (neutral),
+    `fft_peak_freqs` is the upper half-power frequency (`calc_halfpower_freq`; the argmax
+    frequency of a monophasic pulse is DC and therefore uninformative),
+    `is_differential` is 0 (2 for 'pca'), and all P2/P3 indices are -1.
+    """
+    if extraction_method not in ('single_channel', 'pca'):
+        raise ValueError(f"extraction_method={extraction_method!r} is not valid for P1-only extraction. "
+                         "Use 'single_channel' or 'pca'.")
+    if location_method not in ('auto', 'gaussian', 'dipole'):
+        raise ValueError(f"location_method={location_method!r} is not valid for P1-only extraction. "
+                         "Use 'auto', 'gaussian' or 'dipole'.")
+
+    data = np.asarray(data)
+    if data.ndim == 1:
+        data = data[:, np.newaxis]
+    n_samples, n_channels = data.shape
+    n_pulses = len(p1_idc)
+    if extraction_method == 'pca' and n_channels < 2:
+        raise ValueError("PCA extraction requires multi-channel data")
+    half = int(window_length * rate / 1e6) // 2
+    profile_half = 2
+
+    eod_waveforms = []
+    out_channels = np.zeros(n_pulses, dtype=int)
+    p1_amplitudes = np.zeros(n_pulses)
+    locations = np.zeros(n_pulses)
+    fft_peak_freqs = np.zeros(n_pulses)
+    for i in range(n_pulses):
+        start = int(p1_idc[i]) - half
+        end = int(p1_idc[i]) + half + 1
+        window = data[max(0, start):min(n_samples, end), :]
+        window = np.pad(window, ((max(0, -start), max(0, end - n_samples)), (0, 0)), mode='edge')
+        window = window - np.median(window, axis=0)
+
+        if extraction_method == 'pca':
+            snippet, _, _, out_channels[i], _ = _extract_pca_waveform(
+                window, pca_component=pca_component, interp_points=pca_interp_points,
+                apply_common_average=False)
+        else:
+            out_channels[i] = channels[i]
+            snippet = window[:, channels[i]]
+        p1_amplitudes[i] = snippet[half]
+
+        profile_window = window[half - profile_half:half + profile_half + 1, :]
+        ch_amps = profile_window[np.argmax(np.abs(profile_window), axis=0), np.arange(n_channels)]
+        if n_channels < 2:
+            locations[i] = 0.0
+        elif location_method == 'dipole':
+            locations[i] = _fit_dipole_location(ch_amps)[0]
+        else:
+            locations[i], _ = _fit_gaussian_profile(ch_amps)
+            if location_method == 'auto' and np.any(np.diff(np.sign(ch_amps)) != 0):
+                dipole_loc, _, dipole_success = _fit_dipole_location(ch_amps)
+                if dipole_success:
+                    locations[i] = dipole_loc
+
+        if interp_factor > 1:
+            grid = np.arange((len(snippet) - 1) * interp_factor + 1) / interp_factor
+            snippet = interp1d(np.arange(len(snippet)), snippet, kind='cubic')(grid)
+        fft_peak_freqs[i] = calc_halfpower_freq(snippet, rate * interp_factor)
+        eod_waveforms.append(snippet)
+
+    snippet_p1_idc = np.full(n_pulses, half * interp_factor, dtype=int)
+    eod_widths = calc_fwhm_width(eod_waveforms, snippet_p1_idc, rate, interp_factor)
+    minus_one = np.full(n_pulses, -1, dtype=int)
+
+    return (eod_waveforms, np.abs(p1_amplitudes), eod_widths, out_channels,
+            np.full(n_pulses, 2 if extraction_method == 'pca' else 0, dtype=int), snippet_p1_idc, minus_one.copy(),
+            np.asarray(p1_idc, dtype=int), minus_one.copy(),
+            np.where(p1_amplitudes >= 0, 'HP', 'HN'), np.ones(n_pulses), fft_peak_freqs, locations,
+            np.array([len(s) for s in eod_waveforms], dtype=int), minus_one.copy(), minus_one.copy(),
+            p1_amplitudes)
+
 
 def _select_differential_channel_pointwise(data, n_channels, peaks, troughs, symmetry_threshold=0.3):
     """
@@ -1112,6 +1241,22 @@ def _estimate_gaussian_pulse_location(data, ref_p1_idx, ref_p2_idx, n_channels):
         # signed: positive if head-positive orientation (P1 is peak, P2 is trough)
         ch_amps[ch] = data[local_p1, ch] - data[local_p2, ch]
 
+    location, fit_success = _fit_gaussian_profile(ch_amps)
+    return location, ch_amps, fit_success
+
+
+def _fit_gaussian_profile(ch_amps):
+    """
+    Fit a Gaussian to the absolute per-channel amplitude profile; the peak position is the
+    location in electrode units. Falls back to the amplitude-weighted centroid if the fit
+    fails or leaves the array.
+
+    Returns
+    -------
+    location : float
+    fit_success : bool
+    """
+    n_channels = len(ch_amps)
     abs_amps = np.abs(ch_amps)
     electrode_positions = np.arange(n_channels, dtype=float)
     peak_ch = int(np.argmax(abs_amps))
@@ -1126,16 +1271,14 @@ def _estimate_gaussian_pulse_location(data, ref_p1_idx, ref_p2_idx, n_channels):
                             p0=p0, bounds=bounds, maxfev=500)
         x0 = float(popt[0])
         if -0.5 <= x0 <= n_channels - 0.5:
-            return x0, ch_amps, True
-        else:
-            total = abs_amps.sum()
-            weighted_loc = float(np.dot(electrode_positions, abs_amps) / total) if total > 0 else float(peak_ch)
-            return weighted_loc, ch_amps, False
+            return x0, True
     except (RuntimeError, ValueError):
-        total = abs_amps.sum()
-        weighted_loc = float(np.dot(electrode_positions, abs_amps) / total) if total > 0 else float(peak_ch)
-        return weighted_loc, ch_amps, False
-    
+        pass
+    total = abs_amps.sum()
+    weighted_loc = float(np.dot(electrode_positions, abs_amps) / total) if total > 0 else float(peak_ch)
+    return weighted_loc, False
+
+
 def _fit_dipole_location(spatial_amplitudes):
     """
     Fit a 1-D dipole model to the signed PCA spatial amplitude profile to estimate
@@ -1460,6 +1603,23 @@ def calc_fft_peak(signal, rate, lower_thresh=0, upper_thresh=100000, zero_paddin
 
     return peak_freq
 
+def calc_halfpower_freq(signal, rate, zero_padding_factor=100):
+    """
+    Upper half-power (-3 dB) frequency of the signal's power spectrum: the first frequency
+    above the spectral maximum where power drops below half of the maximum.
+
+    A monophasic pulse has a low-pass spectrum whose maximum sits at DC, so the argmax
+    frequency (`calc_fft_peak`) is meaningless there; this bandwidth measure tracks the
+    pulse duration instead (about 0.44 / FWHM for a Gaussian pulse).
+    """
+    padded_length = len(signal) * zero_padding_factor
+    power = np.abs(np.fft.rfft(signal, n=padded_length)) ** 2
+    freqs = np.fft.rfftfreq(padded_length, 1 / rate)
+    peak = int(np.argmax(power))
+    below = np.where(power[peak:] < power[peak] / 2)[0]
+    return float(freqs[peak + below[0]]) if len(below) > 0 else float(freqs[-1])
+
+
 def calc_fwhm_width(eod_waveforms, snippet_p1_idc, rate, interp_factor=1):
     """
     Calculate the full width at half maximum (FWHM) of the dominant phase (P1) for each
@@ -1617,6 +1777,98 @@ def detect_monophasic_pulses(data, rate, thresh, min_width_us=300, max_width_us=
             peaks[i] = win_start + int(np.argmax(window))
 
     return peaks, troughs, dom_height, dom_width.astype(int)
+
+
+def detect_pulses_envelope(data, rate, thresh=0.001, peak_window_us=1000,
+                           shadow_us=5000, shadow_fraction=0.4, highpass_hz=8.0,
+                           biphasic_merge_us=2000):
+    """
+    Detect monophasic (electric eel) pulses on the channel-wide envelope
+    env = max over channels of |x_c - baseline_c|.
+
+    One find_peaks pass on the envelope gives one candidate per pulse, independent of
+    which channel is loudest. A local-dominance (shadow) rule then removes the flat
+    inter-pulse plateau peaks that appear inside dense volleys: a candidate is dropped if
+    it is below shadow_fraction times the largest candidate within +-shadow_us.
+
+    Parameters
+    ----------
+    data : 2-D array (n_samples, n_channels)
+        Single-ended channels (1-D input is treated as one channel).
+    rate : float
+        Sampling rate in Hz.
+    thresh : float
+        Minimum envelope height and prominence of a candidate.
+    peak_window_us : float
+        Minimum distance between two candidates in microseconds.
+    shadow_us : float
+        Half-width of the local-dominance window in microseconds.
+    shadow_fraction : float
+        Candidates below this fraction of the largest neighbour are dropped.
+    highpass_hz : float or None
+        Cutoff of the baseline-removal high-pass (SOS, zero phase); None disables it.
+    biphasic_merge_us : float
+        Two candidates closer than this with opposite polarity on the channel of the larger
+        one are the two phases of one biphasic pulse; only the larger is kept. 0 disables it.
+
+    Returns
+    -------
+    peaks : 1-D array of int
+        Sample index of each pulse (P1, the envelope maximum).
+    channels : 1-D array of int
+        Channel with the largest |x - baseline| at each peak.
+    signed_heights : 1-D array of float
+        Baseline-corrected amplitude of that channel at the peak (sign = polarity).
+    """
+    data = np.asarray(data, dtype=float)
+    if data.ndim == 1:
+        data = data[:, np.newaxis]
+
+    if highpass_hz is not None:
+        sos = butter(2, highpass_hz, btype='highpass', fs=rate, output='sos')
+        corrected = sosfiltfilt(sos, data, axis=0)
+    else:
+        corrected = data - np.median(data, axis=0)
+
+    envelope = np.max(np.abs(corrected), axis=1)
+    distance = max(1, int(round(peak_window_us * rate / 1e6)))
+    peaks, _ = find_peaks(envelope, height=thresh, distance=distance, prominence=thresh)
+
+    if len(peaks) == 0:
+        return peaks.astype(int), np.array([], dtype=int), np.array([])
+
+    shadow_samples = int(round(shadow_us * rate / 1e6))
+    heights = envelope[peaks]
+    keep = np.ones(len(peaks), dtype=bool)
+    for i, peak in enumerate(peaks):
+        lo = np.searchsorted(peaks, peak - shadow_samples)
+        hi = np.searchsorted(peaks, peak + shadow_samples, side='right')
+        keep[i] = heights[i] >= shadow_fraction * heights[lo:hi].max()
+    peaks = peaks[keep]
+
+    if biphasic_merge_us and biphasic_merge_us > 0 and len(peaks) > 1:
+        merge_samples = biphasic_merge_us * rate / 1e6
+        keep = np.ones(len(peaks), dtype=bool)
+        last = 0
+        for i in range(1, len(peaks)):
+            if peaks[i] - peaks[last] > merge_samples:
+                last = i
+                continue
+            if envelope[peaks[i]] >= envelope[peaks[last]]:
+                larger, smaller = i, last
+            else:
+                larger, smaller = last, i
+            channel = np.argmax(np.abs(corrected[peaks[larger]]))
+            if corrected[peaks[larger], channel] * corrected[peaks[smaller], channel] < 0:
+                keep[smaller] = False
+                last = larger
+            else:
+                last = i
+        peaks = peaks[keep]
+
+    channels = np.argmax(np.abs(corrected[peaks]), axis=1)
+    signed_heights = corrected[peaks, channels]
+    return peaks.astype(int), channels.astype(int), signed_heights
 
 def remove_proximity_duplicates(arrays_dict, proximity_threshold=3):
     """
@@ -3249,7 +3501,8 @@ def create_channel_events(eod_table, max_ipi_seconds, ignore_channel=False, verb
             event_eods['channel_start_time'] = event_eods['timestamp_dt'].min()
             event_eods['channel_end_time'] = event_eods['timestamp_dt'].max()
             event_eods['channel_n_eods'] = len(event_eods)
-            event_eods['channel_ipi_seconds'] = event_eods['timestamp_dt'].diff().dt.total_seconds().fillna(0).tolist()
+            # First pulse of an event has no preceding IPI: keep NaN (mean/std/median skip it)
+            event_eods['channel_ipi_seconds'] = event_eods['timestamp_dt'].diff().dt.total_seconds().tolist()
             
             channel_events_list.append(event_eods)
             channel_event_counter += 1
@@ -3747,8 +4000,10 @@ def create_event_plots(event_id, event_eods, event_data, event_start_time, sampl
         gc.collect()
     
     # Overlay colored boxes for each original channel event
+    # A single channel event (e.g. ignore_channel=True) has no merge structure to show
+    show_channel_event_boxes = len(merge_event_data) > 1
     midpoints_for_merge_lines = []
-    for _, merge_event_row in merge_event_data.iterrows():
+    for _, merge_event_row in (merge_event_data.iterrows() if show_channel_event_boxes else []):
         cid = merge_event_row['channel_event_id']
         iteration = int(merge_event_row['merge_iteration'])
         ce_eods = event_eods[event_eods['channel_event_id'] == cid]
@@ -3817,7 +4072,9 @@ def create_event_plots(event_id, event_eods, event_data, event_start_time, sampl
     title_base = f'Event {event_id} - {plot_title_method} EOD Detections'
     if plot_step > 1:
         title_base += f' (downsampled {plot_step}x)'
-    title_base += f'\nDuration: {event_duration:.1f}s - Colored boxes: merged channel events'
+    title_base += f'\nDuration: {event_duration:.1f}s'
+    if show_channel_event_boxes:
+        title_base += ' - Colored boxes: merged channel events'
     plt.title(title_base)
     
     plt.legend(loc='upper right')
@@ -3857,7 +4114,9 @@ def normalize_waveforms(eod_snippets, snippet_p1_idc, snippet_p2_idc,
     snippet_p1_idc : array
         P1 (normalizing peak) indices within each snippet
     snippet_p2_idc : array  
-        P2 (opposite polarity) indices within each snippet
+        P2 (opposite polarity) indices within each snippet. -1 marks P1-only snippets
+        (monophasic envelope route): they are already baseline-corrected, 'peak_to_peak'
+        reduces to 'p1_unity', and cropping uses the FWHM of P1 instead of the P1-P2 distance.
     method : str, default 'p1_unity'
         Normalization method:
         - 'p1_unity': P1 amplitude = +1 (head-positive orientation)
@@ -3911,6 +4170,7 @@ def normalize_waveforms(eod_snippets, snippet_p1_idc, snippet_p2_idc,
     # Initialize output
     normalized_snippets = []
     rejected_indices = []
+    crop_windows = []  # length in samples of the crop window each snippet was resampled from (0 = none)
     
     # Normalization metadata
     original_p1_amplitudes = []
@@ -3923,19 +4183,21 @@ def normalize_waveforms(eod_snippets, snippet_p1_idc, snippet_p2_idc,
             # Get P1 and P2 indices for this snippet
             p1_idx = int(snippet_p1_idc[i])
             p2_idx = int(snippet_p2_idc[i])
+            has_p2 = p2_idx >= 0
             
-            # Validate indices
-            if p1_idx < 0 or p1_idx >= len(snippet) or p2_idx < 0 or p2_idx >= len(snippet):
+            # Validate indices (P2 = -1 is valid: P1-only snippet)
+            if p1_idx < 0 or p1_idx >= len(snippet) or (has_p2 and p2_idx >= len(snippet)):
                 print(f"Warning: Invalid P1/P2 indices for snippet {i}, skipping")
                 rejected_indices.append(i)
                 snippet = np.zeros(target_length)
                 normalized_snippets.append(snippet)
+                crop_windows.append(0)
                 continue
             
             # Get original amplitudes
             # original_snippet = snippet.copy()
             p1_amp = snippet[p1_idx]
-            p2_amp = snippet[p2_idx]
+            p2_amp = snippet[p2_idx] if has_p2 else 0.0
             original_p1_amplitudes.append(p1_amp)
             original_p2_amplitudes.append(p2_amp)
             
@@ -3948,7 +4210,9 @@ def normalize_waveforms(eod_snippets, snippet_p1_idc, snippet_p2_idc,
             
             # Baseline correction
             baseline_offset = 0
-            if baseline_correction:
+            # P1-only snippets were already median-baseline corrected by extract_pulse_snippets_p1;
+            # the first-10-samples baseline would be noisy (and can hit a neighbouring pulse)
+            if baseline_correction and has_p2:
                 if method == 'zscore':
                     # For zscore, baseline correction is part of the method
                     baseline_offset = np.mean(snippet)
@@ -4015,10 +4279,16 @@ def normalize_waveforms(eod_snippets, snippet_p1_idc, snippet_p2_idc,
             scaling_factors.append(scale_factor)
             
             # Apply cropping and interpolation if requested
+            crop_window_samples = 0
             if crop_and_interpolate:
-                # Calculate peak-peak duration and midpoint
-                pp_duration = abs(p2_idx - p1_idx)
-                midpoint = (p1_idx + p2_idx) // 2
+                # Calculate peak-peak duration and midpoint (P1-only: FWHM of P1, centred on P1)
+                if has_p2:
+                    pp_duration = abs(p2_idx - p1_idx)
+                    midpoint = (p1_idx + p2_idx) // 2
+                else:
+                    fwhm_samples = calc_fwhm_width([snippet], [p1_idx], 1)[0] / 1e6
+                    pp_duration = fwhm_samples if np.isfinite(fwhm_samples) and fwhm_samples >= 1 else 10
+                    midpoint = p1_idx
                 
                 # Define crop window: crop_factor × P-P duration, centered on midpoint
                 half_window = int(pp_duration * crop_factor / 2)
@@ -4037,6 +4307,7 @@ def normalize_waveforms(eod_snippets, snippet_p1_idc, snippet_p2_idc,
                 
                 # Interpolate to fixed length
                 if len(cropped) >= 2:
+                    crop_window_samples = len(cropped)
                     x_old = np.linspace(0, 1, len(cropped))
                     x_new = np.linspace(0, 1, target_length)
                     
@@ -4048,6 +4319,7 @@ def normalize_waveforms(eod_snippets, snippet_p1_idc, snippet_p2_idc,
                     snippet = np.zeros(target_length)
             
             normalized_snippets.append(snippet)
+            crop_windows.append(crop_window_samples)
             
         except Exception as e:
             print(f"Warning: Failed to normalize snippet {i}: {e}")
@@ -4072,6 +4344,7 @@ def normalize_waveforms(eod_snippets, snippet_p1_idc, snippet_p2_idc,
             'scaling_factors': np.array(scaling_factors),
             'baseline_offsets': np.array(baseline_offsets),
             'rejected_indices': rejected_indices,
+            'crop_window_samples': np.array(crop_windows),
             'n_normalized': len(normalized_snippets),
             'n_rejected': len(rejected_indices)
         }
@@ -4126,7 +4399,8 @@ def plot_normalization_comparison(original_snippets, normalized_snippets,
             
             ax1.plot(snippet, alpha=0.7, label=f'EOD {idx}')
             ax1.plot(p1_idx, snippet[p1_idx], 'ro', markersize=4)
-            ax1.plot(p2_idx, snippet[p2_idx], 'bo', markersize=4)
+            if p2_idx >= 0:
+                ax1.plot(p2_idx, snippet[p2_idx], 'bo', markersize=4)
     
     ax1.set_title('Original Waveforms')
     ax1.set_xlabel('Sample')
@@ -4151,7 +4425,7 @@ def plot_normalization_comparison(original_snippets, normalized_snippets,
             ax2.plot(snippet, alpha=0.7, label=f'EOD {orig_idx}')
             if p1_idx < len(snippet):
                 ax2.plot(p1_idx, snippet[p1_idx], 'ro', markersize=4)
-            if p2_idx < len(snippet):
+            if 0 <= p2_idx < len(snippet):
                 ax2.plot(p2_idx, snippet[p2_idx], 'bo', markersize=4)
     
     method_title = normalization_info['method'] if normalization_info else 'normalized'
