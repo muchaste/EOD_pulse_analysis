@@ -469,6 +469,8 @@ for n, filepath in enumerate(file_set['filename']):
 
         if len(eod_snippets) == 0:
             print("    No valid EOD snippets extracted after waveform extraction")
+            if retained_eod_table is not None:
+                retained_data = data  # keep the pending event's buffer; frame and start time are unchanged
             continue
 
         # Monophasic pulses: peak-to-trough distance misrepresents true pulse duration
@@ -509,6 +511,8 @@ for n, filepath in enumerate(file_set['filename']):
 
         if len(keep_indices) == 0:
             print("    No pulses remaining after filtering")
+            if retained_eod_table is not None:
+                retained_data = data
             continue
 
         print(f"    Filtered {len(eod_snippets) - len(keep_indices)} out of {len(eod_snippets)} pulses")
@@ -585,6 +589,8 @@ for n, filepath in enumerate(file_set['filename']):
 
         if len(eod_snippets) == 0:
             print("    No valid EOD snippets remaining after duplicate removal")
+            if retained_eod_table is not None:
+                retained_data = data
             continue
 
         _total_eods_kept += len(eod_snippets)
@@ -823,6 +829,11 @@ for n, filepath in enumerate(file_set['filename']):
 
             if len(channel_events) == 0:
                 print("No channel events created!")
+                retained_eod_table = None
+                retained_eod_waveforms = None
+                retained_event_ids.clear()
+                retained_part_counts.clear()
+                n_prev_retained = 0
                 continue
 
             if parameters['pre_merge_filtering']:
@@ -832,6 +843,11 @@ for n, filepath in enumerate(file_set['filename']):
 
             if len(filtered_channel_events) == 0:
                 print("    No channel events remaining after pre-merge filtering!")
+                retained_eod_table = None
+                retained_eod_waveforms = None
+                retained_event_ids.clear()
+                retained_part_counts.clear()
+                n_prev_retained = 0
                 continue
 
             if parameters['merge_events']:
@@ -841,6 +857,11 @@ for n, filepath in enumerate(file_set['filename']):
 
                 if len(merged_events) == 0:
                     print("No merged events created!")
+                    retained_eod_table = None
+                    retained_eod_waveforms = None
+                    retained_event_ids.clear()
+                    retained_part_counts.clear()
+                    n_prev_retained = 0
                     continue
             else:
                 merged_events = filtered_channel_events.copy()
@@ -1134,6 +1155,10 @@ for n, filepath in enumerate(file_set['filename']):
                 del event_eods, event_eod_waveforms, event_data
 
             del final_events, events_at_end
+
+    # File without any pulses while an event is pending: keep the buffer for the next file
+    if retained_eod_table is not None and retained_data is None:
+        retained_data = data
 
     # Clear memory
     del data, data_diff
