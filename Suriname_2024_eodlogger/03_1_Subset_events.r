@@ -6,8 +6,9 @@
 #    (signal-to-noise gate), detect volley groups and compute event metrics (amplitude, IPI, amplitude CV,
 #    polarity flips) from all pulses and from the volley pulses; these metrics go into the review table
 # 4. Copy event files and save candidate table + pulses for visual review
-# 5. Manual review: assign category (moving / resting / volley, ...) in the 'category' column
-# 6. Select the top n events per category ranked by the P90 amplitude of the window pulses
+# 5. Manual review: assign category (r = re-classify, v = volley, others excluded) in the 'category' column
+# 6. Re-classify the r events into moving (m) / stationary (s) by absolute amplitude CV and median IPI, then select
+#    the top n events per category ranked by the P90 amplitude of the metric pulses
 #    (volley pulses for volleys, all pulses for the other categories)
 # Use ggplot2+ggpubr for visualizations, tidyverse for data manipulation
 
@@ -18,8 +19,8 @@ library(lubridate)
 rm(list = ls())
 
 # Root folder to scan recursively for all_event_summaries.csv
-root_dir <- "G:/First Trip/Avanavero/"
-output_dir <- "G:/First Trip/Avanavero/eel_event_subsetting"
+root_dir <- "G:/First Trip/Raleighvallen/"
+output_dir <- "G:/First Trip/Raleighvallen/eel_event_subsetting_win_8000"
 dir.create(output_dir, showWarnings = FALSE)
 
 # Assumes these extractions used extraction_method='single_channel' with ignore_channel=TRUE
@@ -36,6 +37,7 @@ cat(sprintf("Found %d all_event_summaries.csv files\n", length(summary_files)))
 
 # Only the envelope-method extractions
 summary_files <- summary_files[grepl("Envelope", summary_files, fixed = TRUE)]
+summary_files <- summary_files[grepl("win_8000", summary_files, fixed = TRUE)]
 cat(sprintf("Kept %d envelope extractions\n", length(summary_files)))
 
 all_events <- NULL
@@ -167,8 +169,8 @@ candidate_pulses <- all_pulses %>%
 # --- Event metrics from all pulses (pulse_set "all") and from the volley pulses (pulse_set "volley") ---
 # IPIs are only taken between consecutive pulses of the same IPI group (all pulses: one group; volley
 # pulses: the volley group), so gaps between volleys do not enter. The P90 amplitude is the proximity
-# proxy for ranking, independent of the share of weak pulses. window_amp_cv_signed is kept next to
-# window_amp_cv_abs for comparison: the signed version explodes when the polarity inverts.
+# proxy for ranking, independent of the share of weak pulses. metric_amp_cv_signed is kept next to
+# metric_amp_cv_abs for comparison: the signed version explodes when the polarity inverts.
 metric_pulses <- bind_rows(
   candidate_pulses %>% mutate(pulse_set = "all", ipi_group = 1L),
   candidate_pulses %>% filter(in_volley) %>% mutate(pulse_set = "volley", ipi_group = volley_group)
@@ -180,20 +182,20 @@ event_metrics <- metric_pulses %>%
   mutate(ipi_seconds = ifelse(ipi_group == lag(ipi_group), as.numeric(time) - lag(as.numeric(time)), NA_real_)) %>%
   summarise(
     selection_amplitude = quantile(eod_amplitude, 0.9),
-    window_median_amplitude = median(eod_amplitude),
-    window_max_amplitude = max(eod_amplitude),
-    window_strong_fraction = mean(is_strong),
-    window_median_ipi_seconds = median(ipi_seconds, na.rm = TRUE),
-    window_ipi_iqr_ratio = IQR(ipi_seconds, na.rm = TRUE) / median(ipi_seconds, na.rm = TRUE),
-    window_amp_cv_signed = sd(signed_amplitude) / abs(mean(signed_amplitude)),
-    window_amp_cv_abs = sd(eod_amplitude) / mean(eod_amplitude),
-    window_amp_range_log10 = log10(quantile(eod_amplitude, 0.9) / quantile(eod_amplitude, 0.1)),
-    window_flip_rate = mean(diff(sign(signed_amplitude)) != 0),
-    t_first_eod = min(time), t_last_eod = max(time), n_eods_window = n(),
+    metric_median_amplitude = median(eod_amplitude),
+    metric_max_amplitude = max(eod_amplitude),
+    metric_strong_fraction = mean(is_strong),
+    metric_median_ipi_seconds = median(ipi_seconds, na.rm = TRUE),
+    metric_ipi_iqr_ratio = IQR(ipi_seconds, na.rm = TRUE) / median(ipi_seconds, na.rm = TRUE),
+    metric_amp_cv_signed = sd(signed_amplitude) / abs(mean(signed_amplitude)),
+    metric_amp_cv_abs = sd(eod_amplitude) / mean(eod_amplitude),
+    metric_amp_range_log10 = log10(quantile(eod_amplitude, 0.9) / quantile(eod_amplitude, 0.1)),
+    metric_flip_rate = mean(diff(sign(signed_amplitude)) != 0),
+    t_first_eod = min(time), t_last_eod = max(time), n_eods_metric = n(),
     .groups = "drop"
   ) %>%
-  mutate(window_duration_seconds = as.numeric(difftime(t_last_eod, t_first_eod, units = "secs")),
-         window_rate_hz = n_eods_window / window_duration_seconds)
+  mutate(metric_duration_seconds = as.numeric(difftime(t_last_eod, t_first_eod, units = "secs")),
+         metric_rate_hz = n_eods_metric / metric_duration_seconds)
 
 volley_metrics <- candidate_pulses %>%
   filter(in_volley) %>%
@@ -205,11 +207,11 @@ volley_metrics <- candidate_pulses %>%
 review_metrics <- event_metrics %>%
   filter(pulse_set == "all") %>%
   select(-pulse_set) %>%
-  rename_with(~ paste0("all_", sub("^window_", "", .x)), -c(session_path, event_id)) %>%
+  rename_with(~ paste0("all_", sub("^metric_", "", .x)), -c(session_path, event_id)) %>%
   left_join(event_metrics %>%
               filter(pulse_set == "volley") %>%
               select(-pulse_set) %>%
-              rename_with(~ paste0("volley_", sub("^window_", "", .x)), -c(session_path, event_id)),
+              rename_with(~ paste0("volley_", sub("^metric_", "", .x)), -c(session_path, event_id)),
             by = c("session_path", "event_id"))
 
 candidate_events <- time_candidates %>%
@@ -280,9 +282,10 @@ for (session_path_i in unique(candidate_events$session_path)) {
 # ==============================================================================
 
 # Fill the 'category' column by hand after looking at the detection PNGs:
-#   m = moving, r = resting, v = volley, c = co-occurring fish (held back), mv = moving + volley (rare),
-#   w = wave-fish (continuous biphasic sinusoidal discharge, 200-1200 Hz; treated as noise),
-#   x = noise / weird signals
+#   r = re-classify (moving or stationary, decided numerically in Phase E), v = volley,
+#   c = co-occurring fish, w = wave-fish (continuous biphasic sinusoidal discharge, 200-1200 Hz),
+#   x = noise contaminated / faulty, wv/vw/pv = volleys together with other fish pulses or wave-fish
+#   Only r and v are carried into Phase E.
 # Save the annotated table as candidate_events_reviewed.csv: re-running this phase overwrites
 # candidate_events_for_review.csv with an empty 'category' column.
 candidate_events$category <- ""
@@ -297,18 +300,19 @@ cat(sprintf("Saved %d candidate events for manual review to: %s\n",
 
 
 # ==============================================================================
-# PHASE E - Top n events per category, ranked by the P90 amplitude of the window pulses
+# PHASE E - Top n events per category, ranked by the P90 amplitude of the metric pulses
 # (volley pulses for volleys, all pulses for the other categories)
 # Reads the manually annotated candidate_events_reviewed.csv
 # ==============================================================================
 
 n_per_category <- 20
-selected_categories <- c("m", "r", "v") # m:moving, r:resting, v:volley
+min_volley_eods_selection <- 30 # minimum volley pulses for a volley event to enter the selection
+selected_categories <- c("m", "s", "v") # m:moving, s:stationary, v:volley
 
 # Only 'category' is taken from the annotated file (spreadsheet programs mangle the time columns).
-# Window metrics: volley pulses for volleys, all pulses for the other categories.
+# Metrics: volley pulses for volleys, all pulses for the other categories.
 reviewed_events <- candidate_events %>%
-  select(-category) %>%
+  select(-any_of("category")) %>%
   inner_join(read.csv(file.path(output_dir, "candidate_events_reviewed.csv"), stringsAsFactors = FALSE) %>%
                select(session_event_key, category),
              by = "session_event_key") %>%
@@ -321,6 +325,45 @@ reviewed_events <- candidate_events %>%
 cat("Annotated categories:\n")
 print(table(reviewed_events$category))
 
+reviewed_events <- reviewed_events %>%
+  filter(category %in% c("r", "v"))
+
+# Re-classify r events: high amplitude CV + short median IPI -> moving (m), low amplitude CV + long median IPI -> stationary (s).
+# Events that satisfy neither combination are labelled u (undetermined) and excluded from the selection.
+# Cutoffs default to the median of the r events; replace with fixed values after checking reclassification_scatter.png.
+is_reclassified <- reviewed_events$category == "r"
+amp_cv_cutoff <- median(reviewed_events$metric_amp_cv_abs[is_reclassified], na.rm = TRUE)
+ipi_cutoff <- median(reviewed_events$metric_median_ipi_seconds[is_reclassified], na.rm = TRUE)
+
+reviewed_events <- reviewed_events %>%
+  mutate(category = case_when(
+    category != "r" ~ category,
+    metric_amp_cv_abs >= amp_cv_cutoff & metric_median_ipi_seconds <= ipi_cutoff ~ "m",
+    metric_amp_cv_abs < amp_cv_cutoff & metric_median_ipi_seconds > ipi_cutoff ~ "s",
+    TRUE ~ "u"
+  ))
+
+cat(sprintf("Re-classification cutoffs: amplitude CV %.3f, median IPI %.4f s\n", amp_cv_cutoff, ipi_cutoff))
+cat("Categories after re-classification:\n")
+print(table(reviewed_events$category))
+
+write.csv(data.frame(amp_cv_cutoff = amp_cv_cutoff, median_ipi_cutoff_s = ipi_cutoff),
+          file.path(output_dir, "reclassification_cutoffs.csv"), row.names = FALSE)
+
+p_reclass <- ggplot(filter(reviewed_events, is_reclassified),
+                    aes(x = metric_median_ipi_seconds, y = metric_amp_cv_abs, color = category)) +
+  geom_point(alpha = 0.7) +
+  geom_vline(xintercept = ipi_cutoff, linetype = "dashed") +
+  geom_hline(yintercept = amp_cv_cutoff, linetype = "dashed") +
+  scale_x_log10() +
+  scale_y_log10() +
+  labs(title = "Re-classification of r events", x = "Median IPI (s)", y = "Amplitude CV (absolute)")
+ggsave(file.path(output_dir, "reclassification_scatter.png"), p_reclass, width = 7, height = 5)
+
+# For volley events selection_amplitude and n_eods_metric come from the volley pulses only
+reviewed_events <- reviewed_events %>%
+  mutate(eligible = !is.na(selection_amplitude) & (category != "v" | n_eods_metric >= min_volley_eods_selection))
+
 volley_without_group <- filter(reviewed_events, category == "v", is.na(selection_amplitude))
 if (nrow(volley_without_group) > 0) {
   cat(sprintf("Warning: no volley group (>= %d pulses, IPI <= %g s) in %d volley events, excluded from selection, check annotation:\n",
@@ -329,15 +372,15 @@ if (nrow(volley_without_group) > 0) {
 }
 
 curated_events <- reviewed_events %>%
-  filter(category %in% selected_categories, !is.na(selection_amplitude)) %>%
+  filter(category %in% selected_categories, eligible) %>%
   group_by(category) %>%
   slice_max(selection_amplitude, n = n_per_category, with_ties = FALSE) %>%
   ungroup()
 
 cat("Selected events per category:\n")
 print(table(curated_events$category))
-cat("Window duration (s) per category:\n")
-print(tapply(curated_events$window_duration_seconds, curated_events$category, median, na.rm = TRUE))
+cat("Metric duration (s) per category:\n")
+print(tapply(curated_events$metric_duration_seconds, curated_events$category, median, na.rm = TRUE))
 
 # write.csv(curated_events, file.path(output_dir, "curated_events_final.csv"), row.names = FALSE)
 
@@ -346,7 +389,7 @@ curated_dir <- file.path(output_dir, "curated_events")
 dir.create(curated_dir, showWarnings = FALSE)
 write.csv(curated_events, file.path(curated_dir, "curated_events_final.csv"), row.names = FALSE)
 
-category_folders <- c(m = "movement", r = "resting", v = "volley")
+category_folders <- c(m = "movement", s = "stationary", v = "volley")
 
 for (i in seq_len(nrow(curated_events))) {
   session_path_i <- curated_events$session_path[i]
@@ -389,7 +432,7 @@ for (i in seq_len(nrow(curated_events))) {
 cat(sprintf("Copied files of %d curated events to: %s\n", nrow(curated_events), curated_dir))
 
 # Amplitude (distance proxy) per category, all annotated vs selected
-p_sel <- ggplot(filter(reviewed_events, category %in% selected_categories, !is.na(selection_amplitude)),
+p_sel <- ggplot(filter(reviewed_events, category %in% selected_categories, eligible),
                 aes(x = category, y = selection_amplitude)) +
   geom_boxplot(outlier.shape = NA) +
   geom_jitter(aes(color = session_event_key %in% curated_events$session_event_key), width = 0.15, alpha = 0.6) +
@@ -399,7 +442,7 @@ ggsave(file.path(curated_dir, "selected_amplitude_by_category.png"), p_sel, widt
 
 # Amplitude histograms per category with the top-n selection cutoff (lowest selected median amplitude)
 amp_hist_data <- reviewed_events %>%
-  filter(category %in% selected_categories, !is.na(selection_amplitude)) %>%
+  filter(category %in% selected_categories, eligible) %>%
   mutate(
     category_name = unname(category_folders[category]),
     selected = session_event_key %in% curated_events$session_event_key
@@ -423,15 +466,13 @@ ggsave(file.path(output_dir, "selected_amplitude_histograms.png"), p_amp_hist, w
 
 # --- Numeric differences between the visually assigned categories ---
 # Run for all annotated candidates (saved in output_dir) and for the curated events (saved in curated_dir)
-category_labels <- c(m = "moving", r = "resting", v = "volley", c = "co-occurring",
-                     mv = "moving+volley", w = "wave-fish", x = "noise")
-feature_cols <- c("window_duration_seconds", "n_eods_window", "window_strong_fraction", "window_rate_hz",
-                  "window_median_ipi_seconds", "window_ipi_iqr_ratio",
-                  "window_median_amplitude", "selection_amplitude", "window_max_amplitude",
-                  "window_amp_cv_signed", "window_amp_cv_abs", "window_amp_range_log10", "window_flip_rate")
-# Excluded from PCA/LDA: zeros in the flip rate break log10; rate and strong fraction are collinear with other features
-pca_cols <- setdiff(feature_cols, "window_flip_rate")
-lda_cols <- setdiff(feature_cols, c("window_flip_rate", "window_rate_hz", "window_strong_fraction"))
+category_labels <- c(m = "moving", s = "stationary", v = "volley", u = "undetermined")
+feature_cols <- c("metric_duration_seconds", "n_eods_metric", "metric_strong_fraction", "metric_rate_hz",
+                  "metric_median_ipi_seconds", "metric_ipi_iqr_ratio",
+                  "metric_median_amplitude", "selection_amplitude", "metric_max_amplitude",
+                  "metric_amp_cv_signed", "metric_amp_cv_abs", "metric_amp_range_log10", "metric_flip_rate")
+# Excluded from PCA: zeros in the flip rate break log10; rate and strong fraction are collinear with other features
+pca_cols <- setdiff(feature_cols, "metric_flip_rate")
 
 analysis_sets <- list(
   annotated = list(events = reviewed_events, dir = output_dir),
@@ -459,15 +500,6 @@ for (set_name in names(analysis_sets)) {
     pivot_longer(-category, names_to = "feature", values_to = "value") %>%
     mutate(feature = factor(feature, levels = feature_cols))
 
-  # Kruskal-Wallis across the three main categories, per feature
-  kw_results <- feature_long %>%
-    filter(category %in% c("moving", "resting", "volley")) %>%
-    group_by(feature) %>%
-    summarise(kruskal_p = kruskal.test(value ~ category)$p.value, .groups = "drop") %>%
-    arrange(kruskal_p)
-  print(as.data.frame(kw_results), digits = 3)
-  write.csv(kw_results, file.path(set_dir, "category_kruskal_tests.csv"), row.names = FALSE)
-
   p_box <- ggplot(feature_long, aes(x = category, y = value, fill = category)) +
     geom_boxplot(outlier.shape = NA, alpha = 0.6) +
     geom_jitter(width = 0.15, alpha = 0.4, size = 0.8) +
@@ -477,19 +509,19 @@ for (set_name in names(analysis_sets)) {
     theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none")
   ggsave(file.path(set_dir, "category_feature_boxplots.png"), p_box, width = 16, height = 11)
 
-  p_sc_ipi_cv <- ggplot(feature_data, aes(x = window_median_ipi_seconds, y = window_amp_cv_abs, color = category)) +
+  p_sc_ipi_cv <- ggplot(feature_data, aes(x = metric_median_ipi_seconds, y = metric_amp_cv_abs, color = category)) +
     geom_point(alpha = 0.7) +
     scale_x_log10() +
     scale_y_log10() +
-    labs(x = "Median IPI, window pulses (s)", y = "Amplitude CV (absolute)")
+    labs(x = "Median IPI, metric pulses (s)", y = "Amplitude CV (absolute)")
 
-  p_sc_amp_ipi <- ggplot(feature_data, aes(x = window_amp_cv_signed, y = window_amp_cv_abs, color = category)) +
+  p_sc_amp_ipi <- ggplot(feature_data, aes(x = metric_amp_cv_signed, y = metric_amp_cv_abs, color = category)) +
     geom_point(alpha = 0.7) +
     scale_x_log10() +
     scale_y_log10() +
     labs(x = "Amplitude CV (signed)", y = "Amplitude CV (absolute)")
 
-  p_sc_dur <- ggplot(feature_data, aes(x = window_amp_range_log10, y = window_ipi_iqr_ratio, color = category)) +
+  p_sc_dur <- ggplot(feature_data, aes(x = metric_amp_range_log10, y = metric_ipi_iqr_ratio, color = category)) +
     geom_point(alpha = 0.7) +
     scale_y_log10() +
     labs(x = "Amplitude range log10(P90/P10)", y = "IPI IQR / median")
@@ -512,20 +544,5 @@ for (set_name in names(analysis_sets)) {
 
   p_scatter_pca <- ggarrange(p_sc_ipi_cv, p_sc_amp_ipi, p_sc_dur, p_pca, ncol = 2, nrow = 2, common.legend = TRUE)
   ggsave(file.path(set_dir, "category_scatter_pca.png"), p_scatter_pca, width = 14, height = 11)
-
-  # Linear discriminant analysis, leave-one-out: how separable are moving / resting / volley?
-  lda_data <- feature_data %>%
-    filter(category %in% c("moving", "resting", "volley")) %>%
-    select(category, all_of(lda_cols)) %>%
-    mutate(across(-category, log10)) %>%
-    droplevels()
-  lda_data <- lda_data[apply(lda_data[, -1], 1, function(x) all(is.finite(x))), ]
-
-  lda_cv <- MASS::lda(category ~ ., data = lda_data, CV = TRUE)
-  cat("LDA leave-one-out confusion matrix (rows = visual, columns = predicted):\n")
-  lda_table <- table(visual = lda_data$category, predicted = lda_cv$class)
-  print(lda_table)
-  cat(sprintf("LDA leave-one-out accuracy: %.2f\n", mean(lda_cv$class == lda_data$category)))
-  write.csv(as.data.frame.matrix(lda_table), file.path(set_dir, "category_lda_confusion_matrix.csv"))
 }
 
