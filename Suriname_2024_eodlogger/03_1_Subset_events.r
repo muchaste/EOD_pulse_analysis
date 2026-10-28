@@ -19,8 +19,8 @@ library(lubridate)
 rm(list = ls())
 
 # Root folder to scan recursively for all_event_summaries.csv
-root_dir <- "G:/First Trip/Raleighvallen/"
-output_dir <- "G:/First Trip/Raleighvallen/eel_event_subsetting_win_8000"
+root_dir <- "G:/First Trip/Avanavero/"
+output_dir <- "G:/First Trip/Avanavero/eel_event_subsetting_win_8000"
 dir.create(output_dir, showWarnings = FALSE)
 
 # Assumes these extractions used extraction_method='single_channel' with ignore_channel=TRUE
