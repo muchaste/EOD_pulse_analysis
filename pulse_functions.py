@@ -468,6 +468,18 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
     else:
         keep_mask = np.array([True] * len(peaks))
 
+    # The snippet is centred on the P1-P2 midpoint: drop pulses whose peak/trough cannot both fit
+    # into it (otherwise snippet[peak_idx - start_idx] wraps via a negative index or raises IndexError).
+    if window_mode == "fixed":
+        pulse_wf_length = np.full(len(peaks), int(window_length * rate / 1e6))
+    else:
+        pulse_wf_length = (np.abs(peaks - troughs) * window_factor).astype(int)
+    pulse_separation = np.abs(peaks - troughs)
+    fits_in_snippet = (pulse_separation == 0) | ((pulse_separation + 1) // 2 < pulse_wf_length // 2)
+    if not np.all(fits_in_snippet):
+        print(f"    Dropping {int(np.sum(~fits_in_snippet))} pulses whose peak-trough distance exceeds the snippet window")
+    keep_mask = keep_mask & fits_in_snippet
+
     filtered_peak_idc = peaks[keep_mask]
     filtered_trough_idc = troughs[keep_mask]
     filtered_eod_chans = eod_chans[keep_mask]
