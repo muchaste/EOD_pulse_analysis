@@ -610,21 +610,8 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
                     pulse_locations[-1] = diff_location
 
             if snippet.shape[0] == 0:
-                eod_waveforms.append(np.array([]))
-                snippet_p1_idc.append(0)
-                snippet_p2_idc.append(0)
-                final_p1_idc.append(0)
-                final_p2_idc.append(0)
-                eod_amps.append(0.0)
-                pulse_orientations.append('HP')
-                amplitude_ratios.append(0.0)
-                eod_widths.append(0)
-                fft_peak_freqs.append(0.0)
-                waveform_lengths.append(0)
-                eod_chans_out.append(filtered_eod_chans[i])
-                is_differential_out.append(filtered_is_differential[i] if extraction_method != 'pca' else 2)
-                snippet_p3_idc.append(-1)
-                final_p3_idc.append(-1)
+                if location_appended:
+                    pulse_locations.pop()
                 skip_pulse = True
                 break
 
