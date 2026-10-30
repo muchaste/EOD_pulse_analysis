@@ -735,7 +735,8 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
         # Interpolate waveform if specified
         if interp_factor > 1:
             original_indices = np.arange(len(snippet))
-            interp_indices = np.linspace(0, len(snippet) - 1, len(snippet) * interp_factor)
+            # exact 1/interp_factor spacing, so that interpolated index j is original sample j / interp_factor
+            interp_indices = np.arange((len(snippet) - 1) * interp_factor + 1) / interp_factor
             interp_func = interp1d(original_indices, snippet, kind='cubic')
             snippet = interp_func(interp_indices)
 
@@ -2511,6 +2512,11 @@ def save_waveforms(waveforms_list, output_path, format="csv", length="fixed"):
                 'dtype': 'float64'
             }
         else:
+            if len({len(wf) for wf in waveforms_list}) > 1:
+                # Edge-truncated snippets (file borders) cannot be stacked into one 2D array
+                print("Warning: waveforms have different lengths; saving 'variable' npz format instead of 'fixed'.")
+                return save_waveforms(waveforms_list, output_path, format="npz", length="variable")
+
             # Stack waveforms into 2D array (n_waveforms, waveform_length)
             waveforms_array = np.stack(waveforms_list, axis=0)
             
@@ -2634,6 +2640,11 @@ def save_fixed_length_waveforms(waveforms_list, output_path, format="csv"):
             'dtype': 'float64'
         }
     else:
+        if len({len(wf) for wf in waveforms_list}) > 1:
+            # Edge-truncated snippets (file borders) cannot be stacked into one 2D array
+            print("Warning: waveforms have different lengths; saving 'variable' npz format instead of 'fixed'.")
+            return save_variable_length_waveforms(waveforms_list, output_path)
+
         # Stack waveforms into 2D array (n_waveforms, waveform_length)
         waveforms_array = np.stack(waveforms_list, axis=0)
         
@@ -2757,6 +2768,10 @@ def load_waveforms(base_path, format="csv", length="fixed"):
     
     try:
         if length == "fixed":
+            # Waveforms of different lengths were saved in the variable-length format instead
+            fixed_file = f"{base_path}.csv" if format == "csv" else f"{base_path}.npz"
+            if not os.path.exists(fixed_file) and os.path.exists(f"{base_path}_concatenated.npz"):
+                return load_waveforms(base_path, format="npz", length="variable")
             if format == "csv":
                 # Load from CSV file
                 waveforms_df = pd.read_csv(f"{base_path}.csv")
@@ -2844,6 +2859,10 @@ def load_fixed_length_waveforms(base_path, format="csv"):
         raise ValueError(f"Unsupported format: {format}. Use 'csv' or 'npz'.")
     
     try:
+        # Waveforms of different lengths were saved in the variable-length format instead
+        fixed_file = f"{base_path}.csv" if format == "csv" else f"{base_path}.npz"
+        if not os.path.exists(fixed_file) and os.path.exists(f"{base_path}_concatenated.npz"):
+            return load_waveforms(base_path, format="npz", length="variable")
         if format == "csv":
             # Load from CSV file
             waveforms_df = pd.read_csv(f"{base_path}.csv")
