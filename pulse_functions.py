@@ -253,7 +253,7 @@ def _dispatch_location_estimate(data, peak_idx, trough_idx, channel_idx, n_chann
         return loc
     elif location_method == 'dipole':
         _, ch_amps, _ = _estimate_gaussian_pulse_location(data, peak_idx, trough_idx, n_channels)
-        dipole_x0, _, _ = _fit_dipole_location(ch_amps)
+        dipole_x0, _, _ = _fit_dipole_location(ch_amps, ignore_zeros=True)
         return dipole_x0
     raise ValueError(f"Invalid location_method for _dispatch_location_estimate: {location_method!r}")
 
@@ -1221,14 +1221,80 @@ def _estimate_differential_pulse_location(data, peak_idx, trough_idx, channel_id
     except (IndexError, ValueError):
         return channel_idx + 0.5
 
+def _first_sign_change(amplitudes):
+    """
+    Locate the first sign change of a per-channel amplitude profile, ignoring exact zeros
+    (e.g. zero-filled dead channels, for which np.sign gives 0 and would count as a change).
+
+    Returns
+    -------
+    (i0, i1) : tuple of int, or None
+        Indices of the two neighbouring non-zero channels with opposite signs; None if the
+        profile has no sign change.
+    """
+    nonzero = np.flatnonzero(amplitudes)
+    if len(nonzero) < 2:
+        return None
+    signs = np.sign(amplitudes[nonzero])
+    changes = np.flatnonzero(signs[:-1] != signs[1:])
+    if len(changes) == 0:
+        return None
+    return int(nonzero[changes[0]]), int(nonzero[changes[0] + 1])
+
+
+def _signed_pulse_amplitudes(data, ref_p1_idx, ref_p2_idx, margin=None):
+    """
+    Signed peak-to-peak amplitude of the pulse on every channel.
+
+    The window spans the whole reference P1-P2 pair plus `margin` samples on each side, so
+    that cross-channel timing offsets of the extrema do not matter. The amplitude is
+    max - min within the window; its sign is that of the best-lag cross-correlation (within
+    +-margin samples) with the channel of largest amplitude, i.e. negative on channels where the
+    pulse is polarity-flipped (bipolar field). A pulse with the same sign on all channels
+    (monophasic) therefore gives a profile of one sign.
+
+    Parameters
+    ----------
+    data : 2-D array
+        Multi-channel recording (samples x channels).
+    ref_p1_idx, ref_p2_idx : int
+        Reference peak/trough sample indices of the pulse.
+    margin : int, optional
+        Samples added on each side of the pair (default max(3, |P2 - P1| // 2)).
+
+    Returns
+    -------
+    ch_amps : 1-D array, shape (n_channels,)
+        Signed amplitudes (positive = same polarity as the strongest channel).
+    """
+    if margin is None:
+        margin = max(3, abs(ref_p2_idx - ref_p1_idx) // 2)
+    lo = max(0, min(ref_p1_idx, ref_p2_idx) - margin)
+    hi = min(data.shape[0], max(ref_p1_idx, ref_p2_idx) + margin + 1)
+    segment = data[lo:hi, :]
+    amplitudes = segment.max(axis=0) - segment.min(axis=0)
+    template = segment[:, int(np.argmax(amplitudes))]
+    template = template - np.median(template)
+    centre = len(segment) - 1
+    signs = np.ones(segment.shape[1])
+    for ch in range(segment.shape[1]):
+        correlation = np.correlate(segment[:, ch] - np.median(segment[:, ch]), template, mode='full')
+        lags = correlation[max(0, centre - margin):centre + margin + 1]
+        best = lags[np.argmax(np.abs(lags))]
+        if best < 0:
+            signs[ch] = -1
+    return signs * amplitudes
+
+
 def _estimate_gaussian_pulse_location(data, ref_p1_idx, ref_p2_idx, n_channels):
     """
     Estimate pulse location along a linear electrode array by fitting a Gaussian
     to the per-channel absolute P1-P2 amplitude profile.
 
-    For each channel, a windowed search around the reference P1/P2 indices finds
-    the local extrema, giving a signed P1-P2 amplitude. A Gaussian is fitted to
-    the absolute values; the peak position x0 is the location estimate.
+    The signed per-channel amplitude is obtained with `_signed_pulse_amplitudes`
+    (window over the whole pair plus a margin, sign from the correlation with the strongest
+    channel). A Gaussian is fitted to the absolute values; the peak position x0 is the
+    location estimate.
     Falls back to an amplitude-weighted centroid if the fit fails or goes out of bounds.
 
     Parameters
@@ -1247,26 +1313,11 @@ def _estimate_gaussian_pulse_location(data, ref_p1_idx, ref_p2_idx, n_channels):
     location : float
         Estimated fish location in electrode units [0, n_channels-1].
     ch_amps : 1-D array, shape (n_channels,)
-        Signed P1-P2 amplitude at each channel (positive = P1 > P2, i.e., HP orientation).
+        Signed P1-P2 amplitude at each channel (positive = same polarity as the strongest channel).
     fit_success : bool
         True if Gaussian fit converged and x0 is within array bounds.
     """
-    half_window = max(2, abs(ref_p2_idx - ref_p1_idx) // 2)
-    n_samples = data.shape[0]
-    ch_amps = np.zeros(n_channels)
-
-    for ch in range(n_channels):
-        p1_lo = max(0, ref_p1_idx - half_window)
-        p1_hi = min(n_samples, ref_p1_idx + half_window)
-        local_p1 = p1_lo + np.argmax(data[p1_lo:p1_hi, ch])
-
-        p2_lo = max(0, ref_p2_idx - half_window)
-        p2_hi = min(n_samples, ref_p2_idx + half_window)
-        local_p2 = p2_lo + np.argmin(data[p2_lo:p2_hi, ch])
-
-        # signed: positive if head-positive orientation (P1 is peak, P2 is trough)
-        ch_amps[ch] = data[local_p1, ch] - data[local_p2, ch]
-
+    ch_amps = _signed_pulse_amplitudes(data, ref_p1_idx, ref_p2_idx)
     location, fit_success = _fit_gaussian_profile(ch_amps)
     return location, ch_amps, fit_success
 
@@ -1305,7 +1356,7 @@ def _fit_gaussian_profile(ch_amps):
     return weighted_loc, False
 
 
-def _fit_dipole_location(spatial_amplitudes):
+def _fit_dipole_location(spatial_amplitudes, ignore_zeros=False):
     """
     Fit a 1-D dipole model to the signed PCA spatial amplitude profile to estimate
     fish location along the electrode array.
@@ -1324,6 +1375,10 @@ def _fit_dipole_location(spatial_amplitudes):
     ----------
     spatial_amplitudes : 1-D array, shape (N,)
         Signed PCA spatial amplitudes at each electrode (electrode index 0..N-1).
+    ignore_zeros : bool, optional
+        If True, channels with an amplitude of exactly 0 (e.g. zero-filled dead channels) are
+        left out of the fit and of the sign-change search for the initial position (default
+        False: all channels, as in the PCA and P1-only routes).
 
     Returns
     -------
@@ -1336,36 +1391,56 @@ def _fit_dipole_location(spatial_amplitudes):
     """
     N = len(spatial_amplitudes)
     electrode_positions = np.arange(N, dtype=float)
+    if ignore_zeros:
+        fit_idx = np.flatnonzero(spatial_amplitudes)
+        if len(fit_idx) < 4:
+            return float(electrode_positions[np.argmax(np.abs(spatial_amplitudes))]), 1.0, False
+        x_fit = electrode_positions[fit_idx]
+        y_fit = spatial_amplitudes[fit_idx]
+    else:
+        x_fit = electrode_positions
+        y_fit = spatial_amplitudes
 
     def dipole_model(x, x0, d, A):
         return A * (x - x0) / ((x - x0) ** 2 + d ** 2) ** 1.5
 
     # Initial x0: interpolated zero-crossing between sign-change neighbours
-    signs = np.sign(spatial_amplitudes)
-    sign_changes = np.where(np.diff(signs) != 0)[0]
-    if len(sign_changes) > 0:
-        idx = sign_changes[0]
-        a0 = np.abs(spatial_amplitudes[idx])
-        a1 = np.abs(spatial_amplitudes[idx + 1])
-        x0_guess = idx + a0 / (a0 + a1 + 1e-12)
+    if ignore_zeros:
+        sign_change = _first_sign_change(spatial_amplitudes)
+        if sign_change is not None:
+            idx, idx_next = sign_change
+            a0 = np.abs(spatial_amplitudes[idx])
+            a1 = np.abs(spatial_amplitudes[idx_next])
+            x0_guess = idx + (idx_next - idx) * a0 / (a0 + a1 + 1e-12)
+        else:
+            x0_guess = float(x_fit[np.argmin(np.abs(y_fit))])
     else:
-        x0_guess = float(electrode_positions[np.argmin(np.abs(spatial_amplitudes))])
+        signs = np.sign(spatial_amplitudes)
+        sign_changes = np.where(np.diff(signs) != 0)[0]
+        if len(sign_changes) > 0:
+            idx = sign_changes[0]
+            a0 = np.abs(spatial_amplitudes[idx])
+            a1 = np.abs(spatial_amplitudes[idx + 1])
+            x0_guess = idx + a0 / (a0 + a1 + 1e-12)
+        else:
+            x0_guess = float(electrode_positions[np.argmin(np.abs(spatial_amplitudes))])
 
     # Initial d: the peak is at x0 ± d/sqrt(2), so d ≈ |peak_pos - x0| * sqrt(2)
-    peak_ch = int(np.argmax(np.abs(spatial_amplitudes)))
-    dist_to_peak = abs(float(peak_ch) - x0_guess)
+    peak_fit = int(np.argmax(np.abs(y_fit)))
+    peak_pos = float(x_fit[peak_fit])
+    dist_to_peak = abs(peak_pos - x0_guess)
     d_guess = max(dist_to_peak * np.sqrt(2), 0.5)
 
     # Initial A from model evaluated at peak with initial params
-    denom = (float(peak_ch) - x0_guess) ** 2 + d_guess ** 2
-    A_pred = denom ** 1.5 / (float(peak_ch) - x0_guess + 1e-12)
-    A_guess = float(spatial_amplitudes[peak_ch]) * A_pred
+    denom = (peak_pos - x0_guess) ** 2 + d_guess ** 2
+    A_pred = denom ** 1.5 / (peak_pos - x0_guess + 1e-12)
+    A_guess = float(y_fit[peak_fit]) * A_pred
 
     p0 = [x0_guess, d_guess, A_guess]
     bounds = ([-1.0, 0.1, -np.inf], [float(N), float(N + 1), np.inf])
 
     try:
-        popt, _ = curve_fit(dipole_model, electrode_positions, spatial_amplitudes,
+        popt, _ = curve_fit(dipole_model, x_fit, y_fit,
                             p0=p0, bounds=bounds, maxfev=1000)
         x0 = float(popt[0])
         d = float(popt[1])
@@ -1405,9 +1480,9 @@ def _estimate_location_dipole_or_gaussian(data, ref_p1_idx, ref_p2_idx, n_channe
         Estimated location in electrode units [0, n_channels-1].
     """
     gaussian_loc, ch_amps, _ = _estimate_gaussian_pulse_location(data, ref_p1_idx, ref_p2_idx, n_channels)
-    has_sign_change = np.any(np.diff(np.sign(ch_amps)) != 0)
+    has_sign_change = _first_sign_change(ch_amps) is not None
     if has_sign_change:
-        dipole_loc, _, dipole_success = _fit_dipole_location(ch_amps)
+        dipole_loc, _, dipole_success = _fit_dipole_location(ch_amps, ignore_zeros=True)
         if dipole_success:
             return dipole_loc
     return gaussian_loc
@@ -4157,7 +4232,8 @@ def create_event_plots(event_id, event_eods, event_data, event_start_time, sampl
 def normalize_waveforms(eod_snippets, snippet_p1_idc, snippet_p2_idc, 
                        method='p1_unity', baseline_correction=True,
                        min_amplitude_threshold=0.001, return_normalization_info=False,
-                       crop_and_interpolate=False, crop_factor=7, target_length=150):
+                       crop_and_interpolate=False, crop_factor=7, target_length=150,
+                       pulse_mode='biphasic'):
     """
     Normalize EOD waveforms for visualization, averaging, and classification.
     
@@ -4191,13 +4267,20 @@ def normalize_waveforms(eod_snippets, snippet_p1_idc, snippet_p2_idc,
         Multiplier for peak-peak duration to define crop window size (only used if crop_and_interpolate=True)
     target_length : int, default 150
         Target number of samples after interpolation (only used if crop_and_interpolate=True)
+    pulse_mode : str, default 'biphasic'
+        'monophasic' treats every snippet as P1-only (the P2 index, a noise/undershoot companion
+        of a monophasic pulse, is ignored): no baseline re-estimation (the snippets are already
+        median-corrected by extract_pulse_snippets) and cropping by the FWHM of P1.
     
     Returns
     -------
     normalized_snippets : list of arrays
-        Normalized waveform snippets
+        Normalized waveform snippets, one per input snippet in the same order. A snippet that
+        cannot be normalized (invalid indices, error) is replaced by zeros of length
+        target_length and listed in rejected_indices.
     normalization_info : dict (optional)
-        Metadata about normalization process including:
+        Metadata about normalization process, arrays aligned with the input snippets
+        (NaN for rejected ones):
         - original_p1_amplitudes, original_p2_amplitudes
         - scaling_factors, baseline_offsets
         - rejected_indices (waveforms that failed normalization)
@@ -4237,7 +4320,7 @@ def normalize_waveforms(eod_snippets, snippet_p1_idc, snippet_p2_idc,
             # Get P1 and P2 indices for this snippet
             p1_idx = int(snippet_p1_idc[i])
             p2_idx = int(snippet_p2_idc[i])
-            has_p2 = p2_idx >= 0
+            has_p2 = p2_idx >= 0 and pulse_mode != 'monophasic'
             
             # Validate indices (P2 = -1 is valid: P1-only snippet)
             if p1_idx < 0 or p1_idx >= len(snippet) or (has_p2 and p2_idx >= len(snippet)):
@@ -4246,14 +4329,18 @@ def normalize_waveforms(eod_snippets, snippet_p1_idc, snippet_p2_idc,
                 snippet = np.zeros(target_length)
                 normalized_snippets.append(snippet)
                 crop_windows.append(0)
+                original_p1_amplitudes.append(np.nan)
+                original_p2_amplitudes.append(np.nan)
+                scaling_factors.append(np.nan)
+                baseline_offsets.append(np.nan)
                 continue
             
             # Get original amplitudes
             # original_snippet = snippet.copy()
             p1_amp = snippet[p1_idx]
             p2_amp = snippet[p2_idx] if has_p2 else 0.0
-            original_p1_amplitudes.append(p1_amp)
-            original_p2_amplitudes.append(p2_amp)
+            original_p1_amp = p1_amp
+            original_p2_amp = p2_amp
             
             # # Check for sufficient amplitude difference
             # amplitude_diff = abs(p1_amp - p2_amp)
@@ -4280,8 +4367,6 @@ def normalize_waveforms(eod_snippets, snippet_p1_idc, snippet_p2_idc,
                 # Update amplitudes after baseline correction
                 p1_amp = snippet[p1_idx]
                 p2_amp = snippet[p2_idx]
-            
-            baseline_offsets.append(baseline_offset)
             
             # Ensure P1 is positive (head-positive orientation)
             if p1_amp < 0:
@@ -4330,8 +4415,6 @@ def normalize_waveforms(eod_snippets, snippet_p1_idc, snippet_p2_idc,
             else:
                 raise ValueError(f"Unknown normalization method: {method}")
             
-            scaling_factors.append(scale_factor)
-            
             # Apply cropping and interpolation if requested
             crop_window_samples = 0
             if crop_and_interpolate:
@@ -4372,19 +4455,26 @@ def normalize_waveforms(eod_snippets, snippet_p1_idc, snippet_p2_idc,
                     # Fallback: pad with zeros if something went wrong
                     snippet = np.zeros(target_length)
             
+            # Metadata and snippet are appended together so that all outputs stay aligned
+            original_p1_amplitudes.append(original_p1_amp)
+            original_p2_amplitudes.append(original_p2_amp)
+            baseline_offsets.append(baseline_offset)
+            scaling_factors.append(scale_factor)
             normalized_snippets.append(snippet)
             crop_windows.append(crop_window_samples)
             
         except Exception as e:
             print(f"Warning: Failed to normalize snippet {i}: {e}")
             rejected_indices.append(i)
-            # Add placeholder values for consistency
+            # Placeholders keep the outputs aligned with the input snippets
+            normalized_snippets.append(np.zeros(target_length))
+            crop_windows.append(0)
             original_p1_amplitudes.append(np.nan)
             original_p2_amplitudes.append(np.nan)
             scaling_factors.append(np.nan)
             baseline_offsets.append(np.nan)
     
-    print(f"Normalized {len(normalized_snippets)}/{n_snippets} waveforms using '{method}' method")
+    print(f"Normalized {n_snippets - len(rejected_indices)}/{n_snippets} waveforms using '{method}' method")
     if len(rejected_indices) > 0:
         print(f"Rejected {len(rejected_indices)} waveforms due to normalization issues")
     
@@ -4399,7 +4489,7 @@ def normalize_waveforms(eod_snippets, snippet_p1_idc, snippet_p2_idc,
             'baseline_offsets': np.array(baseline_offsets),
             'rejected_indices': rejected_indices,
             'crop_window_samples': np.array(crop_windows),
-            'n_normalized': len(normalized_snippets),
+            'n_normalized': n_snippets - len(rejected_indices),
             'n_rejected': len(rejected_indices)
         }
         return normalized_snippets, normalization_info
@@ -4464,13 +4554,11 @@ def plot_normalization_comparison(original_snippets, normalized_snippets,
     # Plot 2: Example normalized waveforms
     ax2 = axes[0, 1]
     for i, idx in enumerate(indices):
-        snippet = normalized_snippets[i]  # Note: normalized_snippets may be shorter
-        # Find corresponding indices in the original arrays
+        # normalized_snippets is aligned with the input snippets; rejected ones are zero placeholders
         orig_idx = idx
-        while orig_idx in (normalization_info['rejected_indices'] if normalization_info else []):
-            orig_idx += 1
-            if orig_idx >= len(original_snippets):
-                break
+        if normalization_info and orig_idx in normalization_info['rejected_indices']:
+            continue
+        snippet = normalized_snippets[orig_idx]
         
         if orig_idx < len(snippet_p1_idc):
             p1_idx = int(snippet_p1_idc[orig_idx])
