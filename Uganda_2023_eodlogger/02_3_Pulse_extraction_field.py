@@ -356,6 +356,8 @@ for n, filepath in enumerate(file_set['filename']):
 
     # The envelope route detects on all channels at once (below), not per channel/pair
     use_envelope_detection = parameters.get('detection_method', 'per_channel') == 'envelope'
+    # The amplitude ratio is meaningless for monophasic pulses (and the envelope route): its limits are not applied
+    use_amplitude_ratio = parameters.get('pulse_mode', 'biphasic') != 'monophasic' and not use_envelope_detection
     if use_envelope_detection and parameters['extraction_method'] not in ('single_channel', 'pca'):
         raise ValueError("detection_method='envelope' supports only extraction_method='single_channel' or 'pca'")
     if use_envelope_detection:
@@ -495,6 +497,7 @@ for n, filepath in enumerate(file_set['filename']):
                 fft_freq_max=parameters['peak_fft_freq_max'],
                 fish_probability_threshold=fish_probability_threshold,
                 use_basic_filtering=True,
+                use_amplitude_ratio=use_amplitude_ratio,
                 return_features=True,
                 return_filteredout_features=True
             )
@@ -507,6 +510,7 @@ for n, filepath in enumerate(file_set['filename']):
                 pp_r_max=parameters['amplitude_ratio_max'],
                 fft_freq_min=parameters['peak_fft_freq_min'],
                 fft_freq_max=parameters['peak_fft_freq_max'],
+                use_amplitude_ratio=use_amplitude_ratio,
                 return_features=True, return_filteredout_features=True
             )
 

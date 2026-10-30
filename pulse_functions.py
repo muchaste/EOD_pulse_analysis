@@ -325,7 +325,9 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
         trough comes first) - original behavior, for weakly electric fish pulses.
         'monophasic' : P1/P2 and orientation assigned by amplitude dominance (the larger-
         magnitude extremum is P1 regardless of time order) - for electric eel pulses, where
-        the dominant phase is not necessarily first in time.
+        the dominant phase is not necessarily first in time. The snippet is baseline-corrected
+        (median, so the window must extend well beyond the pulse), fft_peak_freqs is the upper
+        half-power frequency (`calc_halfpower_freq`) and no P3 search is run.
     pca_component : int
         Which principal component to use for signal reconstruction (default 0 = first component).
         Only used when extraction_method='pca'.
@@ -348,7 +350,8 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
         If True (default), search for a missed first phase (P1) before the detected pair and
         for a trailing phase (P3) after it (Case A/B); a found P1 replaces the detected landmark
         and the detected pair becomes P2/P3. If False, P1/P2 stay at the re-detected landmarks
-        and P3 is not searched (snippet_p3_idc / final_p3_idc are -1).
+        and P3 is not searched (snippet_p3_idc / final_p3_idc are -1). Never run for
+        pulse_mode='monophasic'.
     
     Returns
     -------
@@ -380,7 +383,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
     pulse_orientation : 1-D array
         Original pulse orientation before normalization ('HP' or 'HN')
     amplitude_ratios : 1-D array
-        Peak-to-trough amplitude ratios for filtering
+        Peak-to-trough amplitude ratios for filtering (neutral 1.0 for pulse_mode='monophasic')
     fft_peak_freqs : 1-D array
         Peak FFT frequency for each waveform
     pulse_locations : 1-D array
@@ -515,6 +518,9 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
     is_differential_out = []  # Track differential status in lockstep with all other output lists
     snippet_p3_idc = []
     final_p3_idc = []
+    # The Case A/B search relies on the temporal order of a peak and a trough; for monophasic
+    # pulses the second extremum is only a noise/undershoot companion, so it is never run there.
+    run_triphasic_search = triphasic_search and pulse_mode != 'monophasic'
     for i in range(n_pulses_diff):
         skip_pulse = False
         location_appended = False
@@ -621,6 +627,11 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
                 skip_pulse = True
                 break
 
+            if pulse_mode == 'monophasic':
+                # Remove the baseline offset/drift (as in extract_pulse_snippets_p1) so that amplitudes,
+                # FWHM and the spectrum describe the pulse itself
+                snippet = snippet - np.median(snippet)
+
             if attempt == 1:
                 # after re-extraction use translated indices directly; no further re-detection
                 snippet_peak_idx = peak_idx - start_idx
@@ -664,7 +675,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
             # returned by detect_pulses instead of P1_peak.
             # A1: search before P2 (trough) for missed P1 (positive peak).
             # A2 (only if A1 misses): search after P3 (peak) for a trailing negative trough.
-            if triphasic_search and snippet_trough_idx < snippet_peak_idx:
+            if run_triphasic_search and snippet_trough_idx < snippet_peak_idx:
                 p1_found = False
                 before_region = snippet[:snippet_trough_idx]
                 if len(before_region) > 0:
@@ -685,7 +696,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
             # returned by detect_pulses instead of P1_trough.
             # B1: search before P2 (peak) for missed P1 (negative trough).
             # B2 (only if B1 misses): search after P3 (trough) for a trailing positive peak.
-            elif triphasic_search and snippet_peak_idx < snippet_trough_idx:
+            elif run_triphasic_search and snippet_peak_idx < snippet_trough_idx:
                 p1_found = False
                 before_region = snippet[:snippet_peak_idx]
                 if len(before_region) > 0:
@@ -761,14 +772,14 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
                 snippet_p2_idc.append(snippet_trough_idx)
                 final_p1_idc.append(filtered_peak_idc[i])
                 final_p2_idc.append(filtered_trough_idc[i])
-                amplitude_ratio = abs(snippet[snippet_peak_idx] / snippet[snippet_trough_idx]) if snippet[snippet_trough_idx] != 0 else np.inf
+                amplitude_ratio = 1.0  # neutral: the second extremum of a monophasic pulse is only a noise/undershoot companion
             else:
                 pulse_orientation = 'HN'  # Head-negative (dominant phase is the trough)
                 snippet_p1_idc.append(snippet_trough_idx)
                 snippet_p2_idc.append(snippet_peak_idx)
                 final_p1_idc.append(filtered_trough_idc[i])
                 final_p2_idc.append(filtered_peak_idc[i])
-                amplitude_ratio = abs(snippet[snippet_trough_idx] / snippet[snippet_peak_idx]) if snippet[snippet_peak_idx] != 0 else np.inf
+                amplitude_ratio = 1.0
         else:
             # Determine pulse orientation based on temporal order of peak and trough
             if snippet_trough_idx < snippet_peak_idx:
@@ -791,7 +802,11 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
                 amplitude_ratio = abs(snippet[snippet_trough_idx] / snippet[snippet_peak_idx]) if snippet[snippet_peak_idx] != 0 else np.inf
 
         # Calculate FFT peak frequency for the processed waveform
-        if len(snippet) > 0:
+        if len(snippet) > 0 and pulse_mode == 'monophasic':
+            # The spectral maximum of a monophasic pulse is DC (skipped by calc_fft_peak), so the
+            # upper half-power frequency is used, as in extract_pulse_snippets_p1
+            fft_peak_snippet = calc_halfpower_freq(snippet, (rate*interp_factor))
+        elif len(snippet) > 0:
             try:
                 fft_peak_snippet = calc_fft_peak(snippet, (rate*interp_factor), zero_padding_factor=100)
             except:
@@ -2122,7 +2137,7 @@ def filter_waveforms(eod_waveforms, eod_widths, amplitude_ratios, fft_peak_freqs
                      fft_freq_min=1000, fft_freq_max=10000,
                      interp_factor=1, return_features=False,
                      return_filteredout_features=False,
-                     return_params=False):
+                     return_params=False, use_amplitude_ratio=True):
     """
     Filter variable-length waveforms based on duration, amplitude ratio, and FFT frequency.
     Updated to work with extract_pulse_snippets output format.
@@ -2159,6 +2174,9 @@ def filter_waveforms(eod_waveforms, eod_widths, amplitude_ratios, fft_peak_freqs
         Returns dataframe with filtered out features if True.
     return_params : bool, optional
         Returns dataframe with filter parameters if True.
+    use_amplitude_ratio : bool, optional
+        If False, the amplitude ratio limits (pp_r_min, pp_r_max) are not applied (default True).
+        Used for monophasic pulses, where the ratio is meaningless.
 
     Returns
     -------
@@ -2180,9 +2198,10 @@ def filter_waveforms(eod_waveforms, eod_widths, amplitude_ratios, fft_peak_freqs
     # Apply filters
     keep_mask = (
         (wf_durs >= dur_min) & (wf_durs <= dur_max) &
-        (wf_ratios >= pp_r_min) & (wf_ratios <= pp_r_max) &
         (fft_freqs >= fft_freq_min) & (fft_freqs <= fft_freq_max)
     )
+    if use_amplitude_ratio:
+        keep_mask = keep_mask & (wf_ratios >= pp_r_min) & (wf_ratios <= pp_r_max)
 
     keep_indices = np.where(keep_mask)[0]
     # eod_waveforms_keep = [eod_waveforms[i] for i in keep_indices]
@@ -2230,7 +2249,7 @@ def filter_waveforms_with_classifier(eod_waveforms, eod_widths, amplitude_ratios
                                     use_basic_filtering=True,
                                     interp_factor=1, return_features=False,
                                     return_filteredout_features=False,
-                                    return_params=False):
+                                    return_params=False, use_amplitude_ratio=True):
     """
     Enhanced waveform filtering using trained Random Forest classifier for fish vs noise discrimination.
     
@@ -2277,6 +2296,9 @@ def filter_waveforms_with_classifier(eod_waveforms, eod_widths, amplitude_ratios
         Returns dataframe with filtered out features if True.
     return_params : bool, optional
         Returns dataframe with filter parameters if True.
+    use_amplitude_ratio : bool, optional
+        If False, the amplitude ratio limits (pp_r_min, pp_r_max) are not applied in the basic
+        filtering stage (default True). Used for monophasic pulses, where the ratio is meaningless.
 
     Returns
     -------
@@ -2314,9 +2336,10 @@ def filter_waveforms_with_classifier(eod_waveforms, eod_widths, amplitude_ratios
     if use_basic_filtering:
         basic_mask = (
             (wf_durs >= dur_min) & (wf_durs <= dur_max) &
-            (wf_ratios >= pp_r_min) & (wf_ratios <= pp_r_max) &
             (fft_freqs >= fft_freq_min) & (fft_freqs <= fft_freq_max)
         )
+        if use_amplitude_ratio:
+            basic_mask = basic_mask & (wf_ratios >= pp_r_min) & (wf_ratios <= pp_r_max)
         keep_mask = keep_mask & basic_mask
         filtering_stages['after_basic'] = np.sum(keep_mask)
         print(f"    Basic filtering: {filtering_stages['initial'] - filtering_stages['after_basic']} pulses removed")

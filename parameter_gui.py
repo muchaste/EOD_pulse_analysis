@@ -282,9 +282,10 @@ class ParameterConfigGUI:
                 self.param_vars[key] = tk.DoubleVar(value=default)
             else:
                 self.param_vars[key] = tk.IntVar(value=default)
-            ttk.Entry(pulse_frame, textvariable=self.param_vars[key], width=12).grid(
-                row=i, column=4, sticky=tk.W, padx=5)
-        
+            entry = ttk.Entry(pulse_frame, textvariable=self.param_vars[key], width=12)
+            entry.grid(row=i, column=4, sticky=tk.W, padx=5)
+            self.pulse_entries[key] = entry
+
         # Extraction method dropdown (replaces the old waveform_extraction + return_diff pair) -
         # determines which channel(s) the waveform is built from: differential flip-pair,
         # single largest-amplitude channel, or PCA projection across all channels.
@@ -474,11 +475,15 @@ class ParameterConfigGUI:
         self.update_detection_field_states()
 
     def update_detection_field_states(self):
-        """Envelope detection uses its own high-pass and ignores the band-pass; per-channel detection ignores the envelope_* fields."""
+        """Envelope detection uses its own high-pass and ignores the band-pass; per-channel detection ignores the envelope_* fields.
+        The amplitude ratio limits are not applied for monophasic pulses / envelope detection (the ratio is meaningless there)."""
         envelope = self.param_vars['detection_method'].get() == 'envelope'
         if envelope:
             self.param_vars['enable_bandpass_filter'].set(False)
         self.bandpass_check.config(state='disabled' if envelope else 'normal')
+        ratio_unused = envelope or self.param_vars['pulse_mode'].get() == 'monophasic'
+        for key in ('amplitude_ratio_min', 'amplitude_ratio_max'):
+            self.pulse_entries[key].config(state='disabled' if ratio_unused else 'normal')
         for key, entry in self.pulse_entries.items():
             if key.startswith('bandpass_'):
                 entry.config(state='disabled' if envelope else 'normal')

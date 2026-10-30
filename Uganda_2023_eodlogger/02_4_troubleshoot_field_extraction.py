@@ -225,6 +225,8 @@ else:
 
 # The envelope route detects on all channels at once (below), not per channel/pair
 use_envelope_detection = parameters["detection_method"] == "envelope"
+# The amplitude ratio is meaningless for monophasic pulses (and the envelope route): its limits are not applied
+use_amplitude_ratio = pulse_mode_override != "monophasic" and not use_envelope_detection
 if use_envelope_detection and extraction_method_override not in ("single_channel", "pca"):
     raise ValueError("detection_method='envelope' supports only extraction_method='single_channel' or 'pca'")
 if use_envelope_detection:
@@ -341,7 +343,8 @@ if use_ml_filtering and loaded_classifier is not None and loaded_scaler is not N
         pp_r_min=parameters["amplitude_ratio_min"], pp_r_max=parameters["amplitude_ratio_max"],
         fft_freq_min=parameters["peak_fft_freq_min"], fft_freq_max=parameters["peak_fft_freq_max"],
         fish_probability_threshold=fish_probability_threshold,
-        use_basic_filtering=True, return_features=True, return_filteredout_features=True
+        use_basic_filtering=True, use_amplitude_ratio=use_amplitude_ratio,
+        return_features=True, return_filteredout_features=True
     )
 else:
     keep_indices, _, _ = filter_waveforms(
@@ -349,6 +352,7 @@ else:
         dur_min=parameters["min_width_us"], dur_max=parameters["max_width_us"],
         pp_r_min=parameters["amplitude_ratio_min"], pp_r_max=parameters["amplitude_ratio_max"],
         fft_freq_min=parameters["peak_fft_freq_min"], fft_freq_max=parameters["peak_fft_freq_max"],
+        use_amplitude_ratio=use_amplitude_ratio,
         return_features=True, return_filteredout_features=True
     )
 
