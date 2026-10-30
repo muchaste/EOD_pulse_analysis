@@ -51,7 +51,7 @@ config.read(config_file)
 
 bool_keys = {
     "enable_bandpass_filter", "create_events", "merge_events",
-    "pre_merge_filtering", "post_merge_filtering", "save_filtered_out", "create_plots"
+    "pre_merge_filtering", "post_merge_filtering", "save_filtered_out", "create_plots", "triphasic_search"
 }
 int_keys = {
     "duplicate_samples", "interp_factor", "search_window",
@@ -82,6 +82,7 @@ parameters.setdefault("envelope_shadow_us", 5000.0)
 parameters.setdefault("envelope_shadow_fraction", 0.4)
 parameters.setdefault("envelope_highpass_hz", 8.0)
 parameters.setdefault("envelope_biphasic_merge_us", 2000.0)
+parameters.setdefault("triphasic_search", True)
 
 use_ml_filtering = False
 classifier_path = ""
@@ -317,7 +318,8 @@ else:
         window_length=parameters.get("extraction_window_length_us", 4000),
         search_window=int(parameters["search_window"]),
         symmetry_threshold=parameters.get("symmetry_threshold", 0.3),
-        pulse_mode=pulse_mode_override
+        pulse_mode=pulse_mode_override,
+        triphasic_search=parameters["triphasic_search"]
     )
 
 print(f"Snippets extracted: {len(eod_snippets)}")

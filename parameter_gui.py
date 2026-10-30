@@ -334,6 +334,12 @@ class ParameterConfigGUI:
                                        values=list(VALID_EXTRACTION_FOR_DETECTION), state='readonly', width=12)
         detection_combo.grid(row=next_row+5, column=4, sticky=tk.W, padx=5)
         detection_combo.bind('<<ComboboxSelected>>', self.update_extraction_method_options)
+
+        # Case A/B search for a missed first phase (P1) / trailing phase (P3) in extract_pulse_snippets
+        self.param_vars['triphasic_search'] = tk.BooleanVar(value=True)
+        ttk.Checkbutton(pulse_frame, text="Triphasic P1/P3 search",
+                        variable=self.param_vars['triphasic_search']).grid(
+            row=next_row+6, column=3, columnspan=2, sticky=tk.W, pady=2)
         if self.default_mode == 'monophasic':
             self.apply_pulse_mode_preset()
         self.update_detection_field_states()

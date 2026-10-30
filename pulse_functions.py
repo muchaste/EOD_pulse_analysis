@@ -263,7 +263,8 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
                            return_differential=None, use_pca=None, interp_factor=1,
                            pca_component=0, pca_interp_points=100,
                            window_mode="fixed", window_factor=7, window_length = 4000,
-                           search_window=10, symmetry_threshold=0.3, pulse_mode='biphasic'):
+                           search_window=10, symmetry_threshold=0.3, pulse_mode='biphasic',
+                           triphasic_search=True):
     """
     Extract and analyze EOD snippets with variable widths based on detected pulse widths.
     For 2-D multi-channel data (finds polarity flips and extracts differential signals OR
@@ -343,6 +344,11 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
     window_length : int, optional
         Length (in microseconds) of waveform snippets to extract around each pulse midpoint.
         Only used when window_mode='fixed'.
+    triphasic_search : bool, optional
+        If True (default), search for a missed first phase (P1) before the detected pair and
+        for a trailing phase (P3) after it (Case A/B); a found P1 replaces the detected landmark
+        and the detected pair becomes P2/P3. If False, P1/P2 stay at the re-detected landmarks
+        and P3 is not searched (snippet_p3_idc / final_p3_idc are -1).
     
     Returns
     -------
@@ -658,7 +664,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
             # returned by detect_pulses instead of P1_peak.
             # A1: search before P2 (trough) for missed P1 (positive peak).
             # A2 (only if A1 misses): search after P3 (peak) for a trailing negative trough.
-            if snippet_trough_idx < snippet_peak_idx:
+            if triphasic_search and snippet_trough_idx < snippet_peak_idx:
                 p1_found = False
                 before_region = snippet[:snippet_trough_idx]
                 if len(before_region) > 0:
@@ -679,7 +685,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
             # returned by detect_pulses instead of P1_trough.
             # B1: search before P2 (peak) for missed P1 (negative trough).
             # B2 (only if B1 misses): search after P3 (trough) for a trailing positive peak.
-            elif snippet_peak_idx < snippet_trough_idx:
+            elif triphasic_search and snippet_peak_idx < snippet_trough_idx:
                 p1_found = False
                 before_region = snippet[:snippet_peak_idx]
                 if len(before_region) > 0:
@@ -1408,8 +1414,9 @@ def _select_best_singleended_channel(data, n_channels, peaks, troughs, search_wi
     troughs : 1-D array
         Candidate trough indices.
     search_window : int, optional
-        Half-width (in samples) of the window used both to pick the winning channel and to
-        re-detect the dominant peak/trough on it (default 200).
+        Margin (in samples) added on both sides of the candidate peak-trough pair; the window
+        used both to pick the winning channel and to re-detect the dominant peak/trough on it
+        (default 200).
 
     Returns
     -------
@@ -1430,9 +1437,10 @@ def _select_best_singleended_channel(data, n_channels, peaks, troughs, search_wi
     refined_troughs = np.zeros(n_pulses, dtype=int)
 
     for i in range(n_pulses):
-        center_idx = (peaks[i] + troughs[i]) // 2
-        win_start = max(0, center_idx - search_window)
-        win_end = min(n_samples, center_idx + search_window)
+        pair_start = min(peaks[i], troughs[i])
+        pair_end = max(peaks[i], troughs[i])
+        win_start = max(0, pair_start - search_window)
+        win_end = min(n_samples, pair_end + search_window + 1)
         window = data[win_start:win_end, :]
 
         winning_ch = int(np.argmax(np.max(np.abs(window), axis=0)))
