@@ -438,6 +438,10 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
         if extraction_method == 'pca' and n_channels < 2:
             print("    Warning: PCA extraction requires multi-channel data. Falling back to standard extraction.")
             extraction_method = 'single_channel'
+        # Differential extraction needs at least two channels; without a pair every pulse would be dropped
+        if extraction_method == 'differential' and n_channels < 2:
+            print("    Warning: differential extraction requires at least 2 channels. Falling back to single_channel extraction.")
+            extraction_method = 'single_channel'
         
         if extraction_method == 'pca':
             print(f"    Using PCA-based extraction with spatial interpolation from {n_channels}-channel data...")
@@ -1024,42 +1028,45 @@ def _select_differential_channel_pointwise(data, n_channels, peaks, troughs, sym
     amps : 1-D array
         Amplitudes for each channel
     cor_coeffs : 2-D array
-        Correlation coefficients between adjacent channels
+        Sign test between neighbouring channels: sign of the product of their signed
+        peak-minus-trough differences (-1 = polarity flip, +1 = same polarity, 0 = undefined).
+        With two points per channel this is what the correlation coefficient reduces to.
+        The requirement of a flip in the differential channels (against shadow artifacts) needs at
+        least 3 channels and is skipped for 2 channels.
     """
     n_pulses = len(peaks)
     amps = np.zeros((n_pulses, n_channels))  # Initialize 2D array
-    cor_coeffs = np.zeros((n_pulses, n_channels - 1))
-    cor_coeffs_diff = np.zeros((n_pulses, n_channels - 2))
+    # Sign tests between neighbouring channels (+1 same polarity, -1 flipped, 0 undefined)
+    cor_coeffs = np.zeros((n_pulses, max(0, n_channels - 1)))
+    cor_coeffs_diff = np.zeros((n_pulses, max(0, n_channels - 2)))
+    amps_diff_all = np.zeros((n_pulses, max(0, n_channels - 1)))
     eod_chan = np.zeros(n_pulses, dtype=int)
     is_differential = np.zeros(n_pulses, dtype=int)
+
+    # Only the peak-to-trough differences are needed. With two points per channel the
+    # "correlation" of two neighbouring channels is +-1, i.e. exactly the sign of the product of
+    # their differences (0 if either difference is 0), so the sign is computed directly.
+    valid_pulses = (np.asarray(peaks) >= 0) & (np.asarray(troughs) >= 0)  # invalid indices are skipped
+    rows_peak = data[np.asarray(peaks)[valid_pulses], :]
+    rows_trough = data[np.asarray(troughs)[valid_pulses], :]
+    signed = rows_trough - rows_peak
+    amps[valid_pulses] = np.abs(signed)
+    if n_channels > 1:
+        cor_coeffs[valid_pulses] = np.sign(signed[:, :-1] * signed[:, 1:])
+        signed_diff = np.diff(rows_trough, axis=1) - np.diff(rows_peak, axis=1)  # differential channels
+        amps_diff_all[valid_pulses] = np.abs(signed_diff)
+        if n_channels > 2:
+            cor_coeffs_diff[valid_pulses] = np.sign(signed_diff[:, :-1] * signed_diff[:, 1:])
+    # With two channels there is a single differential channel, so a differential flip cannot exist
+    # and cannot be required
+    require_differential_flip = n_channels > 2
 
     for i in range(n_pulses):
         if peaks[i] < 0 or troughs[i] < 0:
             continue  # Skip invalid indices
-        
-        # Extract 2-point snippet = data at peak and trough
-        snippet = data[[peaks[i], troughs[i]], :]  # Peak first, trough second
 
-        # Calculate amplitudes for each channel using correct peak/trough rows
-        amps[i, :] = abs(np.diff(snippet, axis = 0)[0])  # Store in 2D array
-
-        if snippet.shape[0] > 1:  # Need at least 2 samples for correlation
-            for j in range(n_channels - 1):
-                if np.var(snippet[:, j]) > 0 and np.var(snippet[:, j+1]) > 0:
-                    cor_coeffs[i, j] = np.corrcoef(snippet[:, j], snippet[:, j+1])[0, 1]
-    
-        # Compute differential signals only where needed
         if n_channels > 1:
-            snippet_diff = np.diff(snippet, axis=1)
-
-            # Calculate amplitudes for each differential channel
-            amps_diff = abs(np.diff(snippet_diff, axis = 0))[0]
-            
-            # Calculate correlation coefficients for differential channels
-            if snippet_diff.shape[0] > 1:  # Need at least 2 samples for correlation
-                for j in range(n_channels - 2):
-                    if np.var(snippet_diff[:, j]) > 0 and np.var(snippet_diff[:, j+1]) > 0:
-                        cor_coeffs_diff[i, j] = np.corrcoef(snippet_diff[:, j], snippet_diff[:, j+1])[0, 1]
+            amps_diff = amps_diff_all[i]
 
             # Find polarity flips (negative correlations)
             flips_raw = np.where(cor_coeffs[i,:] < 0)[0]
@@ -1076,25 +1083,20 @@ def _select_differential_channel_pointwise(data, n_channels, peaks, troughs, sym
                 # Multiple flips: choose the one with largest amplitude in differential data
                 eod_chan[i] = flips[np.argmax(amps_diff[flips])]
                 is_differential[i] = 1
-                # print(f"Pulse {i}: Multiple flips, chosing highest amplitude difference")         
             elif len(flips) == 0:
                 # No flip anywhere: noise. Differential mode has no single-ended fallback -
                 # use extraction_method='single_channel' / _select_best_singleended_channel() for that.
                 eod_chan[i] = -1
                 is_differential[i] = -1
-                # print(f"Pulse {i}: No flips, noise")
             elif len(flips) == 1:
                 # If there is no flip in differential channels, this is a noise pulse
-                if len(flips_diff) == 0:
+                if require_differential_flip and len(flips_diff) == 0:
                     eod_chan[i] = -1
                     is_differential[i] = -1
-                    # print(f"Pulse {i}: 1 flip, no diff flip, noise")
-
                 else:
                     # Single flip: use it
                     eod_chan[i] = flips[0]
                     is_differential[i] = 1
-                    # print(f"Pulse {i}: 1 flip, differential channel {eod_chan[i]} :)")
 
         else:
             # Single channel case
@@ -3469,9 +3471,12 @@ def reclassify_session(input_path, output_path, species_classifier, lda_min_prob
     sp_pal_summ = plt.cm.Set1(np.linspace(0, 0.8, max(len(all_species_in_summ), 1)))
     sp_color_summ = {sp: sp_pal_summ[i] for i, sp in enumerate(all_species_in_summ)}
 
-    all_int_channels = list(range(8))
+    # Number of electrode lanes: at least 8 (previous fixed value), more if the locations exceed that
+    valid_locations = fish_summary_df['mean_location'].dropna()
+    n_electrodes = max(8, int(round(valid_locations.max())) + 1) if len(valid_locations) > 0 else 8
+    all_int_channels = list(range(n_electrodes))
     ch_pal = plt.cm.tab10(np.linspace(0, 0.9, 8))
-    ch_color_summ = {ch: ch_pal[ch] for ch in all_int_channels}
+    ch_color_summ = {ch: ch_pal[ch % 8] for ch in all_int_channels}
 
     time_bins_h = np.arange(0, 24.5, 0.5)
     bin_centers = time_bins_h[:-1] + 0.25
@@ -3484,7 +3489,7 @@ def reclassify_session(input_path, output_path, species_classifier, lda_min_prob
         if pd.isnull(fd['entry_time']) or pd.isnull(fd['exit_time']):
             continue
         sp = fd['species_code']
-        int_ch = max(0, min(7, int(round(fd['mean_location'])))) if pd.notnull(fd['mean_location']) else 0
+        int_ch = max(0, min(n_electrodes - 1, int(round(fd['mean_location'])))) if pd.notnull(fd['mean_location']) else 0
         entry_h = (fd['entry_time'].hour + fd['entry_time'].minute / 60.0 + fd['entry_time'].second / 3600.0) % 24
         exit_h  = (fd['exit_time'].hour  + fd['exit_time'].minute  / 60.0 + fd['exit_time'].second  / 3600.0) % 24
         for b_idx, b_start in enumerate(time_bins_h[:-1]):
@@ -3500,7 +3505,7 @@ def reclassify_session(input_path, output_path, species_classifier, lda_min_prob
     fig_sess, (ax_loc_s, ax_time_ch, ax_time_sp) = plt.subplots(3, 1, figsize=(14, 11))
     fig_sess.suptitle('Session summary (reclassified)', fontsize=11)
 
-    loc_bins = np.arange(-0.25, 8.25, 0.5)
+    loc_bins = np.arange(-0.25, n_electrodes + 0.25, 0.5)
     for sp in all_species_in_summ:
         sp_locs = fish_summary_df.loc[fish_summary_df['species_code'] == sp, 'mean_location'].dropna()
         if len(sp_locs) > 0:
@@ -3573,7 +3578,8 @@ def create_channel_events(eod_table, max_ipi_seconds, ignore_channel=False, verb
     pd.DataFrame
         Channel events with added metadata columns
     """
-    # Keep track of indices
+    # Keep track of indices (on a copy: the caller's table is not modified)
+    eod_table = eod_table.copy()
     eod_table['original_index'] = eod_table.index
 
     # Sort by timestamp
