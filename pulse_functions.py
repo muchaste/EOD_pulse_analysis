@@ -264,7 +264,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
                            pca_component=0, pca_interp_points=100,
                            window_mode="fixed", window_factor=7, window_length = 4000,
                            search_window=10, symmetry_threshold=0.3, pulse_mode='biphasic',
-                           triphasic_search=True):
+                           triphasic_search=True, pca_common_average=True):
     """
     Extract and analyze EOD snippets with variable widths based on detected pulse widths.
     For 2-D multi-channel data (finds polarity flips and extracts differential signals OR
@@ -352,6 +352,11 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
         and the detected pair becomes P2/P3. If False, P1/P2 stay at the re-detected landmarks
         and P3 is not searched (snippet_p3_idc / final_p3_idc are -1). Never run for
         pulse_mode='monophasic'.
+    pca_common_average : bool, optional
+        Only used when extraction_method='pca'. If True (default), the common-mode signal (mean
+        across channels) is subtracted before the PCA. This suppresses common noise but also
+        removes the shared part of a pulse that has the same sign on all channels, so it is never
+        applied for pulse_mode='monophasic' (as in extract_pulse_snippets_p1).
     
     Returns
     -------
@@ -552,7 +557,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
                         snippet_multichannel,
                         pca_component=pca_component,
                         interp_points=pca_interp_points,
-                        apply_common_average=True
+                        apply_common_average=pca_common_average and pulse_mode != 'monophasic'
                     )
                     # 'auto'/'pca_spatial' keep the spatial-amplitude-based location already
                     # computed above; 'gaussian'/'dipole' instead re-estimate directly from
