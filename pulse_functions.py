@@ -3997,7 +3997,7 @@ def create_event_plots(event_id, event_eods, event_data, event_start_time, sampl
         
         if len(merge_event_data) > 0:
             max_iteration = int(merge_event_data['merge_iteration'].max())
-            color_map = cm.get_cmap('tab20', max_iteration + 1)
+            color_map = plt.get_cmap('tab20', max_iteration + 1)
             channel_event_colors = {
                 int(iteration): color_map(i) 
                 for i, iteration in enumerate(merge_event_data['merge_iteration'].unique())
@@ -4008,14 +4008,14 @@ def create_event_plots(event_id, event_eods, event_data, event_start_time, sampl
                 'channel_event_id': merged_channel_event_ids, 
                 'merge_iteration': [1] * len(merged_channel_event_ids)
             })
-            channel_event_colors = {1: cm.get_cmap('tab20')(0)}
+            channel_event_colors = {1: plt.get_cmap('tab20')(0)}
     else:
         print(f"        No merge iteration data available for event {event_id}, using default coloring")
         merge_event_data = pd.DataFrame({
             'channel_event_id': merged_channel_event_ids, 
             'merge_iteration': [1] * len(merged_channel_event_ids)
         })
-        color_map = cm.get_cmap('tab20', len(merged_channel_event_ids))
+        color_map = plt.get_cmap('tab20', len(merged_channel_event_ids))
         channel_event_colors = {1: color_map(0)}
     
     # Calculate plotting parameters
@@ -4034,6 +4034,10 @@ def create_event_plots(event_id, event_eods, event_data, event_start_time, sampl
     # is a raw channel index); only 'differential' plots diff pairs (n_channels-1 lanes,
     # eod_channel is a pair index). Old 'PCA'/'Differential' strings accepted for backward compat.
     is_single_ended = extraction_method in ('pca', 'single_channel', 'PCA')
+    # Lane ch is centred at (ch + 0.5) * offset_diff. A single-ended lane is an electrode
+    # (position ch), a differential lane is the pair (ch, ch+1) (position ch + 0.5), so
+    # pulse_location (electrode units) maps to (location + location_lane_offset) * offset_diff.
+    location_lane_offset = 0.5 if is_single_ended else 0.0
     n_channels = event_data.shape[1]
     if is_single_ended:
         n_plot_channels = n_channels
@@ -4118,11 +4122,12 @@ def create_event_plots(event_id, event_eods, event_data, event_start_time, sampl
                             peak_loc = eod_row['pulse_location']
                             if not pd.isna(peak_loc):
                                 p1_timestamp = event_start_time + pd.to_timedelta(p1_idx / sample_rate, unit='s')
+                                location_y = (peak_loc + location_lane_offset) * offset_diff
                                 # Draw thin line from channel offset to pulse_location offset
-                                plt.plot([p1_timestamp, p1_timestamp], [(ch + 0.5) * offset_diff, peak_loc * offset_diff], 
+                                plt.plot([p1_timestamp, p1_timestamp], [(ch + 0.5) * offset_diff, location_y], 
                                         'k-', linewidth=0.5, alpha=0.6)
                                 # Mark pulse_location with small black marker
-                                plt.plot(p1_timestamp, peak_loc * offset_diff, 'ko', markersize=2, alpha=0.8)
+                                plt.plot(p1_timestamp, location_y, 'ko', markersize=2, alpha=0.8)
         
         # Clean up arrays immediately to save memory
         del channel_data, x_coords
@@ -4140,7 +4145,9 @@ def create_event_plots(event_id, event_eods, event_data, event_start_time, sampl
         if len(ce_eods) == 0:
             continue
             
-        ch = ce_eods['eod_channel'].iloc[0]
+        # Lane of the channel event: the channel with most of its pulses (all of them unless the
+        # event was built with ignore_channel, where its pulses come from several channels)
+        ch = ce_eods['eod_channel'].mode().iloc[0]
         
         # Calculate time bounds for this channel event
         if 'midpoint_idx' in ce_eods.columns:
@@ -4681,7 +4688,7 @@ def create_tracking_plot(event_id, event_eods, event_data, event_start_time, sam
         return None
     
     # Create color map for fish IDs
-    color_map = cm.get_cmap('tab10', len(fish_ids))
+    color_map = plt.get_cmap('tab10', len(fish_ids))
     
     if len(fish_ids) > 1:
         id_colors = {
@@ -4705,6 +4712,10 @@ def create_tracking_plot(event_id, event_eods, event_data, event_start_time, sam
     # Determine data format and plotting parameters based on extraction method.
     # See create_event_plots for why 'single_channel' and 'pca' share plotting logic.
     is_single_ended = extraction_method in ('pca', 'single_channel', 'PCA')
+    # Lane i is centred at i * offset_diff. A single-ended lane is an electrode (position i), a
+    # differential lane is the pair (i, i+1) (position i + 0.5), so pulse_location (electrode
+    # units) maps to (location + location_lane_offset) * offset_diff.
+    location_lane_offset = 0.0 if is_single_ended else -0.5
     n_channels = event_data.shape[1]
     if is_single_ended:
         n_plot_channels = n_channels
@@ -4791,14 +4802,15 @@ def create_tracking_plot(event_id, event_eods, event_data, event_start_time, sam
                     if np.any(valid_midpoints):
                         valid_midpoint_samples = midpoint_sample_indices[valid_midpoints]
                         midpoint_timestamps = event_start_time + pd.to_timedelta(valid_midpoint_samples / sample_rate, unit='s')
+                        location_y = (ch_eods['pulse_location'].values[valid_midpoints] + location_lane_offset) * offset_diff
                     
-                    plt.plot(midpoint_timestamps, ch_eods['pulse_location'].values[valid_midpoints] * offset_diff, 
-                            '-', linewidth=0.5, color=id_colors[fish_id], alpha=0.8, 
-                            label='Peak Loc' if i == 0 else "")
-                    
-                    plt.plot(midpoint_timestamps, ch_eods['pulse_location'].values[valid_midpoints] * offset_diff, 
-                            'x', markersize=3, color=id_colors[fish_id], alpha=0.8, 
-                            label='Peak Loc' if i == 0 else "")
+                        plt.plot(midpoint_timestamps, location_y, 
+                                '-', linewidth=0.5, color=id_colors[fish_id], alpha=0.8, 
+                                label='Peak Loc' if i == 0 else "")
+                        
+                        plt.plot(midpoint_timestamps, location_y, 
+                                'x', markersize=3, color=id_colors[fish_id], alpha=0.8, 
+                                label='Peak Loc' if i == 0 else "")
                     
         # Clean up arrays immediately to save memory
         del channel_data, x_coords
