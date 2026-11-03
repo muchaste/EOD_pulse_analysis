@@ -459,7 +459,7 @@ for n, filepath in enumerate(file_set['filename']):
                 search_window = parameters['search_window'],
                 symmetry_threshold=parameters.get('symmetry_threshold', 0.3),
                 pulse_mode=parameters.get('pulse_mode', 'biphasic'),
-                triphasic_search=parameters.get('triphasic_search', True)
+                triphasic_search=parameters.get('triphasic_search', False)
             )
 
         if len(eod_snippets) == 0:

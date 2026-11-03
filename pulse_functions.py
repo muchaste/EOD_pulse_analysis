@@ -270,7 +270,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
                            pca_component=0, pca_interp_points=100,
                            window_mode="fixed", window_factor=7, window_length = 4000,
                            search_window=10, symmetry_threshold=0.3, pulse_mode='biphasic',
-                           triphasic_search=True, pca_common_average=True):
+                           triphasic_search=False, pca_common_average=True):
     """
     Extract and analyze EOD snippets with variable widths based on detected pulse widths.
     For 2-D multi-channel data (finds polarity flips and extracts differential signals OR
@@ -353,11 +353,13 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
         Length (in microseconds) of waveform snippets to extract around each pulse midpoint.
         Only used when window_mode='fixed'.
     triphasic_search : bool, optional
-        If True (default), search for a missed first phase (P1) before the detected pair and
+        If True, search for a missed first phase (P1) before the detected pair and
         for a trailing phase (P3) after it (Case A/B); a found P1 replaces the detected landmark
-        and the detected pair becomes P2/P3. If False, P1/P2 stay at the re-detected landmarks
-        and P3 is not searched (snippet_p3_idc / final_p3_idc are -1). Never run for
-        pulse_mode='monophasic'.
+        and the detected pair becomes P2/P3. Candidates must reach half the larger landmark
+        amplitude and lie within twice the detected P1-P2 separation. If False (default since
+        2026-11-03: on Uganda field data the search mostly picked noise bumps or neighbouring
+        pulses), P1/P2 stay at the re-detected landmarks and P3 is not searched
+        (snippet_p3_idc / final_p3_idc are -1). Never run for pulse_mode='monophasic'.
     pca_common_average : bool, optional
         Only used when extraction_method='pca'. If True (default), the common-mode signal (mean
         across channels) is subtracted before the PCA. This suppresses common noise but also
@@ -684,7 +686,11 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
                 snippet_trough_idx = trough_idx - start_idx
 
             # Search for missed third phase in triphasic pulses.
-            amp_thr_tri = min(abs(snippet[snippet_peak_idx]), abs(snippet[snippet_trough_idx])) * 0.5
+            # Bounded (2026-11-03, bug 17): a candidate must reach half the LARGER landmark and lie
+            # within twice the detected P1-P2 separation; the unbounded search over the whole
+            # snippet with half the smaller landmark picked noise bumps and neighbouring pulses.
+            amp_thr_tri = max(abs(snippet[snippet_peak_idx]), abs(snippet[snippet_trough_idx])) * 0.5
+            max_phase_sep = 2 * abs(snippet_peak_idx - snippet_trough_idx)
           
             # Case A: Trough detected before peak -- HP triphasic where P3_peak was wrongly
             # returned by detect_pulses instead of P1_peak.
@@ -692,16 +698,17 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
             # A2 (only if A1 misses): search after P3 (peak) for a trailing negative trough.
             if run_triphasic_search and snippet_trough_idx < snippet_peak_idx:
                 p1_found = False
-                before_region = snippet[:snippet_trough_idx]
+                before_start = max(0, snippet_trough_idx - max_phase_sep)
+                before_region = snippet[before_start:snippet_trough_idx]
                 if len(before_region) > 0:
                     p1_candidates, _ = find_peaks(before_region, height=amp_thr_tri)
                     if len(p1_candidates) > 0:
-                        p1_new = int(p1_candidates[-1])  # rightmost candidate, closest to P2
+                        p1_new = before_start + int(p1_candidates[-1])  # rightmost candidate, closest to P2
                         abs_p3_idx = start_idx + snippet_peak_idx  # old peak (P3) in raw coords
                         snippet_peak_idx = p1_new
                         p1_found = True
                 if not p1_found:
-                    after_region = snippet[snippet_peak_idx:]
+                    after_region = snippet[snippet_peak_idx:snippet_peak_idx + max_phase_sep + 1]
                     if len(after_region) > 0:
                         p3_candidates, _ = find_peaks(-after_region, height=amp_thr_tri)
                         if len(p3_candidates) > 0:
@@ -713,16 +720,17 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
             # B2 (only if B1 misses): search after P3 (trough) for a trailing positive peak.
             elif run_triphasic_search and snippet_peak_idx < snippet_trough_idx:
                 p1_found = False
-                before_region = snippet[:snippet_peak_idx]
+                before_start = max(0, snippet_peak_idx - max_phase_sep)
+                before_region = snippet[before_start:snippet_peak_idx]
                 if len(before_region) > 0:
                     p1_candidates, _ = find_peaks(-before_region, height=amp_thr_tri)
                     if len(p1_candidates) > 0:
-                        p1_new = int(p1_candidates[-1])  # rightmost candidate, closest to P2
+                        p1_new = before_start + int(p1_candidates[-1])  # rightmost candidate, closest to P2
                         abs_p3_idx = start_idx + snippet_trough_idx  # old trough (P3) in raw coords
                         snippet_trough_idx = p1_new
                         p1_found = True
                 if not p1_found:
-                    after_region = snippet[snippet_trough_idx:]
+                    after_region = snippet[snippet_trough_idx:snippet_trough_idx + max_phase_sep + 1]
                     if len(after_region) > 0:
                         p3_candidates, _ = find_peaks(after_region, height=amp_thr_tri)
                         if len(p3_candidates) > 0:
@@ -4084,7 +4092,7 @@ def process_events(state, parameters, rate, output_path, data, file_start_time, 
             'mean_amplitude': event_eods['eod_amplitude'].mean(),
             'max_amplitude': event_eods['eod_amplitude'].max(),
             'mean_width_ms': event_eods['eod_width_us'].mean() / 1000 if 'eod_width_us' in event_eods.columns else 0,
-            'n_files': event_eods['file_index'].nunique() if 'file_index' in event_eods.columns else 1,
+            'n_files': event_eods['filename'].nunique() if 'filename' in event_eods.columns else 1,
             'file_names': ','.join(event_eods['filename'].unique()) if 'filename' in event_eods.columns else 'unknown',
             'dead_channels_file': event_eods['dead_channels_file'].iloc[0] if 'dead_channels_file' in event_eods.columns else ''
         }

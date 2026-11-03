@@ -368,7 +368,8 @@ class ParameterConfigGUI:
         detection_combo.bind('<<ComboboxSelected>>', self.update_extraction_method_options)
 
         # Case A/B search for a missed first phase (P1) / trailing phase (P3) in extract_pulse_snippets
-        self.param_vars['triphasic_search'] = tk.BooleanVar(value=True)
+        # (off by default since 2026-11-03: on field data it mostly picked noise, bug 17)
+        self.param_vars['triphasic_search'] = tk.BooleanVar(value=False)
         ttk.Checkbutton(pulse_frame, text="Triphasic P1/P3 search",
                         variable=self.param_vars['triphasic_search']).grid(
             row=next_row+6, column=3, columnspan=2, sticky=tk.W, pady=2)
@@ -904,8 +905,8 @@ class ControlParameterConfigGUI:
         pulse_mode_combo.bind('<<ComboboxSelected>>', self.apply_pulse_mode_preset)
 
         # Case A/B search for a missed first phase (P1) / trailing phase (P3) in extract_pulse_snippets
-        # (skipped for monophasic pulses)
-        self.param_vars['triphasic_search'] = tk.BooleanVar(value=True)
+        # (skipped for monophasic pulses; off by default since 2026-11-03, bug 17)
+        self.param_vars['triphasic_search'] = tk.BooleanVar(value=False)
         ttk.Checkbutton(pulse_frame, text="Triphasic P1/P3 search",
                         variable=self.param_vars['triphasic_search']).grid(
             row=next_row + 5, column=3, columnspan=2, sticky=tk.W, pady=2)

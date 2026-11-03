@@ -83,7 +83,7 @@ parameters.setdefault("envelope_shadow_us", 5000.0)
 parameters.setdefault("envelope_shadow_fraction", 0.4)
 parameters.setdefault("envelope_highpass_hz", 8.0)
 parameters.setdefault("envelope_biphasic_merge_us", 2000.0)
-parameters.setdefault("triphasic_search", True)
+parameters.setdefault("triphasic_search", False)
 
 use_ml_filtering = False
 classifier_path = ""
