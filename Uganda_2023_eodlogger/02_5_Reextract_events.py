@@ -181,7 +181,10 @@ for _, event_row in source_summaries.iterrows():
         print(f"  wav start differs from the source event_start_time by {source_time_offset_s:.3f} s (source frame mismatch): using the table frame")
     print(f"  {len(data) / rate:.1f} s, {n_channels} channels, starts {event_start_time}")
 
-    dead_str = event_row['dead_channels_file'] if isinstance(event_row['dead_channels_file'], str) else ''
+    # Older source runs have no dead_channels_file column (summaries before 2026-10): no dead channels
+    dead_str = event_row.get('dead_channels_file', '')
+    if not isinstance(dead_str, str):
+        dead_str = ''
     dead_ch_0idx = [int(c[2:]) - 1 for c in dead_str.split(',') if c.startswith('ch')]
     live_pair_indices = [i for i in range(n_channels - 1) if i not in dead_ch_0idx and (i + 1) not in dead_ch_0idx]
     if len(dead_ch_0idx) > 0:
