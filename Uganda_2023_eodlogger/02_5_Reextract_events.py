@@ -60,6 +60,7 @@ parameter_overrides = {
 }
 margin_tolerance_s = 0.002   # pulses this far outside eod_start_time..eod_end_time are still kept
 min_source_match_fraction = 0.5   # merged events in the window with fewer source matches (1 ms) were separate events in the source run: dropped
+event_ids = []   # empty = all events of the source folder, otherwise only these
 create_plots = False
 
 root = tk.Tk()
@@ -136,6 +137,8 @@ source_summaries = pd.read_csv(os.path.join(input_path, 'all_event_summaries.csv
 for col in ['event_start_time', 'event_end_time', 'eod_start_time', 'eod_end_time']:
     source_summaries[col] = pd.to_datetime(source_summaries[col])
 source_summaries = source_summaries.sort_values('event_id').reset_index(drop=True)
+if len(event_ids) > 0:
+    source_summaries = source_summaries[source_summaries['event_id'].isin(event_ids)].reset_index(drop=True)
 print(f"Source folder: {len(source_summaries)} events")
 
 event_summaries = []
@@ -147,7 +150,7 @@ for _, event_row in source_summaries.iterrows():
         continue
     base_name = os.path.basename(table_files[0]).replace('_eod_table.csv', '')
     fname = base_name.split('_event_')[0] + '.wav'
-    source_table = pd.read_csv(table_files[0], usecols=['timestamp'])
+    source_table = pd.read_csv(table_files[0], usecols=['timestamp', 'midpoint_idx'])
     source_times = np.sort(pd.to_datetime(source_table['timestamp']).values.astype('datetime64[ns]').astype(np.int64) / 1e9)
     print(f"\nEvent {event_id} ({base_name})")
 
@@ -167,7 +170,14 @@ for _, event_row in source_summaries.iterrows():
         data = np.concatenate(parts, axis=0)
         print(f"  concatenated {len(part_files)} parts")
     n_channels = data.shape[1]
-    event_start_time = event_row['event_start_time']
+    # The wav starts at the source run's event_start_time only when its audio frame and its timestamps
+    # agree; at a file whose name time is not previous + 600 s they differ (known_bugs N7), so the wav
+    # start is taken from the source table itself (timestamp - midpoint_idx / rate)
+    wav_starts = pd.to_datetime(source_table['timestamp']) - pd.to_timedelta(source_table['midpoint_idx'] / rate, unit='s')
+    event_start_time = wav_starts.median().round('us')
+    source_time_offset_s = (event_start_time - event_row['event_start_time']).total_seconds()
+    if abs(source_time_offset_s) > 0.001:
+        print(f"  wav start differs from the source event_start_time by {source_time_offset_s:.3f} s (source frame mismatch): using the table frame")
     print(f"  {len(data) / rate:.1f} s, {n_channels} channels, starts {event_start_time}")
 
     dead_str = event_row['dead_channels_file'] if isinstance(event_row['dead_channels_file'], str) else ''
@@ -393,8 +403,8 @@ for _, event_row in source_summaries.iterrows():
         'event_id': event_id,
         'eod_start_time': event_eods['timestamp_dt'].min(),
         'eod_end_time': event_eods['timestamp_dt'].max(),
-        'event_start_time': event_row['event_start_time'],
-        'event_end_time': event_row['event_end_time'],
+        'event_start_time': event_start_time,
+        'event_end_time': event_row['event_end_time'] + dt.timedelta(seconds=source_time_offset_s),
         'duration_seconds': duration,
         'n_eods': len(event_eods),
         'n_channels': event_eods['eod_channel'].nunique(),
@@ -410,6 +420,7 @@ for _, event_row in source_summaries.iterrows():
         'dead_channels_file': dead_str,
         'n_eods_source': int(event_row['n_eods']),
         'n_merged_events_in_window': int(event_eods['merged_event_id'].nunique()),
+        'source_time_offset_s': source_time_offset_s,
     })
 
     if create_plots:
@@ -418,6 +429,12 @@ for _, event_row in source_summaries.iterrows():
     del data, eod_snippets, event_waveforms
 
 summary_df = pd.DataFrame(event_summaries)
-summary_df.to_csv(os.path.join(output_path, 'all_event_summaries.csv'), index=False)
+summary_file = os.path.join(output_path, 'all_event_summaries.csv')
+if len(event_ids) > 0 and os.path.exists(summary_file):
+    # subset run: replace only the re-run events in the existing summary
+    previous = pd.read_csv(summary_file)
+    previous = previous[~previous['event_id'].isin(summary_df['event_id'])]
+    summary_df = pd.concat([previous, summary_df]).sort_values('event_id').reset_index(drop=True)
+summary_df.to_csv(summary_file, index=False)
 print(f"\nDone: {len(summary_df)} events, {int(summary_df['n_eods'].sum()) if len(summary_df) else 0} pulses "
       f"(source: {int(summary_df['n_eods_source'].sum()) if len(summary_df) else 0}) -> {output_path}")
