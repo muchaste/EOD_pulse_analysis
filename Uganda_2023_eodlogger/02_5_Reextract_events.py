@@ -11,14 +11,17 @@ Per event: event wav (or concatenated _part_N wavs) -> detection on bandpassed a
 differentials of the live pairs -> unify -> extract_pulse_snippets -> filter_waveforms ->
 remove_duplicates -> channel events / merge / event filters inside the window (as 02_3) ->
 merged events whose pulses mostly match the source table (>= min_source_match_fraction within 1 ms)
-keep the ORIGINAL event_id and event window; merged events that were separate events in the
-source run are dropped. Pulses outside the original pulse span (eod_start_time .. eod_end_time of
-all_event_summaries.csv, +- margin_tolerance_s) are dropped. original_* indices are relative to the
-source 10-min file of each pulse (the source run stored cross-file events relative to the retained
-buffer instead, i.e. equal to p1_idx). Output: *_eod_table.csv, *_waveforms_concatenated.npz/json,
-all_event_summaries.csv (+ n_eods_source, n_merged_events_in_window), config.cfg (with the overrides
-applied), reextraction_info.json (source folder, git hash). No wav files are written (the source
-folder keeps them). Validated 2026-11-03 on 3 Juma_L5 events (known_bugs_pulse_functions.md, "02_5").
+form the re-extracted event; merged events that were separate events in the source run are dropped.
+Pulses outside the original pulse span (eod_start_time .. eod_end_time of all_event_summaries.csv,
++- margin_tolerance_s) are dropped. Events are renumbered consecutively in the output (a source
+event that yields no pulses leaves no gap); match events between extractions by their start times
+(the log prints source id -> new id). The wav start time is taken from the source table
+(timestamp - midpoint_idx / rate), which also covers source runs made before the N7 fix in 02_3.
+original_* indices are relative to the source 10-min file of each pulse. Output: *_eod_table.csv,
+*_waveforms_concatenated.npz/json, all_event_summaries.csv (+ n_eods_source), config.cfg (with the
+overrides applied), reextraction_info.json (source folder, git hash), optional detection plots.
+No wav files are written (the source folder keeps them, under the SOURCE event ids).
+Validated 2026-11-03 on 3 Juma_L5 events (known_bugs_pulse_functions.md, "02_5").
 
 Authors: Stefan Mucha with GitHub Copilot
 """
@@ -60,8 +63,7 @@ parameter_overrides = {
 }
 margin_tolerance_s = 0.002   # pulses this far outside eod_start_time..eod_end_time are still kept
 min_source_match_fraction = 0.5   # merged events in the window with fewer source matches (1 ms) were separate events in the source run: dropped
-event_ids = []   # empty = all events of the source folder, otherwise only these
-create_plots = False
+create_plots = True
 
 root = tk.Tk()
 root.withdraw()
@@ -137,22 +139,21 @@ source_summaries = pd.read_csv(os.path.join(input_path, 'all_event_summaries.csv
 for col in ['event_start_time', 'event_end_time', 'eod_start_time', 'eod_end_time']:
     source_summaries[col] = pd.to_datetime(source_summaries[col])
 source_summaries = source_summaries.sort_values('event_id').reset_index(drop=True)
-if len(event_ids) > 0:
-    source_summaries = source_summaries[source_summaries['event_id'].isin(event_ids)].reset_index(drop=True)
 print(f"Source folder: {len(source_summaries)} events")
 
 event_summaries = []
+event_counter = 0
 for _, event_row in source_summaries.iterrows():
-    event_id = int(event_row['event_id'])
-    table_files = glob.glob(os.path.join(input_path, f'*_event_{event_id}_eod_table.csv'))
+    source_event_id = int(event_row['event_id'])
+    table_files = glob.glob(os.path.join(input_path, f'*_event_{source_event_id}_eod_table.csv'))
     if len(table_files) == 0:
-        print(f"Event {event_id}: no eod_table in the source folder, skipped")
+        print(f"Source event {source_event_id}: no eod_table in the source folder, skipped")
         continue
     base_name = os.path.basename(table_files[0]).replace('_eod_table.csv', '')
     fname = base_name.split('_event_')[0] + '.wav'
     source_table = pd.read_csv(table_files[0], usecols=['timestamp', 'midpoint_idx'])
     source_times = np.sort(pd.to_datetime(source_table['timestamp']).values.astype('datetime64[ns]').astype(np.int64) / 1e9)
-    print(f"\nEvent {event_id} ({base_name})")
+    print(f"\nSource event {source_event_id} ({base_name})")
 
     whole_wav = os.path.join(input_path, base_name + '.wav')
     if os.path.exists(whole_wav):
@@ -171,8 +172,8 @@ for _, event_row in source_summaries.iterrows():
         print(f"  concatenated {len(part_files)} parts")
     n_channels = data.shape[1]
     # The wav starts at the source run's event_start_time only when its audio frame and its timestamps
-    # agree; at a file whose name time is not previous + 600 s they differ (known_bugs N7), so the wav
-    # start is taken from the source table itself (timestamp - midpoint_idx / rate)
+    # agree (not the case for runs before the N7 fix in 02_3), so the wav start is taken from the
+    # source table itself (timestamp - midpoint_idx / rate)
     wav_starts = pd.to_datetime(source_table['timestamp']) - pd.to_timedelta(source_table['midpoint_idx'] / rate, unit='s')
     event_start_time = wav_starts.median().round('us')
     source_time_offset_s = (event_start_time - event_row['event_start_time']).total_seconds()
@@ -342,7 +343,7 @@ for _, event_row in source_summaries.iterrows():
     if len(eod_table) == 0:
         continue
 
-    # Channel events, merge and event-size filters as in process_events; every surviving pulse keeps the original event_id
+    # Channel events, merge and event-size filters as in process_events
     channel_events = create_channel_events(eod_table, parameters['max_ipi_seconds'], ignore_channel=parameters['ignore_channel'])
     if parameters['pre_merge_filtering']:
         channel_events = filter_events(channel_events, parameters['min_eods_premerge'], parameters['min_amplitude'])
@@ -377,13 +378,15 @@ for _, event_row in source_summaries.iterrows():
     if len(merged_events) == 0:
         print("  no merged event matches the source event")
         continue
+    event_counter += 1
+    event_id = event_counter
+    out_base_name = f'{fname[:-4]}_event_{event_id}'
     event_eods = merged_events.copy()
     event_eods['reaches_file_end'] = False
     event_eods['event_id'] = event_id
-    print(f"  {len(event_eods)} pulses in {event_eods['merged_event_id'].nunique()} merged event(s) inside the window (source table: {int(event_row['n_eods'])})")
+    print(f"  -> new event {event_id}: {len(event_eods)} pulses in {event_eods['merged_event_id'].nunique()} merged event(s) inside the window (source table: {int(event_row['n_eods'])})")
 
-    # Index columns relative to the event audio (= the wav) and to the source 10-min file (as in process_events
-    # for single-file events; the source run stored cross-file events relative to the retained buffer instead)
+    # Index columns relative to the event audio (= the wav) and to the source 10-min file of each pulse
     event_eods['original_p1_idx'] = event_eods['p1_idx'] + file_offset_samples[event_eods['original_index'].values]
     event_eods['original_p2_idx'] = event_eods['p2_idx'] + file_offset_samples[event_eods['original_index'].values]
     event_eods['original_midpoint_idx'] = event_eods['midpoint_idx'] + file_offset_samples[event_eods['original_index'].values]
@@ -395,8 +398,8 @@ for _, event_row in source_summaries.iterrows():
         event_eods['part_audio_start_sample'] = (event_eods['midpoint_idx'] // split_dur_samp) * split_dur_samp
 
     event_waveforms = [eod_snippets[i] for i in event_eods['original_index'].values]
-    save_waveforms(event_waveforms, os.path.join(output_path, f'{base_name}_waveforms'), length=parameters['extraction_window'])
-    event_eods.to_csv(os.path.join(output_path, f'{base_name}_eod_table.csv'), index=False)
+    save_waveforms(event_waveforms, os.path.join(output_path, f'{out_base_name}_waveforms'), length=parameters['extraction_window'])
+    event_eods.to_csv(os.path.join(output_path, f'{out_base_name}_eod_table.csv'), index=False)
 
     duration = (event_eods['timestamp_dt'].max() - event_eods['timestamp_dt'].min()).total_seconds()
     event_summaries.append({
@@ -419,8 +422,6 @@ for _, event_row in source_summaries.iterrows():
         'file_names': ','.join(event_eods['filename'].unique()),
         'dead_channels_file': dead_str,
         'n_eods_source': int(event_row['n_eods']),
-        'n_merged_events_in_window': int(event_eods['merged_event_id'].nunique()),
-        'source_time_offset_s': source_time_offset_s,
     })
 
     if create_plots:
@@ -429,12 +430,6 @@ for _, event_row in source_summaries.iterrows():
     del data, eod_snippets, event_waveforms
 
 summary_df = pd.DataFrame(event_summaries)
-summary_file = os.path.join(output_path, 'all_event_summaries.csv')
-if len(event_ids) > 0 and os.path.exists(summary_file):
-    # subset run: replace only the re-run events in the existing summary
-    previous = pd.read_csv(summary_file)
-    previous = previous[~previous['event_id'].isin(summary_df['event_id'])]
-    summary_df = pd.concat([previous, summary_df]).sort_values('event_id').reset_index(drop=True)
-summary_df.to_csv(summary_file, index=False)
+summary_df.to_csv(os.path.join(output_path, 'all_event_summaries.csv'), index=False)
 print(f"\nDone: {len(summary_df)} events, {int(summary_df['n_eods'].sum()) if len(summary_df) else 0} pulses "
-      f"(source: {int(summary_df['n_eods_source'].sum()) if len(summary_df) else 0}) -> {output_path}")
+      f"(source: {len(source_summaries)} events, {int(source_summaries['n_eods'].sum())} pulses) -> {output_path}")

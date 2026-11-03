@@ -320,9 +320,13 @@ for n, filepath in enumerate(file_set['filename']):
         retain_len = len(state.retained_data)
         data = np.concatenate([state.retained_data, data], axis=0)
         state.retained_data = None  # free immediately — no longer needed
-        file_start_time = state.retained_data_start_time
+        # Anchor the combined audio to THIS file's name time, so that the new file's pulse
+        # timestamps (file name + index / rate) and the audio frame agree even when the file
+        # names are not exactly 600 s apart (N7). The retained pulses keep the timestamps of
+        # the previous file's frame.
+        file_start_time = file_set['timestamp'][n] - dt.timedelta(seconds=retain_len / rate)
         print(f"    Extended audio: {original_data_length/rate:.1f}s + {retained_duration:.2f}s = {len(data)/rate:.1f}s total")
-        print(f"    Adjusted file_start_time to: {file_start_time}")
+        print(f"    Adjusted file_start_time to: {file_start_time} (retained buffer started {state.retained_data_start_time})")
         print(f"    EOD detection on new file only ({original_data_length/rate:.1f}s)")
     else:
         file_start_time = file_set['timestamp'][n]
