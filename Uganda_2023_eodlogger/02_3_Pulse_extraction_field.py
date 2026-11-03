@@ -34,10 +34,9 @@ from pulse_functions import (
     filter_waveforms,
     filter_waveforms_with_classifier,
     save_waveforms,
-    create_channel_events,
-    merge_channel_events,
-    filter_events,
-    create_event_plots,
+    EventState,
+    flush_pending_events,
+    process_events,
     calc_fwhm_width,
     detect_monophasic_pulses,
     detect_pulses_envelope,
@@ -100,8 +99,6 @@ _total_eods_kept = 0  # Across all files - used for the zero-pulse guard rail at
 # Parameters for event creation
 if parameters['create_events']:
     print("Setting event extraction parameters...")
-    event_counter = 0           # Keep track of total events across files
-    event_summaries = []
 
     print(f"  max_ipi_seconds: {parameters['max_ipi_seconds']}")
     print(f"  min_eods_premerge: {parameters['min_eods_premerge']}")
@@ -251,15 +248,10 @@ del data
 # Initialize cross-file continuation variables
 _ch_cols = [c for c in cor_factors_all.columns if c.startswith('ch_')]
 _dead_channel_log = []  # accumulates per-file dead channel entries
-retained_data = None
-retained_data_start_time = None
-retained_eod_table = None
-retained_eod_waveforms = None
-retained_audio_start_idx = None
-retained_event_ids = {}      # {merged_event_id: pre-assigned event_counter value}
-retained_part_counts = {}    # {merged_event_id: parts already saved to disk}
-retained_part_counts_snapshot = {}  # copy of retained_part_counts taken at event-id assignment
-n_prev_retained = 0          # row count of retained_eod_table entering current iteration
+state = EventState()    # cross-file continuation state, event counter and event summaries
+
+
+
 
 # Process each file
 for n, filepath in enumerate(file_set['filename']):
@@ -321,14 +313,14 @@ for n, filepath in enumerate(file_set['filename']):
     retain_len = 0
 
     # Handle cross-file continuation: prepend retained audio from previous file
-    if retained_data is not None:
-        print(f"    Concatenating {len(retained_data)} samples from previous file (audio only)")
+    if state.retained_data is not None:
+        print(f"    Concatenating {len(state.retained_data)} samples from previous file (audio only)")
         original_data_length = len(data)
-        retained_duration = len(retained_data) / rate
-        retain_len = len(retained_data)
-        data = np.concatenate([retained_data, data], axis=0)
-        retained_data = None  # free immediately — no longer needed
-        file_start_time = retained_data_start_time
+        retained_duration = len(state.retained_data) / rate
+        retain_len = len(state.retained_data)
+        data = np.concatenate([state.retained_data, data], axis=0)
+        state.retained_data = None  # free immediately — no longer needed
+        file_start_time = state.retained_data_start_time
         print(f"    Extended audio: {original_data_length/rate:.1f}s + {retained_duration:.2f}s = {len(data)/rate:.1f}s total")
         print(f"    Adjusted file_start_time to: {file_start_time}")
         print(f"    EOD detection on new file only ({original_data_length/rate:.1f}s)")
@@ -472,8 +464,7 @@ for n, filepath in enumerate(file_set['filename']):
 
         if len(eod_snippets) == 0:
             print("    No valid EOD snippets extracted after waveform extraction")
-            if retained_eod_table is not None:
-                retained_data = data  # keep the pending event's buffer; frame and start time are unchanged
+            flush_pending_events(state, parameters, rate, output_path, data, file_start_time, fname, n == len(file_set) - 1)
             continue
 
         # Monophasic pulses: peak-to-trough distance misrepresents true pulse duration
@@ -516,8 +507,7 @@ for n, filepath in enumerate(file_set['filename']):
 
         if len(keep_indices) == 0:
             print("    No pulses remaining after filtering")
-            if retained_eod_table is not None:
-                retained_data = data
+            flush_pending_events(state, parameters, rate, output_path, data, file_start_time, fname, n == len(file_set) - 1)
             continue
 
         print(f"    Filtered {len(eod_snippets) - len(keep_indices)} out of {len(eod_snippets)} pulses")
@@ -594,8 +584,7 @@ for n, filepath in enumerate(file_set['filename']):
 
         if len(eod_snippets) == 0:
             print("    No valid EOD snippets remaining after duplicate removal")
-            if retained_eod_table is not None:
-                retained_data = data
+            flush_pending_events(state, parameters, rate, output_path, data, file_start_time, fname, n == len(file_set) - 1)
             continue
 
         _total_eods_kept += len(eod_snippets)
@@ -635,26 +624,26 @@ for n, filepath in enumerate(file_set['filename']):
         # retained_eod_table sample indices are in the previous combined-audio frame;
         # subtract retained_audio_start_idx to bring them to the retained-audio frame
         # (= start of the current combined audio). New-file indices shift up by retain_len.
-        n_prev_retained = len(retained_eod_table) if retained_eod_table is not None else 0
+        state.n_prev_retained = len(state.retained_eod_table) if state.retained_eod_table is not None else 0
 
-        if retained_eod_table is not None:
+        if state.retained_eod_table is not None:
             idx_cols = ['midpoint_idx', 'p1_idx', 'p2_idx', 'p3_idx']
-            ret_adj = retained_eod_table.drop(columns=['original_index'], errors='ignore').copy()
+            ret_adj = state.retained_eod_table.drop(columns=['original_index'], errors='ignore').copy()
             for col in idx_cols:
                 if col in ret_adj.columns:
                     # negative values (-1 = P2/P3 not set) are not sample indices; leave them
-                    ret_adj[col] = ret_adj[col].where(ret_adj[col] < 0, ret_adj[col] - retained_audio_start_idx)
-            ret_adj['relative_time_s'] -= retained_audio_start_idx / rate
+                    ret_adj[col] = ret_adj[col].where(ret_adj[col] < 0, ret_adj[col] - state.retained_audio_start_idx)
+            ret_adj['relative_time_s'] -= state.retained_audio_start_idx / rate
             new_adj = eod_table.copy()
             for col in idx_cols:
                 if col in new_adj.columns:
                     new_adj[col] = new_adj[col].where(new_adj[col] < 0, new_adj[col] + retain_len)
             new_adj['relative_time_s'] += retain_len / rate
             combined_eod_table = pd.concat([ret_adj, new_adj]).reset_index(drop=True)
-            combined_eod_waveforms = retained_eod_waveforms + filtered_eod_waveforms
-            retained_eod_table = None
-            retained_eod_waveforms = None
-            retained_audio_start_idx = None
+            combined_eod_waveforms = state.retained_eod_waveforms + filtered_eod_waveforms
+            state.retained_eod_table = None
+            state.retained_eod_waveforms = None
+            state.retained_audio_start_idx = None
             print(f"    Combined EOD table: {len(combined_eod_table)} EODs ({len(ret_adj)} retained + {len(new_adj)} new)")
         else:
             combined_eod_table = eod_table
@@ -812,366 +801,20 @@ for n, filepath in enumerate(file_set['filename']):
         # EXTRACT EVENTS
         # =============================================================================
         else: # Create events
-            print("  Creating events from extracted EODs...")
-            # Create events from eod_table
-            print(f"    Stage 1 - Channel-wise temporal clustering using max_ipi_seconds = {parameters['max_ipi_seconds']}")
+            process_events(state, parameters, rate, output_path, data, file_start_time, fname,
+                           combined_eod_table, combined_eod_waveforms, n == len(file_set) - 1)
 
-            if len(combined_eod_table) == 0:
-                print("No data to process!")
-                continue
-
-            # Create Channel Events
-            # ignore_channel is a user-set checkbox (Event Processing Options) - single-ended
-            # extraction (extraction_method='single_channel') assigns eod_channel independently
-            # per pulse (whichever raw channel has the loudest peak that instant), which is not
-            # spatially stable pulse-to-pulse like differential tracking, so it defaults to
-            # True for that mode in the GUI presets (see create_channel_events docstring).
-            channel_events = create_channel_events(
-                combined_eod_table,
-                parameters['max_ipi_seconds'],
-                ignore_channel=parameters['ignore_channel']
-            )
-
-            if len(channel_events) == 0:
-                print("No channel events created!")
-                retained_eod_table = None
-                retained_eod_waveforms = None
-                retained_event_ids.clear()
-                retained_part_counts.clear()
-                n_prev_retained = 0
-                continue
-
-            if parameters['pre_merge_filtering']:
-                filtered_channel_events = filter_events(channel_events, parameters['min_eods_premerge'], parameters['min_amplitude'])
-            else:
-                filtered_channel_events = channel_events.copy()
-
-            if len(filtered_channel_events) == 0:
-                print("    No channel events remaining after pre-merge filtering!")
-                retained_eod_table = None
-                retained_eod_waveforms = None
-                retained_event_ids.clear()
-                retained_part_counts.clear()
-                n_prev_retained = 0
-                continue
-
-            if parameters['merge_events']:
-                # Merge channel events across channels
-                print(f"    Stage 2 - Merging channel events using max_merge_gap_seconds = {parameters['max_merge_gap_seconds']}")
-                merged_events = merge_channel_events(filtered_channel_events, parameters['max_merge_gap_seconds'])
-
-                if len(merged_events) == 0:
-                    print("No merged events created!")
-                    retained_eod_table = None
-                    retained_eod_waveforms = None
-                    retained_event_ids.clear()
-                    retained_part_counts.clear()
-                    n_prev_retained = 0
-                    continue
-            else:
-                merged_events = filtered_channel_events.copy()
-                merged_events['merged_event_id'] = merged_events['channel_event_id']
-                merged_events['event_start_time'] = merged_events['channel_start_time']
-                merged_events['event_end_time'] = merged_events['channel_end_time']
-
-            # Flag events that reach the end of the file
-            merged_events['reaches_file_end'] = merged_events['event_end_time'] >= file_start_time + dt.timedelta(seconds=len(data)/rate - parameters['max_ipi_seconds'])
-
-            # Retain events that reach the end of the file and prepare data for next file
-            events_at_end = merged_events[merged_events['reaches_file_end']].copy()
-            if len(events_at_end) > 0 and n < len(file_set) - 1:  # Don't retain for last file
-                print(f"    Found {len(events_at_end['merged_event_id'].unique())} event(s) reaching file end - will retain for next file")
-                
-                # Calculate retention start index
-                retain_start_time = events_at_end['event_start_time'].min() - dt.timedelta(seconds=parameters['margin'])
-                retain_start_idx = max(0, int((retain_start_time - file_start_time).total_seconds() * rate))
-                
-                # Store audio for next iteration (unchanged — used for event WAV export)
-                retained_data = data[retain_start_idx:, :].copy()
-                retained_data_start_time = file_start_time + dt.timedelta(seconds=retain_start_idx / rate)
-                # Store EOD table rows to skip re-detection of the retained region
-                ret_eod_mask = combined_eod_table['midpoint_idx'] >= retain_start_idx
-                retained_eod_table = combined_eod_table[ret_eod_mask].drop(columns=['original_index'], errors='ignore').copy()
-                retained_eod_waveforms = [combined_eod_waveforms[i] for i in retained_eod_table.index]
-                retained_audio_start_idx = retain_start_idx
-
-                print(f"    Retaining {len(retained_data)} samples ({len(retained_data)/rate:.2f}s) starting from {retained_data_start_time}")
-                print(f"    Retained {len(retained_eod_table)} EODs for next iteration")
-
-                # ---- Case b: flush early parts of retained events that exceed 2x split_duration ----
-                split_duration = parameters.get('split_duration', 0.0)
-                if split_duration > 0:
-                    split_dur_samp = int(split_duration * rate)
-                    earliest_unsaved_samp = None  # within retained_data buffer
-                    for mid in events_at_end['merged_event_id'].unique():
-                        mid_eods = events_at_end[events_at_end['merged_event_id'] == mid]
-                        event_start_in_buf = max(0, int(mid_eods['midpoint_idx'].min()) - retain_start_idx)
-                        event_retained_duration = (len(retained_data) - event_start_in_buf) / rate
-                        if event_retained_duration <= 2 * split_duration:
-                            continue
-                        # Pre-assign event_id if not already done
-                        if mid not in retained_event_ids:
-                            event_counter += 1
-                            retained_event_ids[mid] = event_counter
-                            retained_part_counts[mid] = 0
-                        n_save = int((len(retained_data) - event_start_in_buf) / split_dur_samp) - 1
-                        for i in range(n_save):
-                            retained_part_counts[mid] += 1
-                            part_buf_start = event_start_in_buf + i * split_dur_samp
-                            part_buf_end   = event_start_in_buf + (i + 1) * split_dur_samp
-                            abs_part_start = retain_start_idx + part_buf_start
-                            abs_part_end   = retain_start_idx + part_buf_end
-                            part_audio = retained_data[part_buf_start:part_buf_end]
-                            part_wall_start = retained_data_start_time + dt.timedelta(seconds=part_buf_start / rate)
-                            part_eods = mid_eods[
-                                (mid_eods['midpoint_idx'] >= abs_part_start) &
-                                (mid_eods['midpoint_idx'] < abs_part_end)
-                            ].copy()
-                            for col in ['p1_idx', 'p2_idx', 'midpoint_idx']:
-                                if col in part_eods.columns:
-                                    part_eods[col] = part_eods[col].where(part_eods[col] < 0, part_eods[col] - abs_part_start)
-                            part_num = retained_part_counts[mid]
-                            event_num = retained_event_ids[mid]
-                            part_audio_file = os.path.join(output_path, f'{fname[:-4]}_event_{event_num}_part_{part_num}.wav')
-                            aio.write_audio(part_audio_file, part_audio, rate)
-                            print(f"      Saved case-b part audio: {part_audio_file}")
-                            if parameters['create_plots'] and len(part_eods) > 0:
-                                create_event_plots(
-                                    event_id=event_num,
-                                    event_eods=part_eods,
-                                    event_data=part_audio,
-                                    event_start_time=part_wall_start,
-                                    sample_rate=rate,
-                                    output_path=output_path,
-                                    extraction_method=parameters['extraction_method'],
-                                    part_suffix=f'_part_{part_num}'
-                                )
-                        # Track unsaved start for buffer trimming
-                        unsaved_buf_start = event_start_in_buf + n_save * split_dur_samp
-                        if earliest_unsaved_samp is None or unsaved_buf_start < earliest_unsaved_samp:
-                            earliest_unsaved_samp = unsaved_buf_start
-                    # Trim retained buffer to discard saved samples
-                    if earliest_unsaved_samp is not None and earliest_unsaved_samp > 0:
-                        new_retain_abs = retain_start_idx + earliest_unsaved_samp
-                        retained_data = retained_data[earliest_unsaved_samp:].copy()
-                        retained_data_start_time = retained_data_start_time + dt.timedelta(seconds=earliest_unsaved_samp / rate)
-                        retained_audio_start_idx = new_retain_abs
-                        keep_mask = retained_eod_table['midpoint_idx'].values >= new_retain_abs
-                        kept_positions = np.where(keep_mask)[0]
-                        retained_eod_table = retained_eod_table[keep_mask].copy().reset_index(drop=True)
-                        retained_eod_waveforms = [retained_eod_waveforms[j] for j in kept_positions]
-                        print(f"    Case-b trim: removed {earliest_unsaved_samp} samples, {len(retained_eod_table)} EODs remain in buffer")
-                # ---- End case b ----
-
-            else:
-                # Clear retention variables
-                retained_data = None
-                retained_data_start_time = None
-                retained_eod_table = None
-                retained_eod_waveforms = None
-                retained_audio_start_idx = None
-                if len(events_at_end) > 0:
-                    print(f"    Found {len(events_at_end['merged_event_id'].unique())} event(s) reaching file end (last file - not retaining)")
-
-            # Process events that don't reach file end normally.
-            # Also exclude events whose end time falls inside the retained region to
-            # avoid double-processing them in the next file iteration.
-            if retained_data is not None:
-                safe_end_mask = (
-                    ~merged_events['reaches_file_end'] &
-                    (merged_events['event_end_time'] <= retain_start_time)
-                )
-            else:
-                safe_end_mask = ~merged_events['reaches_file_end']
-            events_to_filter = merged_events[safe_end_mask].copy()
-            print(f"    Events to process normally: {len(events_to_filter['merged_event_id'].unique())}")
-
-            # Post-merge filter: remove events based on size AND amplitude criteria
-            if parameters['post_merge_filtering']:
-                final_events = filter_events(events_to_filter, parameters['min_eods_postmerge'], parameters['min_amplitude'])
-            else:
-                final_events = events_to_filter.copy()
-            
-            if len(final_events) == 0:
-                print("    No final events to process after filtering!")
-                continue
-
-            # Reassign sequential event IDs, re-using pre-assigned IDs for retained events
-            continued_merged_ids = {}
-            if retained_event_ids:
-                retained_rows = final_events[final_events['original_index'] < n_prev_retained]
-                for mid, eid in retained_event_ids.items():
-                    if mid in retained_rows['merged_event_id'].values:
-                        continued_merged_ids[mid] = eid
-
-            for mid in sorted(final_events['merged_event_id'].unique()):
-                if mid in continued_merged_ids:
-                    final_events.loc[final_events['merged_event_id'] == mid, 'event_id'] = continued_merged_ids[mid]
-                else:
-                    event_counter += 1
-                    final_events.loc[final_events['merged_event_id'] == mid, 'event_id'] = int(event_counter)
-
-            retained_event_ids.clear()
-            retained_part_counts_snapshot = retained_part_counts.copy()
-            retained_part_counts.clear()
-            n_prev_retained = 0
-
-            # Clean up event data
-            del merged_events, channel_events, filtered_channel_events, events_to_filter
-            gc.collect()
-
-            # Add event information to event_summaries
-            # Create event summary directly from event_table BEFORE the processing loop
-            for event_id in sorted(final_events['event_id'].unique()):
-                event_id = int(event_id)
-                event_eods = final_events[final_events['event_id'] == event_id]
-                
-                # Calculate summary statistics
-                duration = (event_eods['timestamp_dt'].max() - 
-                            event_eods['timestamp_dt'].min()).total_seconds()
-
-                summary = {
-                    'event_id': event_id,
-                    'eod_start_time': event_eods['timestamp_dt'].min(),
-                    'eod_end_time': event_eods['timestamp_dt'].max(),
-                    'event_start_time': max(file_start_time, event_eods['event_start_time'].iloc[0] - dt.timedelta(seconds=parameters['margin'])),
-                    'event_end_time': event_eods['event_end_time'].iloc[0] + dt.timedelta(seconds=parameters['margin']),
-                    'duration_seconds': duration,
-                    'n_eods': len(event_eods),
-                    'n_channels': event_eods['eod_channel'].nunique(),
-                    'channels_used': ','.join(map(str, sorted(event_eods['eod_channel'].unique()))),
-                    'mean_ipi_seconds': event_eods['channel_ipi_seconds'].mean(),
-                    'ipi_cv': event_eods['channel_ipi_seconds'].std() / event_eods['channel_ipi_seconds'].mean() if event_eods['channel_ipi_seconds'].mean() > 0 else 0,
-                    'median_ipi_seconds': event_eods['channel_ipi_seconds'].median(),
-                    'mean_amplitude': event_eods['eod_amplitude'].mean(),
-                    'max_amplitude': event_eods['eod_amplitude'].max(),
-                    'mean_width_ms': event_eods['eod_width_us'].mean() / 1000 if 'eod_width_us' in event_eods.columns else 0,
-                    'n_files': event_eods['file_index'].nunique() if 'file_index' in event_eods.columns else 1,
-                    'file_names': ','.join(event_eods['filename'].unique()) if 'filename' in event_eods.columns else 'unknown',
-                    'dead_channels_file': event_eods['dead_channels_file'].iloc[0] if 'dead_channels_file' in event_eods.columns else ''
-                }
-                
-                event_summaries.append(summary)
-                print("      Created event summary")
-
-                event_start_time = summary['event_start_time']
-                event_end_time = summary['event_end_time']
-
-                # Save waveforms for this event
-                event_eod_indices = event_eods['original_index'].values
-                event_eod_waveforms = [combined_eod_waveforms[i] for i in event_eod_indices]
-                if len(event_eod_waveforms) > 0:
-                    event_waveform_base = os.path.join(output_path, f'{fname[:-4]}_event_{event_id}_waveforms')
-                    save_waveforms(event_eod_waveforms, event_waveform_base, length=parameters['extraction_window'])
-                    print(f"      Saved event waveforms: {event_waveform_base}_waveforms")
-
-                # Save audio segment for this event
-                event_audio_start_idx = max(0, int((event_start_time - file_start_time).total_seconds() * rate))
-                event_audio_end_idx = int((event_end_time - file_start_time).total_seconds() * rate)
-
-                # Extract full event audio window
-                event_data = data[event_audio_start_idx:event_audio_end_idx,:]
-
-                # Determine split parameters for this event
-                mid_for_event = event_eods['merged_event_id'].iloc[0]
-                start_part = retained_part_counts_snapshot.get(mid_for_event, 0) + 1
-                split_duration = parameters.get('split_duration', 0.0)
-                split_dur_samp = int(split_duration * rate) if split_duration > 0 else 0
-                needs_parts = start_part > 1 or (split_duration > 0 and len(event_data) > split_dur_samp)
-
-                # Compute p1/p2/midpoint indices relative to event audio segment (for eod_table)
-                event_eods['original_p1_idx'] = event_eods['p1_idx']
-                event_eods['original_p2_idx'] = event_eods['p2_idx']
-                event_eods['original_midpoint_idx'] = event_eods['midpoint_idx']
-                event_eods['p1_idx'] = event_eods['p1_idx'] - event_audio_start_idx
-                event_eods['p2_idx'] = event_eods['p2_idx'].where(event_eods['p2_idx'] < 0, event_eods['p2_idx'] - event_audio_start_idx)
-                event_eods['midpoint_idx'] = event_eods['midpoint_idx'] - event_audio_start_idx
-
-                # Compute part boundaries and assign audio_part + part_audio_start_sample columns
-                if needs_parts and split_duration > 0 and len(event_data) > split_dur_samp:
-                    part_boundaries = list(range(0, len(event_data), split_dur_samp)) + [len(event_data)]
-                    audio_parts = np.full(len(event_eods), -1, dtype=int)
-                    part_starts = np.full(len(event_eods), -1, dtype=int)
-                    for _pi in range(len(part_boundaries) - 1):
-                        _mask = (
-                            (event_eods['midpoint_idx'].values >= part_boundaries[_pi]) &
-                            (event_eods['midpoint_idx'].values < part_boundaries[_pi + 1])
-                        )
-                        audio_parts[_mask] = start_part + _pi
-                        part_starts[_mask] = part_boundaries[_pi]
-                    event_eods['audio_part'] = audio_parts
-                    event_eods['part_audio_start_sample'] = part_starts
-                else:
-                    part_boundaries = None
-                    event_eods['audio_part'] = start_part
-                    event_eods['part_audio_start_sample'] = 0
-
-                # Save event EOD table (always whole event, regardless of splitting)
-                event_output_file = os.path.join(output_path, f'{fname[:-4]}_event_{event_id}_eod_table.csv')
-                event_eods.to_csv(event_output_file, index=False)
-                print(f"      Saved event EOD table: {event_output_file}")
-
-                # Save audio and plots — split into parts if event exceeds split_duration
-                if needs_parts and split_duration > 0 and len(event_data) > split_dur_samp:
-                    for i in range(len(part_boundaries) - 1):
-                        part_num = start_part + i
-                        part_start = part_boundaries[i]
-                        part_end = part_boundaries[i + 1]
-                        part_audio = event_data[part_start:part_end]
-                        part_wall_start = event_start_time + dt.timedelta(seconds=part_start / rate)
-                        part_eods = event_eods[
-                            (event_eods['midpoint_idx'] >= part_start) &
-                            (event_eods['midpoint_idx'] < part_end)
-                        ].copy()
-                        part_eods['p1_idx'] = part_eods['p1_idx'] - part_start
-                        part_eods['p2_idx'] = part_eods['p2_idx'].where(part_eods['p2_idx'] < 0, part_eods['p2_idx'] - part_start)
-                        part_eods['midpoint_idx'] = part_eods['midpoint_idx'] - part_start
-                        part_audio_file = os.path.join(output_path, f'{fname[:-4]}_event_{event_id}_part_{part_num}.wav')
-                        aio.write_audio(part_audio_file, part_audio, rate)
-                        print(f"      Saved part audio: {part_audio_file}")
-                        if parameters['create_plots'] and len(part_eods) > 0:
-                            create_event_plots(
-                                event_id=event_id,
-                                event_eods=part_eods,
-                                event_data=part_audio,
-                                event_start_time=part_wall_start,
-                                sample_rate=rate,
-                                output_path=output_path,
-                                extraction_method=parameters['extraction_method'],
-                                part_suffix=f'_part_{part_num}'
-                            )
-                else:
-                    # Single audio/plot file — add part suffix only if this is a continuation
-                    part_suffix = f'_part_{start_part}' if needs_parts else ''
-                    event_audio_output_file = os.path.join(output_path, f'{fname[:-4]}_event_{event_id}{part_suffix}.wav')
-                    aio.write_audio(event_audio_output_file, event_data, rate)
-                    print(f"      Saved event audio segment: {event_audio_output_file}")
-                    if parameters['create_plots']:
-                        create_event_plots(
-                            event_id=event_id,
-                            event_eods=event_eods,
-                            event_data=event_data,
-                            event_start_time=event_start_time,
-                            sample_rate=rate,
-                            output_path=output_path,
-                            extraction_method=parameters['extraction_method'],
-                            part_suffix=part_suffix
-                        )
-                del event_eods, event_eod_waveforms, event_data
-
-            del final_events, events_at_end
-
-    # File without any pulses while an event is pending: keep the buffer for the next file
-    if retained_eod_table is not None and retained_data is None:
-        retained_data = data
+    # File without any new pulses while an event is pending: finalise it now
+    if state.retained_eod_table is not None and state.retained_data is None:
+        flush_pending_events(state, parameters, rate, output_path, data, file_start_time, fname, n == len(file_set) - 1)
 
     # Clear memory
     del data, data_diff
     gc.collect()
             
 # Save event summaries across all files
-if parameters['create_events'] and len(event_summaries) > 0:
-    event_summary_df = pd.DataFrame(event_summaries)
+if parameters['create_events'] and len(state.event_summaries) > 0:
+    event_summary_df = pd.DataFrame(state.event_summaries)
     event_summary_df = event_summary_df.sort_values(by=['event_start_time']).reset_index(drop=True)
     event_summary_file = os.path.join(output_path, 'all_event_summaries.csv')
     event_summary_df.to_csv(event_summary_file, index=False)

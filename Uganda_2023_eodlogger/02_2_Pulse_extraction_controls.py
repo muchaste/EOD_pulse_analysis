@@ -27,6 +27,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from pulse_functions import (
     save_waveforms,
     extract_pulse_snippets,
+    detect_monophasic_pulses,
+    calc_fwhm_width,
     filter_waveforms,
     normalize_waveforms
 )
@@ -259,15 +261,26 @@ for n, individual in enumerate(individual_info):
     pulse_widths = []
     
     # Detect pulses
-    peaks, troughs, _ , pulse_widths = \
-        pulses.detect_pulses(data, rate, 
-                                thresh = parameters['thresh'], 
-                                min_rel_slope_diff=parameters['min_rel_slope_diff'],
-                                min_width=parameters['min_width_us']/1e6,  # in seconds
-                                max_width=parameters['max_width_us']/1e6,  # in seconds
-                                width_fac=parameters['width_fac_detection'],
-                                verbose=0,
-                                return_data=False)
+    pulse_mode = parameters.get('pulse_mode', 'biphasic')
+    if pulse_mode == 'monophasic':
+        # Simple threshold peak-finding instead of thunderfish's biphasic peak-trough slope-pairing
+        # model (see detect_monophasic_pulses docstring).
+        peaks, troughs, _ , pulse_widths = detect_monophasic_pulses(
+            data, rate,
+            thresh=parameters['thresh'],
+            min_width_us=parameters['min_width_us'],
+            max_width_us=parameters['max_width_us'],
+            min_distance_us=parameters['min_distance_us'])
+    else:
+        peaks, troughs, _ , pulse_widths = \
+            pulses.detect_pulses(data, rate, 
+                                    thresh = parameters['thresh'], 
+                                    min_rel_slope_diff=parameters['min_rel_slope_diff'],
+                                    min_width=parameters['min_width_us']/1e6,  # in seconds
+                                    max_width=parameters['max_width_us']/1e6,  # in seconds
+                                    width_fac=parameters['width_fac_detection'],
+                                    verbose=0,
+                                    return_data=False)
     
     midpoints = (peaks + troughs) // 2  # Midpoint indices of pulses
 
@@ -291,7 +304,9 @@ for n, individual in enumerate(individual_info):
                 window_factor = parameters['extraction_window_factor'],
                 window_length = parameters['extraction_window_length_us'],
                 search_window=parameters['search_window'],
-                symmetry_threshold=parameters.get('symmetry_threshold', 0.3)
+                symmetry_threshold=parameters.get('symmetry_threshold', 0.3),
+                pulse_mode=pulse_mode,
+                triphasic_search=parameters.get('triphasic_search', True)
             )
         
         # extract_pulse_snippets(
@@ -299,7 +314,13 @@ for n, individual in enumerate(individual_info):
         #     source = '1ch_diff', return_differential = parameters_df['return_diff'][0]
         # )
 
-        # Use basic threshold filtering
+        # Monophasic pulses: peak-to-trough distance misrepresents true pulse duration
+        # (small second phase), so use FWHM of the dominant phase instead.
+        if pulse_mode == 'monophasic':
+            eod_widths = calc_fwhm_width(
+                eod_snippets, snippet_p1_idc, rate, interp_factor=parameters['interp_factor'])
+
+        # Use basic threshold filtering (the amplitude ratio is meaningless for monophasic pulses: limits not applied)
         keep_indices, filtered_features, filteredout_features = filter_waveforms(
             eod_snippets, eod_widths, amp_ratios, fft_peak_freqs, rate,
             dur_min=parameters_df['min_width_us'][0], 
@@ -308,6 +329,7 @@ for n, individual in enumerate(individual_info):
             pp_r_max=parameters_df['amplitude_ratio_max'][0],
             fft_freq_min=parameters_df['peak_fft_freq_min'][0], 
             fft_freq_max=parameters_df['peak_fft_freq_max'][0],
+            use_amplitude_ratio=pulse_mode != 'monophasic',
             return_features=True, return_filteredout_features=True
         )
 
@@ -533,7 +555,8 @@ for n, individual in enumerate(individual_info):
                     baseline_correction=True,
                     crop_and_interpolate=True,
                     target_length=int(parameters['target_length']),
-                    crop_factor=int(parameters['crop_factor'])
+                    crop_factor=int(parameters['crop_factor']),
+                    pulse_mode=pulse_mode
                 )
                 
                 print(f"    Successfully normalized {len(normalized_waveforms)} waveforms")

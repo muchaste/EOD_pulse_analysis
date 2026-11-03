@@ -51,13 +51,14 @@ config.read(config_file)
 
 bool_keys = {
     "enable_bandpass_filter", "create_events", "merge_events",
-    "pre_merge_filtering", "post_merge_filtering", "save_filtered_out", "create_plots", "triphasic_search"
+    "pre_merge_filtering", "post_merge_filtering", "save_filtered_out", "create_plots", "triphasic_search",
+    "ignore_channel", "return_diff"
 }
 int_keys = {
     "duplicate_samples", "interp_factor", "search_window",
     "min_eods_premerge", "min_eods_postmerge"
 }
-str_keys = {"source", "extraction_method", "detection_method", "location_method", "extraction_window", "pulse_mode"}
+str_keys = {"source", "extraction_method", "detection_method", "location_method", "extraction_window", "pulse_mode", "waveform_extraction"}
 
 parameters = {}
 if "Parameters" in config:

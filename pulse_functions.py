@@ -7,6 +7,9 @@ Functions for EOD pulse detection, processing, and analysis.
 import numpy as np
 import pandas as pd
 import gc
+import bisect
+import datetime as dt
+import audioio as aio
 import matplotlib.pyplot as plt
 import json
 import os
@@ -151,7 +154,10 @@ def unify_across_channels(peaks, troughs, pulse_widths, proximity_threshold=3):
     pulse_widths : list of arrays
         Pulse widths for each channel
     proximity_threshold : int
-        Minimum distance between pulses to consider them unique
+        Pulses whose midpoints are at most this many samples after the last kept pulse
+        are treated as duplicates. Within a cluster the earliest midpoint is kept
+        (not the strongest: no amplitude is available here); the final landmarks are
+        re-detected on the extracted signal in extract_pulse_snippets.
         
     Returns:
     --------
@@ -819,7 +825,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
         elif len(snippet) > 0:
             try:
                 fft_peak_snippet = calc_fft_peak(snippet, (rate*interp_factor), zero_padding_factor=100)
-            except:
+            except Exception:
                 # If FFT calculation fails, set to 0
                 fft_peak_snippet = 0.0
         else:
@@ -1697,10 +1703,13 @@ def calc_fft_peak(signal, rate, lower_thresh=0, upper_thresh=100000, zero_paddin
     peak_freq : float
         The frequency with the highest power in the signal.
     """
-    # Zero-pad the signal
+    # Zero-pad the signal. The input is real, so only the positive-frequency half is computed
+    # (rfft); bins up to (n-1)//2 are the strictly positive frequencies below Nyquist, the same
+    # set that the positive-frequency mask of the full FFT selected.
     padded_length = len(signal) * zero_padding_factor
-    fft_spectrum = np.fft.fft(signal, n=padded_length)
-    freqs = np.fft.fftfreq(padded_length, 1/rate)
+    n_positive = (padded_length - 1) // 2
+    fft_spectrum = np.fft.rfft(signal, n=padded_length)[:n_positive + 1]
+    freqs = np.fft.rfftfreq(padded_length, 1/rate)[:n_positive + 1]
 
     # Only consider positive frequencies and within specified range
     valid_idx = np.where((freqs > lower_thresh) & (freqs < upper_thresh))
@@ -1851,15 +1860,20 @@ def detect_monophasic_pulses(data, rate, thresh, min_width_us=300, max_width_us=
     cand_width = np.concatenate([pos_props['widths'], neg_props['widths']])
     cand_sign = np.concatenate([np.ones(len(pos_idx), dtype=int), -np.ones(len(neg_idx), dtype=int)])
 
-    # Non-max suppression: strongest candidates win within min_distance_samp
+    # Non-max suppression: strongest candidates win within min_distance_samp. A candidate is
+    # accepted if no accepted position is closer than min_distance_samp, which only requires
+    # checking the nearest accepted positions on each side.
     order = np.argsort(-cand_height)
     accepted_mask = np.zeros(len(cand_idx), dtype=bool)
-    accepted_positions = []
+    accepted_sorted = []
     for i in order:
-        pos = cand_idx[i]
-        if all(abs(pos - a) >= min_distance_samp for a in accepted_positions):
+        pos = int(cand_idx[i])
+        k = bisect.bisect_left(accepted_sorted, pos)
+        left_ok = k == 0 or pos - accepted_sorted[k - 1] >= min_distance_samp
+        right_ok = k == len(accepted_sorted) or accepted_sorted[k] - pos >= min_distance_samp
+        if left_ok and right_ok:
             accepted_mask[i] = True
-            accepted_positions.append(pos)
+            accepted_sorted.insert(k, pos)
 
     time_order = np.argsort(cand_idx[accepted_mask])
     dom_idx = cand_idx[accepted_mask][time_order]
@@ -2683,7 +2697,7 @@ def save_waveforms(waveforms_list, output_path, format="csv", length="fixed"):
 
 def save_fixed_length_waveforms(waveforms_list, output_path, format="csv"):
     """
-    Save fixed-length waveforms in specified format.
+    Save fixed-length waveforms in specified format (wrapper of save_waveforms).
     
     Parameters
     ----------
@@ -2699,61 +2713,11 @@ def save_fixed_length_waveforms(waveforms_list, output_path, format="csv"):
     metadata : dict
         Basic metadata about the saved waveforms
     """
-    if format not in ["csv", "npz"]:
-        raise ValueError(f"Unsupported format: {format}. Use 'csv' or 'npz'.")
-    
-    if not waveforms_list:
-        # Save empty file
-        if format == "csv":
-            pd.DataFrame().to_csv(f"{output_path}.csv", index=False)
-        else:  # npz
-            np.savez_compressed(f"{output_path}.npz", waveforms=np.array([]))
-        
-        metadata = {
-            'n_waveforms': 0,
-            'waveform_length': 0,
-            'total_samples': 0,
-            'shape': '(0, 0)' if format == "csv" else (0, 0),
-            'dtype': 'float64'
-        }
-    else:
-        if len({len(wf) for wf in waveforms_list}) > 1:
-            # Edge-truncated snippets (file borders) cannot be stacked into one 2D array
-            print("Warning: waveforms have different lengths; saving 'variable' npz format instead of 'fixed'.")
-            return save_variable_length_waveforms(waveforms_list, output_path)
-
-        # Stack waveforms into 2D array (n_waveforms, waveform_length)
-        waveforms_array = np.stack(waveforms_list, axis=0)
-        
-        if format == "csv":
-            # Save as CSV (each row is a waveform, each column is a time point)
-            waveforms_df = pd.DataFrame(waveforms_array)
-            waveforms_df.to_csv(f"{output_path}.csv", index=False)
-        else:  # npz
-            # Save as compressed npz
-            np.savez_compressed(f"{output_path}.npz", waveforms=waveforms_array)
-        
-        metadata = {
-            'n_waveforms': len(waveforms_list),
-            'waveform_length': len(waveforms_list[0]),
-            'total_samples': waveforms_array.size,
-            'shape': str(waveforms_array.shape) if format == "csv" else waveforms_array.shape,
-            'dtype': str(waveforms_array.dtype)
-        }
-    
-    # Save minimal metadata
-    if format == "csv":
-        metadata_df = pd.DataFrame([metadata])
-        metadata_df.to_csv(f"{output_path}_metadata.csv", index=False)
-    else:  # npz -> json
-        with open(f"{output_path}_metadata.json", 'w') as f:
-            json.dump(metadata, f, separators=(',', ':'))
-    
-    return metadata
+    return save_waveforms(waveforms_list, output_path, format=format, length="fixed")
 
 def save_variable_length_waveforms(waveforms_list, output_path):
     """
-    Save variable-length waveforms efficiently without zero-padding.
+    Save variable-length waveforms efficiently without zero-padding (wrapper of save_waveforms).
     Optimized to minimize disk space and I/O operations.
     
     Parameters
@@ -2768,59 +2732,7 @@ def save_variable_length_waveforms(waveforms_list, output_path):
     metadata : dict
         Information about the saved waveforms for reconstruction
     """
-    # Filter out empty waveforms and track original indices
-    non_empty_waveforms = []
-    non_empty_indices = []
-    lengths = []
-    
-    for i, wf in enumerate(waveforms_list):
-        if len(wf) > 0:
-            non_empty_waveforms.append(wf)
-            non_empty_indices.append(i)
-            lengths.append(len(wf))
-        else:
-            lengths.append(0)
-    
-    if non_empty_waveforms:
-        # Calculate start indices for non-empty waveforms
-        start_indices = np.cumsum([0] + lengths[:-1] if lengths else [0])
-        
-        # Concatenate all non-empty waveforms
-        concatenated = np.concatenate(non_empty_waveforms)
-        
-        # Use float32 instead of float64 for space savings (if precision allows)
-        if concatenated.dtype == np.float64:
-            # Check if we can safely convert to float32
-            max_val = np.max(np.abs(concatenated))
-            if max_val < 1e6:  # Safe range for float32
-                concatenated = concatenated.astype(np.float32)
-        
-        # Save concatenated data with compression
-        np.savez_compressed(output_path + '_concatenated.npz', data=concatenated)
-    else:
-        # Handle case with no valid waveforms
-        np.savez_compressed(output_path + '_concatenated.npz', data=np.array([], dtype=np.float32))
-        start_indices = np.array([])
-    
-    metadata = {
-        'lengths': lengths,
-        'start_indices': start_indices.tolist() if len(start_indices) > 0 else [],
-        'non_empty_indices': non_empty_indices,
-        'total_waveforms': len(waveforms_list),
-        'total_samples': len(concatenated) if non_empty_waveforms else 0,
-        'dtype': str(concatenated.dtype) if non_empty_waveforms else 'float32',
-        'space_savings': {
-            'original_padded_size_estimate': len(waveforms_list) * max(lengths) if lengths else 0,
-            'actual_size': len(concatenated) if non_empty_waveforms else 0,
-            'compression_ratio': (len(waveforms_list) * max(lengths)) / len(concatenated) if non_empty_waveforms and lengths else 1.0
-        }
-    }
-    
-    # Save metadata with compact JSON
-    with open(output_path + '_metadata.json', 'w') as f:
-        json.dump(metadata, f, separators=(',', ':'))  # Compact format
-    
-    return metadata
+    return save_waveforms(waveforms_list, output_path, format="npz", length="variable")
 
 def load_waveforms(base_path, format="csv", length="fixed"):
     """
@@ -2892,24 +2804,27 @@ def load_waveforms(base_path, format="csv", length="fixed"):
                         if lengths[i] == 0:
                             waveforms_list.append(np.array([]))
                         else:
-                            length = lengths[i]
-                            waveform = concatenated[concatenated_idx:concatenated_idx + length]
+                            wf_len = lengths[i]
+                            waveform = concatenated[concatenated_idx:concatenated_idx + wf_len]
                             waveforms_list.append(waveform)
-                            concatenated_idx += length
+                            concatenated_idx += wf_len
                 else:
                     # Original format - all waveforms were non-empty
                     start_indices = metadata['start_indices']
                     for i in range(metadata['total_waveforms']):
                         start_idx = start_indices[i]
-                        length = lengths[i]
-                        waveform = concatenated[start_idx:start_idx + length]
+                        wf_len = lengths[i]
+                        waveform = concatenated[start_idx:start_idx + wf_len]
                         waveforms_list.append(waveform)
                 
         return waveforms_list
         
     except FileNotFoundError:
-        file_ext = ".csv" if format == "csv" else ".npz"
-        print(f"Warning: File {base_path}{file_ext} not found")
+        if length == "variable":
+            missing_file = f"{base_path}_concatenated.npz"
+        else:
+            missing_file = f"{base_path}.csv" if format == "csv" else f"{base_path}.npz"
+        print(f"Warning: File {missing_file} not found")
         return []
     except Exception as e:
         print(f"Error loading waveforms: {e}")
@@ -2918,7 +2833,7 @@ def load_waveforms(base_path, format="csv", length="fixed"):
 
 def load_fixed_length_waveforms(base_path, format="csv"):
     """
-    Load fixed-length waveforms from specified format.
+    Load fixed-length waveforms from specified format (wrapper of load_waveforms).
     
     Parameters
     ----------
@@ -2932,48 +2847,12 @@ def load_fixed_length_waveforms(base_path, format="csv"):
     waveforms_list : list of 1D arrays
         List of waveforms
     """
-    if format not in ["csv", "npz"]:
-        raise ValueError(f"Unsupported format: {format}. Use 'csv' or 'npz'.")
-    
-    try:
-        # Waveforms of different lengths were saved in the variable-length format instead
-        fixed_file = f"{base_path}.csv" if format == "csv" else f"{base_path}.npz"
-        if not os.path.exists(fixed_file) and os.path.exists(f"{base_path}_concatenated.npz"):
-            return load_waveforms(base_path, format="npz", length="variable")
-        if format == "csv":
-            # Load from CSV file
-            waveforms_df = pd.read_csv(f"{base_path}.csv")
-            
-            if waveforms_df.empty:
-                return []
-            
-            # Convert to numpy array
-            waveforms_array = waveforms_df.values
-        else:  # npz
-            # Load from npz file
-            data = np.load(f"{base_path}.npz")
-            waveforms_array = data['waveforms']
-            
-            if waveforms_array.size == 0:
-                return []
-        
-        # Convert back to list of 1D arrays
-        waveforms_list = [waveforms_array[i] for i in range(waveforms_array.shape[0])]
-
-        return waveforms_list
-        
-    except FileNotFoundError:
-        file_ext = ".csv" if format == "csv" else ".npz"
-        print(f"Warning: File {base_path}{file_ext} not found")
-        return []
-    except Exception as e:
-        print(f"Error loading waveforms: {e}")
-        return []
+    return load_waveforms(base_path, format=format, length="fixed")
 
 def load_variable_length_waveforms(base_path, format="csv"):
     """
-    Load variable-length waveforms from efficient storage format.
-    Optimized for memory efficiency and fast loading.
+    Load variable-length waveforms from efficient storage format (wrapper of load_waveforms).
+    Variable-length waveforms are always stored as npz, so `format` is only validated.
     
     Parameters
     ----------
@@ -2990,46 +2869,7 @@ def load_variable_length_waveforms(base_path, format="csv"):
     if format not in ["csv", "npz"]:
         raise ValueError(f"Unsupported format: {format}. Use 'csv' or 'npz'.")
 
-    try:
-        # Load concatenated data and metadata
-        try:
-            data_file = np.load(base_path + '_concatenated.npz')
-            concatenated = data_file['data']
-        except:
-            print(f"Warning: Could not load {base_path}_concatenated.npz")
-            return []
-        
-        with open(base_path + '_metadata.json', 'r') as f:
-            metadata = json.load(f)
-        
-        # Reconstruct individual waveforms
-        waveforms_list = []
-        lengths = metadata['lengths']
-        
-        # Handle case where some waveforms were empty
-        if 'non_empty_indices' in metadata:
-            concatenated_idx = 0
-            for i in range(metadata['total_waveforms']):
-                if lengths[i] == 0:
-                    waveforms_list.append(np.array([]))
-                else:
-                    length = lengths[i]
-                    waveform = concatenated[concatenated_idx:concatenated_idx + length]
-                    waveforms_list.append(waveform)
-                    concatenated_idx += length
-        else:
-            # Original format - all waveforms were non-empty
-            start_indices = metadata['start_indices']
-            for i in range(metadata['total_waveforms']):
-                start_idx = start_indices[i]
-                length = lengths[i]
-                waveform = concatenated[start_idx:start_idx + length]
-                waveforms_list.append(waveform)
-        
-        return waveforms_list
-    except Exception as e:
-        print(f"Error loading waveforms from {base_path}: {e}")
-        return []
+    return load_waveforms(base_path, format="npz", length="variable")
 
 
 ############################### SPECIES CLASSIFICATION ######################################
@@ -3696,6 +3536,20 @@ def merge_channel_events(channel_events, max_merge_gap_seconds, verbose=False):
     # Sort by start time for processing
     event_summaries = event_summaries.sort_values('channel_start_time')
 
+    # Lookups by channel event id (event_summaries has one row per id) and the unprocessed-candidate lists per
+    # channel in the sorted order, so that the merge loops do not rescan the dataframe
+    summary_ids = event_summaries['channel_event_id'].tolist()
+    summary_channels = event_summaries['channel'].tolist()
+    summary_starts = event_summaries['channel_start_time'].tolist()
+    summary_ends = event_summaries['channel_end_time'].tolist()
+    event_channel_of = dict(zip(summary_ids, summary_channels))
+    event_start_of = dict(zip(summary_ids, summary_starts))
+    event_end_of = dict(zip(summary_ids, summary_ends))
+    events_on_channel = {}
+    for event_id, event_channel in zip(summary_ids, summary_channels):
+        events_on_channel.setdefault(event_channel, []).append(event_id)
+    rows_of_event = {event_id: rows for event_id, rows in channel_events.groupby('channel_event_id', sort=False)}
+
     for idx, current_event in event_summaries.iterrows():
         current_id = current_event['channel_event_id']
         
@@ -3738,10 +3592,10 @@ def merge_channel_events(channel_events, max_merge_gap_seconds, verbose=False):
             channel_time_bounds = {}
             for ch in current_channels:
                 # Find all events in merged_group for this channel and get their combined time bounds
-                ch_event_ids = [eid for eid in merged_group if event_summaries.loc[event_summaries['channel_event_id'] == eid, 'channel'].values[0] == ch]
+                ch_event_ids = [eid for eid in merged_group if event_channel_of[eid] == ch]
                 if ch_event_ids:
-                    ch_starts = [event_summaries.loc[event_summaries['channel_event_id'] == eid, 'channel_start_time'].values[0] for eid in ch_event_ids]
-                    ch_ends = [event_summaries.loc[event_summaries['channel_event_id'] == eid, 'channel_end_time'].values[0] for eid in ch_event_ids]
+                    ch_starts = [event_start_of[eid] for eid in ch_event_ids]
+                    ch_ends = [event_end_of[eid] for eid in ch_event_ids]
                     channel_time_bounds[ch] = (min(ch_starts), max(ch_ends))
             
             # For each channel with events in the merged group, check its spatial neighbors (including same channel)
@@ -3750,19 +3604,13 @@ def merge_channel_events(channel_events, max_merge_gap_seconds, verbose=False):
                     if neighbor_ch < 0 or neighbor_ch > max_channel:
                         continue
                         
-                    # Find unprocessed events on neighbor channel
-                    neighbor_events = event_summaries[
-                        (event_summaries['channel'] == neighbor_ch) &
-                        (~event_summaries['channel_event_id'].isin(processed_channel_events))
-                    ]
-                    
-                    for _, neighbor_event in neighbor_events.iterrows():
-                        neighbor_id = neighbor_event['channel_event_id']
+                    # Unprocessed events on neighbor channel (in sorted order; processed ids are skipped below)
+                    for neighbor_id in events_on_channel.get(neighbor_ch, []):
                         if neighbor_id in processed_channel_events:
                             continue
                             
-                        neighbor_start = neighbor_event['channel_start_time']
-                        neighbor_end = neighbor_event['channel_end_time']
+                        neighbor_start = event_start_of[neighbor_id]
+                        neighbor_end = event_end_of[neighbor_id]
                         
                         # Direct temporal overlap between this channel and neighbor
                         direct_overlap = (neighbor_end >= ch_start) and (neighbor_start <= ch_end)
@@ -3855,7 +3703,7 @@ def merge_channel_events(channel_events, max_merge_gap_seconds, verbose=False):
             print(f"      Final channels: {sorted(current_channels)}, final bounds: ({current_start_pd.strftime('%H:%M:%S')}-{current_end_pd.strftime('%H:%M:%S')})")
 
         for merge_order, channel_event_id in enumerate(merged_group):
-            event_eods = channel_events[channel_events['channel_event_id'] == channel_event_id].copy()
+            event_eods = rows_of_event[channel_event_id].copy()
             event_eods['merged_event_id'] = merged_event_counter
             event_eods['merge_order'] = merge_order  # Store the order in which this channel event was merged
             event_eods['merge_iteration'] = merge_iteration.get(channel_event_id, 1)
@@ -3950,6 +3798,431 @@ def filter_events(events_to_filter, min_eods_per_event, min_amplitude):
     events_filtered = events_to_filter[events_to_filter[id_col].isin(valid_event_ids)].copy()
 
     return events_filtered
+
+class EventState:
+    """State carried from file to file while creating events (process_events / flush_pending_events).
+
+    Create one before the file loop and pass it to every call. After the loop,
+    `event_summaries` holds one dict per saved event.
+    """
+    def __init__(self):
+        self.event_counter = 0              # total events numbered so far
+        self.event_summaries = []
+        self.retained_data = None           # audio tail of an event still open at the file end
+        self.retained_data_start_time = None
+        self.retained_eod_table = None
+        self.retained_eod_waveforms = None
+        self.retained_audio_start_idx = None
+        self.retained_event_ids = {}        # {merged_event_id: pre-assigned event_counter value}
+        self.retained_part_counts = {}      # {merged_event_id: parts already saved to disk}
+        self.retained_part_counts_snapshot = {}  # copy of retained_part_counts taken at event-id assignment
+        self.n_prev_retained = 0            # row count of retained_eod_table entering the current file
+
+
+def process_events(state, parameters, rate, output_path, data, file_start_time, fname,
+                   combined_eod_table, combined_eod_waveforms, is_last_file):
+    """Create, filter and save the events of the combined (retained + new) EOD table.
+
+    Events still open at the end of `data` are kept in `state` for the next file,
+    unless this is the last file.
+
+    Parameters
+    ----------
+    state : EventState
+        Carry-over state; updated in place (also event_counter and event_summaries).
+    parameters : dict
+        Extraction parameters (max_ipi_seconds, ignore_channel, pre_merge_filtering, min_eods_premerge,
+        min_amplitude, merge_events, max_merge_gap_seconds, post_merge_filtering, min_eods_postmerge,
+        margin, split_duration (optional), create_plots, extraction_method, extraction_window).
+    rate : float
+        Sample rate of `data`.
+    output_path : str
+        Folder for the event files.
+    data : ndarray
+        Audio (retained tail + current file), shape (samples, channels), starting at file_start_time.
+    file_start_time : datetime
+        Time of the first sample of `data`.
+    fname : str
+        File name (event files are named after it).
+    combined_eod_table, combined_eod_waveforms
+        Retained + new EODs in the frame of `data`.
+    is_last_file : bool
+        If True nothing is retained and events at the end are written.
+    """
+    print("  Creating events from extracted EODs...")
+    # Create events from eod_table
+    print(f"    Stage 1 - Channel-wise temporal clustering using max_ipi_seconds = {parameters['max_ipi_seconds']}")
+
+    if len(combined_eod_table) == 0:
+        print("No data to process!")
+        return
+
+    # Create Channel Events
+    # ignore_channel is a user-set checkbox (Event Processing Options) - single-ended
+    # extraction (extraction_method='single_channel') assigns eod_channel independently
+    # per pulse (whichever raw channel has the loudest peak that instant), which is not
+    # spatially stable pulse-to-pulse like differential tracking, so it defaults to
+    # True for that mode in the GUI presets (see create_channel_events docstring).
+    channel_events = create_channel_events(
+        combined_eod_table,
+        parameters['max_ipi_seconds'],
+        ignore_channel=parameters['ignore_channel']
+    )
+
+    if len(channel_events) == 0:
+        print("No channel events created!")
+        state.retained_eod_table = None
+        state.retained_eod_waveforms = None
+        state.retained_event_ids.clear()
+        state.retained_part_counts.clear()
+        state.n_prev_retained = 0
+        return
+
+    if parameters['pre_merge_filtering']:
+        filtered_channel_events = filter_events(channel_events, parameters['min_eods_premerge'], parameters['min_amplitude'])
+    else:
+        filtered_channel_events = channel_events.copy()
+
+    if len(filtered_channel_events) == 0:
+        print("    No channel events remaining after pre-merge filtering!")
+        state.retained_eod_table = None
+        state.retained_eod_waveforms = None
+        state.retained_event_ids.clear()
+        state.retained_part_counts.clear()
+        state.n_prev_retained = 0
+        return
+
+    if parameters['merge_events']:
+        # Merge channel events across channels
+        print(f"    Stage 2 - Merging channel events using max_merge_gap_seconds = {parameters['max_merge_gap_seconds']}")
+        merged_events = merge_channel_events(filtered_channel_events, parameters['max_merge_gap_seconds'])
+
+        if len(merged_events) == 0:
+            print("No merged events created!")
+            state.retained_eod_table = None
+            state.retained_eod_waveforms = None
+            state.retained_event_ids.clear()
+            state.retained_part_counts.clear()
+            state.n_prev_retained = 0
+            return
+    else:
+        merged_events = filtered_channel_events.copy()
+        merged_events['merged_event_id'] = merged_events['channel_event_id']
+        merged_events['event_start_time'] = merged_events['channel_start_time']
+        merged_events['event_end_time'] = merged_events['channel_end_time']
+
+    # Flag events that reach the end of the file
+    merged_events['reaches_file_end'] = merged_events['event_end_time'] >= file_start_time + dt.timedelta(seconds=len(data)/rate - parameters['max_ipi_seconds'])
+
+    # Retain events that reach the end of the file and prepare data for next file
+    events_at_end = merged_events[merged_events['reaches_file_end']].copy()
+    if len(events_at_end) > 0 and not is_last_file:  # Don't retain for last file
+        print(f"    Found {len(events_at_end['merged_event_id'].unique())} event(s) reaching file end - will retain for next file")
+
+        # Calculate retention start index
+        retain_start_time = events_at_end['event_start_time'].min() - dt.timedelta(seconds=parameters['margin'])
+        retain_start_idx = max(0, int((retain_start_time - file_start_time).total_seconds() * rate))
+
+        # Store audio for next iteration (unchanged — used for event WAV export)
+        state.retained_data = data[retain_start_idx:, :].copy()
+        state.retained_data_start_time = file_start_time + dt.timedelta(seconds=retain_start_idx / rate)
+        # Store EOD table rows to skip re-detection of the retained region
+        ret_eod_mask = combined_eod_table['midpoint_idx'] >= retain_start_idx
+        state.retained_eod_table = combined_eod_table[ret_eod_mask].drop(columns=['original_index'], errors='ignore').copy()
+        state.retained_eod_waveforms = [combined_eod_waveforms[i] for i in state.retained_eod_table.index]
+        state.retained_audio_start_idx = retain_start_idx
+
+        print(f"    Retaining {len(state.retained_data)} samples ({len(state.retained_data)/rate:.2f}s) starting from {state.retained_data_start_time}")
+        print(f"    Retained {len(state.retained_eod_table)} EODs for next iteration")
+
+        # ---- Case b: flush early parts of retained events that exceed 2x split_duration ----
+        split_duration = parameters.get('split_duration', 0.0)
+        if split_duration > 0:
+            split_dur_samp = int(split_duration * rate)
+            earliest_unsaved_samp = None  # within retained_data buffer
+            for mid in events_at_end['merged_event_id'].unique():
+                mid_eods = events_at_end[events_at_end['merged_event_id'] == mid]
+                event_start_in_buf = max(0, int(mid_eods['midpoint_idx'].min()) - retain_start_idx)
+                event_retained_duration = (len(state.retained_data) - event_start_in_buf) / rate
+                if event_retained_duration <= 2 * split_duration:
+                    continue
+                # Pre-assign event_id if not already done
+                if mid not in state.retained_event_ids:
+                    state.event_counter += 1
+                    state.retained_event_ids[mid] = state.event_counter
+                    state.retained_part_counts[mid] = 0
+                n_save = int((len(state.retained_data) - event_start_in_buf) / split_dur_samp) - 1
+                for i in range(n_save):
+                    state.retained_part_counts[mid] += 1
+                    part_buf_start = event_start_in_buf + i * split_dur_samp
+                    part_buf_end   = event_start_in_buf + (i + 1) * split_dur_samp
+                    abs_part_start = retain_start_idx + part_buf_start
+                    abs_part_end   = retain_start_idx + part_buf_end
+                    part_audio = state.retained_data[part_buf_start:part_buf_end]
+                    part_wall_start = state.retained_data_start_time + dt.timedelta(seconds=part_buf_start / rate)
+                    part_eods = mid_eods[
+                        (mid_eods['midpoint_idx'] >= abs_part_start) &
+                        (mid_eods['midpoint_idx'] < abs_part_end)
+                    ].copy()
+                    for col in ['p1_idx', 'p2_idx', 'midpoint_idx']:
+                        if col in part_eods.columns:
+                            part_eods[col] = part_eods[col].where(part_eods[col] < 0, part_eods[col] - abs_part_start)
+                    part_num = state.retained_part_counts[mid]
+                    event_num = state.retained_event_ids[mid]
+                    part_audio_file = os.path.join(output_path, f'{fname[:-4]}_event_{event_num}_part_{part_num}.wav')
+                    aio.write_audio(part_audio_file, part_audio, rate)
+                    print(f"      Saved case-b part audio: {part_audio_file}")
+                    if parameters['create_plots'] and len(part_eods) > 0:
+                        create_event_plots(
+                            event_id=event_num,
+                            event_eods=part_eods,
+                            event_data=part_audio,
+                            event_start_time=part_wall_start,
+                            sample_rate=rate,
+                            output_path=output_path,
+                            extraction_method=parameters['extraction_method'],
+                            part_suffix=f'_part_{part_num}'
+                        )
+                # Track unsaved start for buffer trimming
+                unsaved_buf_start = event_start_in_buf + n_save * split_dur_samp
+                if earliest_unsaved_samp is None or unsaved_buf_start < earliest_unsaved_samp:
+                    earliest_unsaved_samp = unsaved_buf_start
+            # Trim retained buffer to discard saved samples
+            if earliest_unsaved_samp is not None and earliest_unsaved_samp > 0:
+                new_retain_abs = retain_start_idx + earliest_unsaved_samp
+                state.retained_data = state.retained_data[earliest_unsaved_samp:].copy()
+                state.retained_data_start_time = state.retained_data_start_time + dt.timedelta(seconds=earliest_unsaved_samp / rate)
+                state.retained_audio_start_idx = new_retain_abs
+                keep_mask = state.retained_eod_table['midpoint_idx'].values >= new_retain_abs
+                kept_positions = np.where(keep_mask)[0]
+                state.retained_eod_table = state.retained_eod_table[keep_mask].copy().reset_index(drop=True)
+                state.retained_eod_waveforms = [state.retained_eod_waveforms[j] for j in kept_positions]
+                print(f"    Case-b trim: removed {earliest_unsaved_samp} samples, {len(state.retained_eod_table)} EODs remain in buffer")
+        # ---- End case b ----
+
+    else:
+        # Clear retention variables
+        state.retained_data = None
+        state.retained_data_start_time = None
+        state.retained_eod_table = None
+        state.retained_eod_waveforms = None
+        state.retained_audio_start_idx = None
+        if len(events_at_end) > 0:
+            print(f"    Found {len(events_at_end['merged_event_id'].unique())} event(s) reaching file end (last file - not retaining)")
+
+    # Events still pending at the file end are left for the next file (retained_data is set).
+    # Also exclude events whose end time falls inside the retained region to
+    # avoid double-processing them in the next file iteration.
+    # Without retention (no event at the end, or last file) every event is final.
+    if state.retained_data is not None:
+        safe_end_mask = (
+            ~merged_events['reaches_file_end'] &
+            (merged_events['event_end_time'] <= retain_start_time)
+        )
+    else:
+        safe_end_mask = pd.Series(True, index=merged_events.index)
+    events_to_filter = merged_events[safe_end_mask].copy()
+    print(f"    Events to process normally: {len(events_to_filter['merged_event_id'].unique())}")
+
+    # Post-merge filter: remove events based on size AND amplitude criteria
+    if parameters['post_merge_filtering']:
+        final_events = filter_events(events_to_filter, parameters['min_eods_postmerge'], parameters['min_amplitude'])
+    else:
+        final_events = events_to_filter.copy()
+
+    if len(final_events) == 0:
+        print("    No final events to process after filtering!")
+        return
+
+    # Reassign sequential event IDs, re-using pre-assigned IDs for retained events
+    continued_merged_ids = {}
+    if state.retained_event_ids:
+        retained_rows = final_events[final_events['original_index'] < state.n_prev_retained]
+        for mid, eid in state.retained_event_ids.items():
+            if mid in retained_rows['merged_event_id'].values:
+                continued_merged_ids[mid] = eid
+
+    for mid in sorted(final_events['merged_event_id'].unique()):
+        if mid in continued_merged_ids:
+            final_events.loc[final_events['merged_event_id'] == mid, 'event_id'] = continued_merged_ids[mid]
+        else:
+            state.event_counter += 1
+            final_events.loc[final_events['merged_event_id'] == mid, 'event_id'] = int(state.event_counter)
+
+    state.retained_event_ids.clear()
+    state.retained_part_counts_snapshot = state.retained_part_counts.copy()
+    state.retained_part_counts.clear()
+    state.n_prev_retained = 0
+
+    # Clean up event data
+    del merged_events, channel_events, filtered_channel_events, events_to_filter
+    gc.collect()
+
+    # Add event information to event_summaries
+    # Create event summary directly from event_table BEFORE the processing loop
+    for event_id in sorted(final_events['event_id'].unique()):
+        event_id = int(event_id)
+        event_eods = final_events[final_events['event_id'] == event_id]
+
+        # Calculate summary statistics
+        duration = (event_eods['timestamp_dt'].max() -
+                    event_eods['timestamp_dt'].min()).total_seconds()
+
+        summary = {
+            'event_id': event_id,
+            'eod_start_time': event_eods['timestamp_dt'].min(),
+            'eod_end_time': event_eods['timestamp_dt'].max(),
+            'event_start_time': max(file_start_time, event_eods['event_start_time'].iloc[0] - dt.timedelta(seconds=parameters['margin'])),
+            'event_end_time': event_eods['event_end_time'].iloc[0] + dt.timedelta(seconds=parameters['margin']),
+            'duration_seconds': duration,
+            'n_eods': len(event_eods),
+            'n_channels': event_eods['eod_channel'].nunique(),
+            'channels_used': ','.join(map(str, sorted(event_eods['eod_channel'].unique()))),
+            'mean_ipi_seconds': event_eods['channel_ipi_seconds'].mean(),
+            'ipi_cv': event_eods['channel_ipi_seconds'].std() / event_eods['channel_ipi_seconds'].mean() if event_eods['channel_ipi_seconds'].mean() > 0 else 0,
+            'median_ipi_seconds': event_eods['channel_ipi_seconds'].median(),
+            'mean_amplitude': event_eods['eod_amplitude'].mean(),
+            'max_amplitude': event_eods['eod_amplitude'].max(),
+            'mean_width_ms': event_eods['eod_width_us'].mean() / 1000 if 'eod_width_us' in event_eods.columns else 0,
+            'n_files': event_eods['file_index'].nunique() if 'file_index' in event_eods.columns else 1,
+            'file_names': ','.join(event_eods['filename'].unique()) if 'filename' in event_eods.columns else 'unknown',
+            'dead_channels_file': event_eods['dead_channels_file'].iloc[0] if 'dead_channels_file' in event_eods.columns else ''
+        }
+
+        state.event_summaries.append(summary)
+        print("      Created event summary")
+
+        event_start_time = summary['event_start_time']
+        event_end_time = summary['event_end_time']
+
+        # Save waveforms for this event
+        event_eod_indices = event_eods['original_index'].values
+        event_eod_waveforms = [combined_eod_waveforms[i] for i in event_eod_indices]
+        if len(event_eod_waveforms) > 0:
+            event_waveform_base = os.path.join(output_path, f'{fname[:-4]}_event_{event_id}_waveforms')
+            save_waveforms(event_eod_waveforms, event_waveform_base, length=parameters['extraction_window'])
+            print(f"      Saved event waveforms: {event_waveform_base}_waveforms")
+
+        # Save audio segment for this event
+        event_audio_start_idx = max(0, int((event_start_time - file_start_time).total_seconds() * rate))
+        event_audio_end_idx = int((event_end_time - file_start_time).total_seconds() * rate)
+
+        # Extract full event audio window
+        event_data = data[event_audio_start_idx:event_audio_end_idx,:]
+
+        # Determine split parameters for this event
+        mid_for_event = event_eods['merged_event_id'].iloc[0]
+        start_part = state.retained_part_counts_snapshot.get(mid_for_event, 0) + 1
+        split_duration = parameters.get('split_duration', 0.0)
+        split_dur_samp = int(split_duration * rate) if split_duration > 0 else 0
+        needs_parts = start_part > 1 or (split_duration > 0 and len(event_data) > split_dur_samp)
+
+        # Compute p1/p2/midpoint indices relative to event audio segment (for eod_table)
+        event_eods['original_p1_idx'] = event_eods['p1_idx']
+        event_eods['original_p2_idx'] = event_eods['p2_idx']
+        event_eods['original_midpoint_idx'] = event_eods['midpoint_idx']
+        event_eods['p1_idx'] = event_eods['p1_idx'] - event_audio_start_idx
+        event_eods['p2_idx'] = event_eods['p2_idx'].where(event_eods['p2_idx'] < 0, event_eods['p2_idx'] - event_audio_start_idx)
+        event_eods['midpoint_idx'] = event_eods['midpoint_idx'] - event_audio_start_idx
+
+        # Compute part boundaries and assign audio_part + part_audio_start_sample columns
+        if needs_parts and split_duration > 0 and len(event_data) > split_dur_samp:
+            part_boundaries = list(range(0, len(event_data), split_dur_samp)) + [len(event_data)]
+            audio_parts = np.full(len(event_eods), -1, dtype=int)
+            part_starts = np.full(len(event_eods), -1, dtype=int)
+            for _pi in range(len(part_boundaries) - 1):
+                _mask = (
+                    (event_eods['midpoint_idx'].values >= part_boundaries[_pi]) &
+                    (event_eods['midpoint_idx'].values < part_boundaries[_pi + 1])
+                )
+                audio_parts[_mask] = start_part + _pi
+                part_starts[_mask] = part_boundaries[_pi]
+            event_eods['audio_part'] = audio_parts
+            event_eods['part_audio_start_sample'] = part_starts
+        else:
+            part_boundaries = None
+            event_eods['audio_part'] = start_part
+            event_eods['part_audio_start_sample'] = 0
+
+        # Save event EOD table (always whole event, regardless of splitting)
+        event_output_file = os.path.join(output_path, f'{fname[:-4]}_event_{event_id}_eod_table.csv')
+        event_eods.to_csv(event_output_file, index=False)
+        print(f"      Saved event EOD table: {event_output_file}")
+
+        # Save audio and plots — split into parts if event exceeds split_duration
+        if needs_parts and split_duration > 0 and len(event_data) > split_dur_samp:
+            for i in range(len(part_boundaries) - 1):
+                part_num = start_part + i
+                part_start = part_boundaries[i]
+                part_end = part_boundaries[i + 1]
+                part_audio = event_data[part_start:part_end]
+                part_wall_start = event_start_time + dt.timedelta(seconds=part_start / rate)
+                part_eods = event_eods[
+                    (event_eods['midpoint_idx'] >= part_start) &
+                    (event_eods['midpoint_idx'] < part_end)
+                ].copy()
+                part_eods['p1_idx'] = part_eods['p1_idx'] - part_start
+                part_eods['p2_idx'] = part_eods['p2_idx'].where(part_eods['p2_idx'] < 0, part_eods['p2_idx'] - part_start)
+                part_eods['midpoint_idx'] = part_eods['midpoint_idx'] - part_start
+                part_audio_file = os.path.join(output_path, f'{fname[:-4]}_event_{event_id}_part_{part_num}.wav')
+                aio.write_audio(part_audio_file, part_audio, rate)
+                print(f"      Saved part audio: {part_audio_file}")
+                if parameters['create_plots'] and len(part_eods) > 0:
+                    create_event_plots(
+                        event_id=event_id,
+                        event_eods=part_eods,
+                        event_data=part_audio,
+                        event_start_time=part_wall_start,
+                        sample_rate=rate,
+                        output_path=output_path,
+                        extraction_method=parameters['extraction_method'],
+                        part_suffix=f'_part_{part_num}'
+                    )
+        else:
+            # Single audio/plot file — add part suffix only if this is a continuation
+            part_suffix = f'_part_{start_part}' if needs_parts else ''
+            event_audio_output_file = os.path.join(output_path, f'{fname[:-4]}_event_{event_id}{part_suffix}.wav')
+            aio.write_audio(event_audio_output_file, event_data, rate)
+            print(f"      Saved event audio segment: {event_audio_output_file}")
+            if parameters['create_plots']:
+                create_event_plots(
+                    event_id=event_id,
+                    event_eods=event_eods,
+                    event_data=event_data,
+                    event_start_time=event_start_time,
+                    sample_rate=rate,
+                    output_path=output_path,
+                    extraction_method=parameters['extraction_method'],
+                    part_suffix=part_suffix
+                )
+        del event_eods, event_eod_waveforms, event_data
+
+    del final_events, events_at_end
+
+
+def flush_pending_events(state, parameters, rate, output_path, data, file_start_time, fname, is_last_file):
+    """Finalise events retained from the previous file when the current file adds no pulses.
+
+    `data` is the combined audio (retained tail + current file) starting at file_start_time;
+    `state`, `parameters`, `rate` and `output_path` are as in process_events.
+    """
+    if state.retained_eod_table is None:
+        return
+    state.n_prev_retained = len(state.retained_eod_table)
+    flush_table = state.retained_eod_table.drop(columns=['original_index'], errors='ignore').copy()
+    for col in ['midpoint_idx', 'p1_idx', 'p2_idx', 'p3_idx']:
+        if col in flush_table.columns:
+            # negative values (-1 = P2/P3 not set) are not sample indices; leave them
+            flush_table[col] = flush_table[col].where(flush_table[col] < 0, flush_table[col] - state.retained_audio_start_idx)
+    flush_table['relative_time_s'] -= state.retained_audio_start_idx / rate
+    flush_waveforms = state.retained_eod_waveforms
+    state.retained_eod_table = None
+    state.retained_eod_waveforms = None
+    state.retained_audio_start_idx = None
+    print(f"    No new pulses in this file: finalising {len(flush_table)} retained EODs")
+    process_events(state, parameters, rate, output_path, data, file_start_time, fname,
+                   flush_table.reset_index(drop=True), flush_waveforms, is_last_file)
+
 
 
 def create_event_plots(event_id, event_eods, event_data, event_start_time, sample_rate, output_path, max_plot_duration=300, extraction_method='differential', part_suffix=''):
@@ -5116,24 +5389,12 @@ def find_active_wave_segments(envelope_power, rate, noise_floor_db_threshold=10.
     above_threshold = envelope_power >= threshold_power
     min_duration_samples = int(min_duration_s * rate)
 
-    active_segments = []
-    in_segment = False
-    seg_start = 0
-
-    for idx, is_above in enumerate(above_threshold):
-        if is_above and not in_segment:
-            in_segment = True
-            seg_start = idx
-        elif not is_above and in_segment:
-            in_segment = False
-            seg_end = idx
-            if seg_end - seg_start >= min_duration_samples:
-                active_segments.append((seg_start, seg_end))
-
-    if in_segment:
-        seg_end = len(above_threshold)
-        if seg_end - seg_start >= min_duration_samples:
-            active_segments.append((seg_start, seg_end))
+    # Run starts/ends from the transitions of the padded boolean array
+    transitions = np.diff(np.concatenate(([False], above_threshold, [False])).astype(np.int8))
+    seg_starts = np.where(transitions == 1)[0]
+    seg_ends = np.where(transitions == -1)[0]
+    long_enough = (seg_ends - seg_starts) >= min_duration_samples
+    active_segments = list(zip(seg_starts[long_enough].tolist(), seg_ends[long_enough].tolist()))
 
     return active_segments, peak_power
 

@@ -88,6 +88,37 @@ FIELD_MONOPHASIC_PRESET = {
     'margin': 1.0,
 }
 
+# Control-recording presets per pulse_mode (single-channel recordings, generic per-channel route).
+# The monophasic values are first-pass estimates taken from the field presets; the fixed window
+# must be well beyond the pulse (median baseline correction).
+CONTROL_BIPHASIC_PRESET = {
+    'thresh': 0.1,
+    'min_width_us': 30,
+    'max_width_us': 1000,
+    'interp_factor': 1,
+    'amplitude_ratio_min': 0.2,
+    'amplitude_ratio_max': 4.0,
+    'peak_fft_freq_min': 50,
+    'peak_fft_freq_max': 10000,
+    'extraction_window_length_us': 4000,
+    'search_window': 10,
+    'extraction_window': 'fixed',
+}
+
+CONTROL_MONOPHASIC_PRESET = {
+    'thresh': 0.001,
+    'min_width_us': 300,
+    'max_width_us': 2000,
+    'interp_factor': 3,
+    'amplitude_ratio_min': 1.0,
+    'amplitude_ratio_max': 50.0,
+    'peak_fft_freq_min': 40,
+    'peak_fft_freq_max': 3000,
+    'extraction_window_length_us': 8000,
+    'search_window': 200,
+    'extraction_window': 'fixed',
+}
+
 
 # Mirrors pulse_functions._VALID_LOCATION_METHODS - duplicated here (rather than imported)
 # to keep this GUI module free of pulse_functions' heavy third-party dependencies. Keep in
@@ -801,13 +832,16 @@ class ControlParameterConfigGUI:
             ('min_width_us', 'Min Pulse Width (μs):', 30, float),
             ('max_width_us', 'Max Pulse Width (μs):', 1000, float),
             ('width_fac_detection', 'Width Factor for Detection:', 7.0, float),
+            ('min_distance_us', 'Min Distance Between Pulses (μs):', 2000, float),
         ]
 
+        self.pulse_entries = {}
         for i, (key, label, default, dtype) in enumerate(detection_params):
             ttk.Label(pulse_frame, text=label).grid(row=i, column=0, sticky=tk.W, pady=2)
             self.param_vars[key] = tk.DoubleVar(value=default) if dtype == float else tk.IntVar(value=default)
-            ttk.Entry(pulse_frame, textvariable=self.param_vars[key], width=12).grid(
-                row=i, column=1, sticky=tk.W, padx=5)
+            entry = ttk.Entry(pulse_frame, textvariable=self.param_vars[key], width=12)
+            entry.grid(row=i, column=1, sticky=tk.W, padx=5)
+            self.pulse_entries[key] = entry
 
         ttk.Separator(pulse_frame, orient='vertical').grid(row=0, column=2, rowspan=14, sticky='ns', padx=10)
 
@@ -829,8 +863,9 @@ class ControlParameterConfigGUI:
         for i, (key, label, default, dtype) in enumerate(filter_params):
             ttk.Label(pulse_frame, text=label).grid(row=i, column=3, sticky=tk.W, pady=2)
             self.param_vars[key] = tk.DoubleVar(value=default) if dtype == float else tk.IntVar(value=default)
-            ttk.Entry(pulse_frame, textvariable=self.param_vars[key], width=12).grid(
-                row=i, column=4, sticky=tk.W, padx=5)
+            entry = ttk.Entry(pulse_frame, textvariable=self.param_vars[key], width=12)
+            entry.grid(row=i, column=4, sticky=tk.W, padx=5)
+            self.pulse_entries[key] = entry
 
         next_row = max(len(detection_params), len(filter_params))
 
@@ -859,6 +894,23 @@ class ControlParameterConfigGUI:
                                     values=['fixed', 'variable'], state='readonly', width=12)
         length_combo.grid(row=next_row + 3, column=4, sticky=tk.W, padx=5)
 
+        # Pulse mode: applies the control preset for the chosen mode (the user can still edit afterwards)
+        ttk.Label(pulse_frame, text="Pulse Mode:", font=('TkDefaultFont', 9, 'bold')).grid(
+            row=next_row + 4, column=3, sticky=tk.W, pady=2)
+        self.param_vars['pulse_mode'] = tk.StringVar(value='biphasic')
+        pulse_mode_combo = ttk.Combobox(pulse_frame, textvariable=self.param_vars['pulse_mode'],
+                                        values=['biphasic', 'monophasic'], state='readonly', width=12)
+        pulse_mode_combo.grid(row=next_row + 4, column=4, sticky=tk.W, padx=5)
+        pulse_mode_combo.bind('<<ComboboxSelected>>', self.apply_pulse_mode_preset)
+
+        # Case A/B search for a missed first phase (P1) / trailing phase (P3) in extract_pulse_snippets
+        # (skipped for monophasic pulses)
+        self.param_vars['triphasic_search'] = tk.BooleanVar(value=True)
+        ttk.Checkbutton(pulse_frame, text="Triphasic P1/P3 search",
+                        variable=self.param_vars['triphasic_search']).grid(
+            row=next_row + 5, column=3, columnspan=2, sticky=tk.W, pady=2)
+        self.update_pulse_mode_field_states()
+
         # Processing options
         options_frame = ttk.LabelFrame(scrollable_frame, text="Processing Options", padding="10")
         options_frame.grid(row=current_row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
@@ -877,6 +929,23 @@ class ControlParameterConfigGUI:
         ttk.Button(button_frame, text="Cancel", command=self.on_cancel).grid(row=0, column=1, padx=5)
 
         self.result = None
+
+    def apply_pulse_mode_preset(self, event=None):
+        """Apply the control preset for the selected pulse mode, then update the dependent field states."""
+        preset = (CONTROL_BIPHASIC_PRESET if self.param_vars['pulse_mode'].get() == 'biphasic'
+                  else CONTROL_MONOPHASIC_PRESET)
+        for key, value in preset.items():
+            if key in self.param_vars:
+                self.param_vars[key].set(value)
+        self.update_pulse_mode_field_states()
+
+    def update_pulse_mode_field_states(self):
+        """Biphasic detection (thunderfish) uses the slope/width-factor fields; monophasic detection uses
+        the minimum pulse distance. The amplitude ratio limits are not applied for monophasic pulses."""
+        monophasic = self.param_vars['pulse_mode'].get() == 'monophasic'
+        for key in ('min_rel_slope_diff', 'width_fac_detection', 'amplitude_ratio_min', 'amplitude_ratio_max'):
+            self.pulse_entries[key].config(state='disabled' if monophasic else 'normal')
+        self.pulse_entries['min_distance_us'].config(state='normal' if monophasic else 'disabled')
 
     def update_location_method_options(self, event=None):
         """Restrict location_method choices to those valid for the selected extraction_method."""
@@ -941,6 +1010,7 @@ class ControlParameterConfigGUI:
                         else:
                             var.set(value_str)
 
+            self.update_pulse_mode_field_states()
             messagebox.showinfo("Success", f"Configuration loaded from:\n{filename}")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load configuration:\n{e}")

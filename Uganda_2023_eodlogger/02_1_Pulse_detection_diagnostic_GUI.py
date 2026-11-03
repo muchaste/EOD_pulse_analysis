@@ -63,6 +63,7 @@ BIPHASIC_PRESET = {
     'length_extraction': 'variable',
     'length_factor': 10,
     'search_window': 10,
+    'triphasic_search': True,
     'envelope_peak_window_us': 1000,
     'envelope_shadow_us': 5000,
     'envelope_shadow_fraction': 0.4,
@@ -94,6 +95,7 @@ MONOPHASIC_PRESET = {
     'length_extraction': 'variable',
     'length_factor': 10,
     'search_window': 200,
+    'triphasic_search': True,
     'envelope_peak_window_us': 1000,
     'envelope_shadow_us': 5000,
     'envelope_shadow_fraction': 0.4,
@@ -295,6 +297,7 @@ class PulseDiagnosticTool:
         
         # Parameter inputs split into two columns
         self.param_vars = {}
+        self.param_entries = {}
         # Exclude length_extraction and pulse_mode from automatic generation (dropdowns instead)
         param_items = [(k, v) for k, v in self.parameters.items()
                        if k not in ('length_extraction', 'pulse_mode', 'extraction_method',
@@ -312,6 +315,7 @@ class PulseDiagnosticTool:
             entry.pack(side=tk.RIGHT)
             entry.bind('<Return>', lambda e: self.detect_pulses())
             self.param_vars[param] = var
+            self.param_entries[param] = entry
         
         # Right column parameters
         for i, (param, value) in enumerate(param_items[mid_point:]):
@@ -324,6 +328,7 @@ class PulseDiagnosticTool:
             entry.pack(side=tk.RIGHT)
             entry.bind('<Return>', lambda e: self.detect_pulses())
             self.param_vars[param] = var
+            self.param_entries[param] = entry
 
         # Add detection_method / extraction_method / location_method dropdowns at the right
         # column (replaces the old return_diff / use_pca pair - see
@@ -382,6 +387,7 @@ class PulseDiagnosticTool:
             width=6
         )
         length_extr_dropdown.pack(side=tk.RIGHT)
+        self.update_ratio_field_states()
         
         # Control buttons and settings
         button_frame = ttk.Frame(parent)
@@ -1210,6 +1216,15 @@ class PulseDiagnosticTool:
         if self.extraction_method_var.get() not in valid_options:
             self.extraction_method_var.set(valid_options[0])
         self.update_location_method_options()
+        self.update_ratio_field_states()
+
+    def update_ratio_field_states(self):
+        """Disable the amplitude-ratio limits when they are not applied (monophasic pulse mode or envelope detection)."""
+        ratio_unused = (self.pulse_mode_var.get() == 'monophasic'
+                        or self.detection_method_var.get() == 'envelope')
+        for key in ('amplitude_ratio_min', 'amplitude_ratio_max'):
+            if key in self.param_entries:
+                self.param_entries[key].config(state=tk.DISABLED if ratio_unused else tk.NORMAL)
 
     def update_location_method_options(self, event=None):
         """Restrict location_method choices to those valid for the selected extraction_method."""
@@ -1225,7 +1240,7 @@ class PulseDiagnosticTool:
             for param, var in self.param_vars.items():
                 value_str = var.get().strip()
                 
-                if param == 'save_filtered_out':
+                if param in ('save_filtered_out', 'triphasic_search'):
                     self.parameters[param] = value_str.lower() in ['true', '1', 'yes', 'on']
                 elif param in ['interp_factor', 'min_width_us', 'max_width_us', 'peak_fft_freq_min', 
                                'peak_fft_freq_max', 'length', 'length_factor', 'search_window', 
@@ -1444,7 +1459,8 @@ class PulseDiagnosticTool:
                         window_length=self.parameters['length'],
                         search_window=self.parameters['search_window'],
                         symmetry_threshold=self.parameters.get('symmetry_threshold', 0.3),
-                        pulse_mode=self.parameters['pulse_mode']
+                        pulse_mode=self.parameters['pulse_mode'],
+                        triphasic_search=self.parameters.get('triphasic_search', True)
                     )
 
                 print(f"    Filtering for differential pulses...{len(unique_pulses)} total, {np.sum(is_differential)} differential")
@@ -1531,6 +1547,9 @@ class PulseDiagnosticTool:
 
                 print(f"Analyzing {len(eod_waveforms)} pulses (top {top_pct}% below clip threshold {clip_thresh})")
 
+                # The amplitude ratio is meaningless for monophasic pulses (and the envelope route): limits not applied
+                use_amplitude_ratio = self.parameters['pulse_mode'] != 'monophasic' and not use_envelope_detection
+
                 # Apply filtering (with optional ML enhancement)
                 if (self.use_ml_filtering.get() and 
                     self.loaded_classifier is not None and 
@@ -1548,7 +1567,8 @@ class PulseDiagnosticTool:
                         fft_freq_min=self.parameters['peak_fft_freq_min'], 
                         fft_freq_max=self.parameters['peak_fft_freq_max'],
                         fish_probability_threshold=self.fish_probability_threshold.get(),
-                        use_basic_filtering=True
+                        use_basic_filtering=True,
+                        use_amplitude_ratio=use_amplitude_ratio
                     )
                 else:
                     # Use basic threshold filtering
@@ -1559,7 +1579,8 @@ class PulseDiagnosticTool:
                         pp_r_min=self.parameters['amplitude_ratio_min'], 
                         pp_r_max=self.parameters['amplitude_ratio_max'],
                         fft_freq_min=self.parameters['peak_fft_freq_min'], 
-                        fft_freq_max=self.parameters['peak_fft_freq_max']
+                        fft_freq_max=self.parameters['peak_fft_freq_max'],
+                        use_amplitude_ratio=use_amplitude_ratio
                     )
                 
                 # Ensure indices are 1D arrays (flatten in case they're not)
@@ -2023,7 +2044,8 @@ Current Parameters:
         normalized_list, normalization_info = normalize_waveforms(
             waveforms, snippet_p1_idc, snippet_p2_idc, 
             crop_and_interpolate=True, crop_factor=self.crop_factor.get(),
-            target_length=self.target_samples.get(), return_normalization_info=True
+            target_length=self.target_samples.get(), return_normalization_info=True,
+            pulse_mode=self.parameters['pulse_mode']
         )
         normalized_waveforms = np.array(normalized_list)
         
