@@ -9,6 +9,9 @@ Features:
 - Load events from Script 04 output
 - Display event plots with audio playback capability
 - Manual annotation interface (Clear Fish / Clear Noise / Ambiguous)
+- Optional tracking folder (04_1_Track_Fish output): pulse markers coloured by fish_id, IPI and
+  location panels per fish, fish-level corrections (merge / drop fish), fish count 1-9 or
+  'a' = accept the (corrected) tracker count
 - Extract comprehensive features for each event
 - Save annotated dataset for training filtering models
 
@@ -22,6 +25,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -50,15 +54,24 @@ ANNOTATION_CATEGORIES = {
     'unannotated': {'label': 'Unannotated', 'color': 'gray', 'key': '0'}
 }
 
+FISH_COLORS = plt.get_cmap('tab10').colors + plt.get_cmap('Set2').colors
+UNASSIGNED_COLOR = (0.6, 0.6, 0.6)
+
 class EventAnnotationTool:
     def __init__(self):
         self.events_folder = None
+        self.tracking_folder = None
         self.output_folder = None
         self.event_files = []
         self.current_event_idx = 0
         self.annotations = {}
         self.fish_counts = {}  # Store fish count information for clear_fish annotations
         self.event_features = {}
+        # Tracking overlay: fish_id per pulse of the current event (from 04_1 *_tracked.csv),
+        # fish-level corrections per event {'merge': [[keep, absorbed], ...], 'drop': [fish, ...]}
+        self.current_fish_ids = None
+        self.fish_corrections = {}
+        self.tracker_results = {}
         
         # Fish count settings
         self.fish_count_enabled = False
@@ -104,6 +117,10 @@ class EventAnnotationTool:
                   command=self.select_events_folder).pack(side=tk.LEFT, padx=(0, 10))
         self.folder_label = ttk.Label(folder_frame, text="No folder selected")
         self.folder_label.pack(side=tk.LEFT)
+        ttk.Button(folder_frame, text="Select Tracking Folder (optional)",
+                  command=self.select_tracking_folder).pack(side=tk.LEFT, padx=(30, 10))
+        self.tracking_label = ttk.Label(folder_frame, text="No tracking folder")
+        self.tracking_label.pack(side=tk.LEFT)
         
         # Navigation controls
         nav_frame = ttk.Frame(control_frame)
@@ -164,6 +181,18 @@ class EventAnnotationTool:
         # Fish count status label
         self.fish_count_status = ttk.Label(fish_count_frame, text="", foreground='blue')
         self.fish_count_status.pack(side=tk.LEFT, padx=(20, 0))
+
+        # Fish-level corrections of the tracker output (only with a tracking folder)
+        correction_frame = ttk.Frame(annotation_frame)
+        correction_frame.pack(fill=tk.X, pady=(5, 0))
+        ttk.Label(correction_frame, text="Fish correction (m A B = merge B into A, d A = drop A, r = reset):").pack(side=tk.LEFT, padx=(0, 5))
+        self.correction_var = tk.StringVar()
+        self.correction_entry = ttk.Entry(correction_frame, textvariable=self.correction_var, width=12)
+        self.correction_entry.pack(side=tk.LEFT, padx=(0, 5))
+        self.correction_entry.bind('<Return>', lambda e: self.apply_fish_correction())
+        ttk.Button(correction_frame, text="Apply", command=self.apply_fish_correction).pack(side=tk.LEFT)
+        self.correction_status = ttk.Label(correction_frame, text="", foreground='blue')
+        self.correction_status.pack(side=tk.LEFT, padx=(20, 0))
         
         # Audio controls (if available)
         if AUDIO_AVAILABLE:
@@ -248,6 +277,9 @@ class EventAnnotationTool:
         self.root.bind('<Key-1>', self.handle_key_1)
         self.root.bind('<Key-2>', self.handle_key_2)
         self.root.bind('<Key-3>', self.handle_key_3)
+        for digit in range(4, 10):
+            self.root.bind(f'<Key-{digit}>', self.handle_key_digit)  # fish counts 4-9
+        self.root.bind('<Key-a>', self.handle_key_a)  # accept the (corrected) tracker fish count
         self.root.bind('<Key-u>', self.handle_key_u)  # For 'unclear' fish count
         self.root.bind('<Left>', lambda e: self.previous_event())
         self.root.bind('<Right>', lambda e: self.next_event())
@@ -266,6 +298,80 @@ class EventAnnotationTool:
             self.events_folder = Path(folder)
             self.folder_label.config(text=f"Folder: {self.events_folder.name}")
             self.load_event_files()
+
+    def select_tracking_folder(self):
+        """Select the 04_1_Track_Fish output folder whose *_tracked.csv files carry fish_id per pulse"""
+        folder = filedialog.askdirectory(
+            title="Select Tracking Folder (04_1_Track_Fish output)",
+            initialdir=str(self.events_folder) if self.events_folder else os.getcwd()
+        )
+        if folder:
+            self.tracking_folder = Path(folder)
+            n_tracked = len(list(self.tracking_folder.glob("*_tracked.csv")))
+            self.tracking_label.config(text=f"Tracking: {self.tracking_folder.name} ({n_tracked} tracked events)")
+            if self.event_files:
+                self.load_current_event()
+
+    def keyboard_target_is_entry(self):
+        focus = self.root.focus_get()
+        return focus == self.goto_entry or focus == self.correction_entry
+
+    def load_tracking(self, event_id):
+        """Attach the tracker's fish_id to the current EOD table (matched on p1_idx and eod_channel);
+        pulses without a tracked row get -1 (unassigned). Stored corrections are applied afterwards."""
+        self.current_fish_ids = None
+        if self.tracking_folder is None or self.current_eod_table is None:
+            return
+        tracked_file = self.tracking_folder / f"{event_id}_tracked.csv"
+        if not tracked_file.exists():
+            return
+        tracked = pd.read_csv(tracked_file, usecols=['p1_idx', 'eod_channel', 'fish_id'])
+        tracked = tracked.drop_duplicates(subset=['p1_idx', 'eod_channel'])
+        merged = self.current_eod_table[['p1_idx', 'eod_channel']].merge(tracked, on=['p1_idx', 'eod_channel'], how='left')
+        fish_ids = merged['fish_id'].fillna(-1).astype(int).values
+        self.tracker_results[event_id] = {
+            'tracker_n_fish': int(len(set(fish_ids[fish_ids >= 0]))),
+            'tracker_pulses_per_fish': {int(f): int((fish_ids == f).sum()) for f in sorted(set(fish_ids[fish_ids >= 0]))},
+            'n_unassigned': int((fish_ids < 0).sum()),
+        }
+        self.current_fish_ids = self.apply_corrections_to_ids(fish_ids, self.fish_corrections.get(event_id, {}))
+        self.tracker_results[event_id]['corrected_n_fish'] = int(len(set(self.current_fish_ids[self.current_fish_ids >= 0])))
+
+    def apply_corrections_to_ids(self, fish_ids, corrections):
+        fish_ids = fish_ids.copy()
+        for keep, absorbed in corrections.get('merge', []):
+            fish_ids[fish_ids == absorbed] = keep
+        for dropped in corrections.get('drop', []):
+            fish_ids[fish_ids == dropped] = -1
+        return fish_ids
+
+    def apply_fish_correction(self):
+        """Parse the correction entry: 'm A B' merges fish B into A, 'd A' drops fish A, 'r' resets."""
+        if self.current_fish_ids is None:
+            self.correction_status.config(text="No tracking data for this event")
+            return
+        event_id = self.event_files[self.current_event_idx]['base_stem']
+        tokens = self.correction_var.get().strip().lower().split()
+        corrections = self.fish_corrections.setdefault(event_id, {'merge': [], 'drop': []})
+        if len(tokens) == 3 and tokens[0] == 'm':
+            corrections['merge'].append([int(tokens[1]), int(tokens[2])])
+        elif len(tokens) == 2 and tokens[0] == 'd':
+            corrections['drop'].append(int(tokens[1]))
+        elif tokens == ['r']:
+            self.fish_corrections.pop(event_id, None)
+        else:
+            self.correction_status.config(text="Use: m A B | d A | r")
+            return
+        self.correction_var.set("")
+        self.load_tracking(event_id)
+        self.correction_status.config(text=f"Corrections: {self.fish_corrections.get(event_id, {})}")
+        self.update_display()
+        self.root.focus_set()
+
+    def current_fish_count_from_tracker(self):
+        if self.current_fish_ids is None:
+            return None
+        return int(len(set(self.current_fish_ids[self.current_fish_ids >= 0])))
     
     def load_event_files(self):
         """Load all event files from the selected folder"""
@@ -350,6 +456,8 @@ class EventAnnotationTool:
             self.current_eod_table = None
             if eod_file.exists():
                 self.current_eod_table = pd.read_csv(eod_file)
+            self.load_tracking(event_id)
+            self.correction_status.config(text=f"Corrections: {self.fish_corrections[event_id]}" if event_id in self.fish_corrections else "")
             
             # Load event summary info (try to find from main summary file)
             self.load_event_summary_info()
@@ -603,6 +711,12 @@ class EventAnnotationTool:
                 info_text += f"Mean IPI: {features['mean_ipi']:.3f}s, "
                 info_text += f"IPI CV: {features['ipi_cv']:.2f}, "
                 info_text += f"Amplitude CV: {features.get('amplitude_cv', 'N/A'):.2f}\n"
+
+        if event_id in self.tracker_results and self.current_fish_ids is not None:
+            tr = self.tracker_results[event_id]
+            per_fish = ', '.join(f"fish {f}: {n}" for f, n in tr['tracker_pulses_per_fish'].items())
+            info_text += (f"Tracker: {tr['tracker_n_fish']} fish ({per_fish}; unassigned {tr['n_unassigned']}); "
+                          f"after corrections: {tr['corrected_n_fish']} fish  ['a' accepts this count]\n")
         
         self.info_text.insert(1.0, info_text)
     
@@ -636,10 +750,41 @@ class EventAnnotationTool:
         if self.current_audio is None:
             return
         
-        # Create matplotlib figure
-
-        
-        self.fig, self.ax = plt.subplots(1, 1, figsize=(14, 6))
+        # Create matplotlib figure; with tracking data two extra panels (IPI, location) share the x-axis
+        show_tracks = self.current_fish_ids is not None and self.current_eod_table is not None
+        if show_tracks:
+            self.fig = plt.figure(figsize=(14, 9))
+            gs = gridspec.GridSpec(3, 1, height_ratios=[3, 1, 1], hspace=0.08, figure=self.fig)
+            self.ax = self.fig.add_subplot(gs[0])
+            ax_ipi = self.fig.add_subplot(gs[1], sharex=self.ax)
+            ax_loc = self.fig.add_subplot(gs[2], sharex=self.ax)
+            fish_present = sorted(set(self.current_fish_ids))
+            fish_color = {f: (UNASSIGNED_COLOR if f < 0 else FISH_COLORS[i % len(FISH_COLORS)])
+                          for i, f in enumerate([f for f in fish_present if f >= 0])}
+            fish_color[-1] = UNASSIGNED_COLOR
+            marker_colors = np.array([fish_color[f] for f in self.current_fish_ids])
+            x_pulse = self.current_eod_table['p1_idx'].values
+            t_pulse = pd.to_datetime(self.current_eod_table['timestamp']).values.astype('datetime64[ns]').astype(np.int64) / 1e9
+            for f in fish_present:
+                m = self.current_fish_ids == f
+                order = np.argsort(x_pulse[m])
+                xs = x_pulse[m][order]
+                ipi = np.diff(t_pulse[m][order])
+                label = f'fish {f} (n={m.sum()})' if f >= 0 else f'unassigned (n={m.sum()})'
+                ax_ipi.plot(xs[1:], ipi * 1e3, '.', ms=3, color=fish_color[f], label=label)
+                if 'pulse_location' in self.current_eod_table.columns:
+                    ax_loc.plot(xs, self.current_eod_table['pulse_location'].values[m][order], '.', ms=3, color=fish_color[f])
+            ax_ipi.set_ylabel('IPI (ms)')
+            ax_ipi.set_yscale('log')
+            ax_ipi.legend(loc='upper right', fontsize=7, ncol=4)
+            ax_ipi.grid(True, alpha=0.3)
+            ax_loc.set_ylabel('location (el.)')
+            ax_loc.set_xlabel('Sample')
+            ax_loc.grid(True, alpha=0.3)
+            plt.setp(self.ax.get_xticklabels(), visible=False)
+            plt.setp(ax_ipi.get_xticklabels(), visible=False)
+        else:
+            self.fig, self.ax = plt.subplots(1, 1, figsize=(14, 6))
         
         # Plot differential signals with aggressive downsampling for very large files
         n_channels = self.current_audio.shape[1] if len(self.current_audio.shape) > 1 else 1
@@ -686,17 +831,23 @@ class EventAnnotationTool:
                 
                 # Plot EOD markers (limit to avoid memory issues)
                 if self.current_eod_table is not None and len(self.current_eod_table) > 0:
-                    ch_eods = self.current_eod_table[self.current_eod_table['eod_channel'] == ch]
+                    ch_mask = (self.current_eod_table['eod_channel'] == ch).values
+                    ch_eods = self.current_eod_table[ch_mask]
                     
                     if len(ch_eods) > 0:
-                        # # Limit number of markers for very large datasets
-                        # if len(ch_eods) > 1000:
-                        #     # Sample every nth marker to avoid too many points
-                        #     marker_step = len(ch_eods) // 1000
-                        #     ch_eods = ch_eods.iloc[::marker_step]
-                        
                         p1_idc = ch_eods['p1_idx'].values
                         p2_idc = ch_eods['p2_idx'].values
+
+                        if show_tracks:
+                            # markers coloured by (corrected) fish_id; legend entries once per fish
+                            self.ax.scatter(p1_idc, diff_signal[p1_idc] + (ch + 0.5) * offset_multiplier,
+                                            s=12, c=marker_colors[ch_mask], alpha=0.9, zorder=3)
+                            self.ax.scatter(p2_idc, diff_signal[p2_idc] + (ch + 0.5) * offset_multiplier,
+                                            s=12, c=marker_colors[ch_mask], alpha=0.9, marker='s', zorder=3)
+                            if 'pulse_location' in ch_eods.columns:
+                                self.ax.vlines(p1_idc, (ch + 0.5) * offset_multiplier, ch_eods['pulse_location'].values * offset_multiplier,
+                                               colors=marker_colors[ch_mask], linewidth=0.5, alpha=0.5)
+                            continue
                         
                         # # Recompute diff_signal just for markers (more memory efficient)
                         # valid_peaks = (p1_idc >= 0) & (p1_idc < len(diff_signal)) & (~np.isnan(p1_idc))
@@ -793,7 +944,7 @@ class EventAnnotationTool:
             # Set up for fish count input
             self.waiting_for_fish_count = True
             self.pending_event_id = event_id
-            self.fish_count_status.config(text="Waiting for fish count: [1], [2], or [u]nclear")
+            self.fish_count_status.config(text="Waiting for fish count: [1]-[9], [a]ccept tracker count, or [u]nclear")
             
             # Update only the info text and window title, not the plot
             self.update_info_text()
@@ -866,7 +1017,7 @@ class EventAnnotationTool:
     
     def handle_key_1(self, event):
         """Handle key '1' - annotate as clear fish or set fish count to 1"""
-        if self.root.focus_get() != self.goto_entry:
+        if not self.keyboard_target_is_entry():
             if self.waiting_for_fish_count:
                 self.set_fish_count('1')
             else:
@@ -874,21 +1025,37 @@ class EventAnnotationTool:
     
     def handle_key_2(self, event):
         """Handle key '2' - annotate as clear noise or set fish count to 2"""
-        if self.root.focus_get() != self.goto_entry:
+        if not self.keyboard_target_is_entry():
             if self.waiting_for_fish_count:
                 self.set_fish_count('2')
             else:
                 self.annotate_event('clear_noise')
     
     def handle_key_3(self, event):
-        """Handle key '3' - annotate as ambiguous"""
-        if self.root.focus_get() != self.goto_entry:
-            if not self.waiting_for_fish_count:  # Don't handle '3' during fish count input
+        """Handle key '3' - annotate as ambiguous, or set fish count to 3 while waiting for a count"""
+        if not self.keyboard_target_is_entry():
+            if self.waiting_for_fish_count:
+                self.set_fish_count('3')
+            else:
                 self.annotate_event('ambiguous')
+
+    def handle_key_digit(self, event):
+        """Keys 4-9 - fish count while waiting for a count"""
+        if not self.keyboard_target_is_entry() and self.waiting_for_fish_count:
+            self.set_fish_count(event.char)
+
+    def handle_key_a(self, event):
+        """Key 'a' - accept the (corrected) tracker fish count"""
+        if not self.keyboard_target_is_entry() and self.waiting_for_fish_count:
+            count = self.current_fish_count_from_tracker()
+            if count is None:
+                self.fish_count_status.config(text="No tracking data: enter the count manually")
+            else:
+                self.set_fish_count(str(count))
     
     def handle_key_u(self, event):
         """Handle key 'u' - set fish count to unclear"""
-        if self.root.focus_get() != self.goto_entry:
+        if not self.keyboard_target_is_entry():
             if self.waiting_for_fish_count:
                 self.set_fish_count('unclear')
     
@@ -1062,14 +1229,17 @@ class EventAnnotationTool:
             save_data = {
                 'annotations': self.annotations,
                 'fish_counts': self.fish_counts,
+                'fish_corrections': self.fish_corrections,
+                'tracker_results': self.tracker_results,
                 'features': self.event_features,
                 'metadata': {
                     'events_folder': str(self.events_folder),
+                    'tracking_folder': str(self.tracking_folder) if self.tracking_folder else None,
                     'n_events': len(self.event_files),
                     'annotation_counts': {cat: sum(1 for a in self.annotations.values() if a == cat) 
                                         for cat in ANNOTATION_CATEGORIES.keys()},
                     'fish_count_counts': {count: sum(1 for c in self.fish_counts.values() if c == count) 
-                                        for count in ['1', '2', 'unclear']},
+                                        for count in sorted(set(self.fish_counts.values()))},
                     'created_date': datetime.now().isoformat()
                 }
             }
@@ -1093,9 +1263,13 @@ class EventAnnotationTool:
                 
                 self.annotations.update(load_data.get('annotations', {}))
                 self.fish_counts.update(load_data.get('fish_counts', {}))
+                self.fish_corrections.update(load_data.get('fish_corrections', {}))
+                self.tracker_results.update(load_data.get('tracker_results', {}))
                 self.event_features.update(load_data.get('features', {}))
                 
-                # Update display
+                # Update display (re-attach tracking so stored corrections apply to the current event)
+                if self.event_files:
+                    self.load_tracking(self.event_files[self.current_event_idx]['base_stem'])
                 self.update_display()
                 
                 messagebox.showinfo("Success", f"Annotations loaded from {filename}")
@@ -1134,6 +1308,10 @@ class EventAnnotationTool:
                             'fish_count': fish_count if annotation == 'clear_fish' else None,
                             'file_path': str(event['audio_parts'][0])
                         }
+                        tracker = self.tracker_results.get(event_id, {})
+                        row['tracker_n_fish'] = tracker.get('tracker_n_fish')
+                        row['corrected_n_fish'] = tracker.get('corrected_n_fish')
+                        row['fish_corrections'] = json.dumps(self.fish_corrections[event_id]) if event_id in self.fish_corrections else ''
                         row.update(features)
                         dataset_rows.append(row)
                 
@@ -1161,9 +1339,8 @@ class EventAnnotationTool:
                     if len(clear_fish_events) > 0:
                         f.write(f"\nFish count breakdown (Clear Fish events only):\n")
                         fish_count_stats = clear_fish_events['fish_count'].value_counts()
-                        for count in ['1', '2', 'unclear']:
-                            count_val = fish_count_stats.get(count, 0)
-                            f.write(f"  {count} fish: {count_val}\n")
+                        for count in fish_count_stats.index:
+                            f.write(f"  {count} fish: {fish_count_stats[count]}\n")
                         no_count = len(clear_fish_events[clear_fish_events['fish_count'].isna()])
                         if no_count > 0:
                             f.write(f"  No fish count: {no_count}\n")
@@ -1189,6 +1366,8 @@ class EventAnnotationTool:
         print("  1 - Clear Fish")
         print("  2 - Clear Noise") 
         print("  3 - Ambiguous")
+        print("  while waiting for a fish count: 1-9, a = accept tracker count, u = unclear")
+        print("  Fish correction entry: m A B (merge B into A), d A (drop A), r (reset)")
         print("  ← → - Navigate events")
         print("  Space - Play audio")
         print("\nSelect an events folder to begin annotation...")
