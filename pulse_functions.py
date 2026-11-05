@@ -360,6 +360,9 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
         2026-11-03: on Uganda field data the search mostly picked noise bumps or neighbouring
         pulses), P1/P2 stay at the re-detected landmarks and P3 is not searched
         (snippet_p3_idc / final_p3_idc are -1). Never run for pulse_mode='monophasic'.
+        A triphasic pulse that the detector split into (P1, P2) and (P2, P3) is re-joined
+        afterwards by remove_duplicates (merge_shared_landmark_pulses), which sets P3 without
+        any search.
     pca_common_average : bool, optional
         Only used when extraction_method='pca'. If True (default), the common-mode signal (mean
         across channels) is subtracted before the PCA. This suppresses common noise but also
@@ -1997,6 +2000,76 @@ def detect_pulses_envelope(data, rate, thresh=0.001, peak_window_us=1000,
     signed_heights = corrected[peaks, channels]
     return peaks.astype(int), channels.astype(int), signed_heights
 
+def merge_shared_landmark_pulses(arrays_dict, tolerance=5, interp_factor=1):
+    """
+    Merge the two halves of a triphasic pulse that the detector returned as two pulses.
+
+    A triphasic EOD (small P1, large P2, small P3) is often detected as two peak/trough pairs,
+    (P1, P2) and (P2, P3), which share the large middle landmark. After extraction they appear
+    as two pulses on the same or an adjacent channel whose second P1 lies within `tolerance` raw
+    samples of the first pulse's P2. The first pair is kept as P1/P2 and the second pair's P2 is
+    recorded as its P3 (final_p3_idc, snippet_p3_idc); the second pulse is dropped. Two independent
+    pulses cannot share an extremum, so no amplitude or shape test is needed.
+
+    Parameters
+    ----------
+    arrays_dict : dict
+        Arrays of remove_duplicates (final_peak_idc = P1, final_trough_idc = P2 in raw samples,
+        snippet_trough_idc in interpolated snippet samples, eod_chan, waveform_lengths, ...).
+    tolerance : int
+        Maximum raw-sample distance between the first pulse's P2 and the second pulse's P1.
+    interp_factor : int
+        Interpolation factor of the snippets (raw sample distances are scaled by it).
+
+    Returns
+    -------
+    filtered_arrays_dict : dict
+    n_merged : int
+    """
+    p1 = np.asarray(arrays_dict['final_peak_idc'])
+    p2 = np.asarray(arrays_dict['final_trough_idc'])
+    chan = np.asarray(arrays_dict['eod_chan'])
+    n = len(p1)
+    if n < 2:
+        return arrays_dict, 0
+    snippet_p3 = np.array(arrays_dict['snippet_p3_idc'], copy=True)
+    final_p3 = np.array(arrays_dict['final_p3_idc'], copy=True)
+    snippet_p2 = np.asarray(arrays_dict['snippet_trough_idc'])
+    wf_lengths = np.asarray(arrays_dict['waveform_lengths'])
+    order = np.argsort(p1, kind='stable')
+    keep = np.ones(n, dtype=bool)
+    n_merged = 0
+    for k in range(n - 1):
+        i = order[k]
+        if not keep[i]:
+            continue
+        for m in range(k + 1, n):
+            j = order[m]
+            if p1[j] - p2[i] > tolerance:
+                break
+            if not keep[j] or abs(int(chan[j]) - int(chan[i])) > 1 or abs(p1[j] - p2[i]) > tolerance:
+                continue
+            final_p3[i] = p2[j]
+            p3_in_snippet = snippet_p2[i] + (p2[j] - p2[i]) * interp_factor
+            snippet_p3[i] = p3_in_snippet if 0 <= p3_in_snippet < wf_lengths[i] else -1
+            keep[j] = False
+            n_merged += 1
+            break
+    if n_merged == 0:
+        return arrays_dict, 0
+    arrays_dict = arrays_dict.copy()
+    arrays_dict['snippet_p3_idc'] = snippet_p3
+    arrays_dict['final_p3_idc'] = final_p3
+    filtered_arrays = {}
+    for key, array in arrays_dict.items():
+        if key == 'eod_waveforms':
+            filtered_arrays[key] = [array[i] for i in range(len(array)) if keep[i]]
+        elif np.ndim(array) > 0 and len(array) == n:
+            filtered_arrays[key] = np.asarray(array)[keep]
+        else:
+            filtered_arrays[key] = array
+    return filtered_arrays, n_merged
+
 def remove_proximity_duplicates(arrays_dict, proximity_threshold=3):
     """
     Remove duplicates based on proximity: across channels and midpoint within threshold samples.
@@ -2203,6 +2276,13 @@ def remove_duplicates(eod_snippets, eod_amps, eod_widths, eod_chan, is_different
         'final_p3_idc': final_p3_idc
     }
     
+    # Step 0 (biphasic only): fold the (P2, P3) half of a split triphasic pulse into its (P1, P2) half
+    if parameters.get('pulse_mode', 'biphasic') != 'monophasic':
+        arrays_dict, n_merged = merge_shared_landmark_pulses(
+            arrays_dict, tolerance=parameters.get('duplicate_samples', 5),
+            interp_factor=parameters.get('interp_factor', 1))
+        print(f"    Merged {n_merged} split triphasic pulses (shared landmark)")
+
     # Step 1: Remove proximity-based duplicates
     arrays_dict, n_proximity_removed = remove_proximity_duplicates(arrays_dict, proximity_threshold=parameters.get('duplicate_samples'))
     print(f"    Removed {n_proximity_removed} proximity-based duplicate pulses")
