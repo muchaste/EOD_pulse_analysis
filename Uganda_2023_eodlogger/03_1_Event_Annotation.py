@@ -12,6 +12,11 @@ Features:
 - Optional tracking folder (04_1_Track_Fish output): pulse markers coloured by fish_id, IPI and
   location panels per fish, fish-level corrections (merge / drop fish), fish count 1-9 or
   'a' = accept the (corrected) tracker count
+- Optional annotation sample CSV (03_3): shows only the sampled events of the opened folder and
+  sets the tracking folder; 'g' flags a reappearing single fish (trail_gaps); '[' ']' step through
+  30 s windows of long events, 'w' shows the whole event
+- Pulse-level corrections: lasso on the IPI / location / amplitude panel selects pulses, a digit
+  assigns them to that fish ('n' = new fish, Esc clears); stored per pulse (p1_idx_channel -> fish)
 - Extract comprehensive features for each event
 - Save annotated dataset for training filtering models
 
@@ -26,6 +31,8 @@ import pandas as pd
 from pathlib import Path
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+from matplotlib.path import Path as MplPath
+from matplotlib.widgets import LassoSelector
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -72,9 +79,23 @@ class EventAnnotationTool:
         self.current_fish_ids = None
         self.fish_corrections = {}
         self.tracker_results = {}
+        # Annotation sample (03_3 CSV): restrict the event list to the sampled events of the opened folder
+        self.sample_df = None
+        self.sample_label = None
+        # Flags per event (e.g. trail_gaps = one fish that leaves and reappears)
+        self.event_flags = {}
+        # Window stepper for long events: None = whole event, else (start_sample, end_sample)
+        self.view_window_s = 30.0
+        self.view_window = None
+        # Pulse-level corrections {event: {"<p1_idx>_<eod_channel>": fish}}, lasso selection state
+        self.pulse_corrections = {}
+        self.lasso_selected = set()
+        self.lasso_selectors = []
+        self.panel_points = {}
+        self.keep_xlim = None
         
         # Fish count settings
-        self.fish_count_enabled = False
+        self.fish_count_enabled = True   # fish count asked after every 'clear fish' (checkbox can switch it off)
         self.waiting_for_fish_count = False
         self.pending_event_id = None
         
@@ -96,178 +117,97 @@ class EventAnnotationTool:
         self.current_eod_table = None
         
     def setup_gui(self):
-        """Initialize the main GUI window"""
+        """Initialize the main GUI window (three compact control rows, the plot takes the rest)"""
         self.root = tk.Tk()
         self.root.title("EOD Event Annotation Tool")
         self.root.geometry("1400x900")
+        try:
+            self.root.state('zoomed')
+        except tk.TclError:
+            pass
         
-        # Create main frame
         main_frame = ttk.Frame(self.root)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
         
-        # Top control panel
-        control_frame = ttk.LabelFrame(main_frame, text="Controls", padding=10)
-        control_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        # Folder selection
-        folder_frame = ttk.Frame(control_frame)
-        folder_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        ttk.Button(folder_frame, text="Select Events Folder", 
-                  command=self.select_events_folder).pack(side=tk.LEFT, padx=(0, 10))
+        # Row 1: folders and sample
+        folder_frame = ttk.Frame(main_frame)
+        folder_frame.pack(fill=tk.X, pady=(0, 2))
+        ttk.Button(folder_frame, text="Events Folder", command=self.select_events_folder).pack(side=tk.LEFT, padx=(0, 4))
         self.folder_label = ttk.Label(folder_frame, text="No folder selected")
         self.folder_label.pack(side=tk.LEFT)
-        ttk.Button(folder_frame, text="Select Tracking Folder (optional)",
-                  command=self.select_tracking_folder).pack(side=tk.LEFT, padx=(30, 10))
+        ttk.Button(folder_frame, text="Tracking Folder", command=self.select_tracking_folder).pack(side=tk.LEFT, padx=(16, 4))
         self.tracking_label = ttk.Label(folder_frame, text="No tracking folder")
         self.tracking_label.pack(side=tk.LEFT)
+        ttk.Button(folder_frame, text="Sample CSV (03_3)", command=self.load_sample_csv).pack(side=tk.LEFT, padx=(16, 4))
+        self.sample_label = ttk.Label(folder_frame, text="No sample filter")
+        self.sample_label.pack(side=tk.LEFT)
+        ttk.Button(folder_frame, text="Export Dataset", command=self.export_dataset).pack(side=tk.RIGHT, padx=(4, 0))
+        ttk.Button(folder_frame, text="Load Annotations", command=self.load_annotations).pack(side=tk.RIGHT, padx=(4, 0))
+        ttk.Button(folder_frame, text="Save Annotations", command=self.save_annotations).pack(side=tk.RIGHT, padx=(4, 0))
         
-        # Navigation controls
-        nav_frame = ttk.Frame(control_frame)
-        nav_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        ttk.Button(nav_frame, text="◀◀ Previous", 
-                  command=self.previous_event).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(nav_frame, text="Next ▶▶", 
-                  command=self.next_event).pack(side=tk.LEFT, padx=(0, 10))
-        
+        # Row 2: navigation, annotation buttons, fish count
+        nav_frame = ttk.Frame(main_frame)
+        nav_frame.pack(fill=tk.X, pady=(0, 2))
+        ttk.Button(nav_frame, text="<", width=3, command=self.previous_event).pack(side=tk.LEFT)
+        ttk.Button(nav_frame, text=">", width=3, command=self.next_event).pack(side=tk.LEFT, padx=(2, 6))
         self.event_label = ttk.Label(nav_frame, text="Event: - / -")
-        self.event_label.pack(side=tk.LEFT, padx=(0, 10))
-        
-        # Go to event controls
-        goto_frame = ttk.Frame(nav_frame)
-        goto_frame.pack(side=tk.LEFT, padx=(10, 10))
-        
-        ttk.Label(goto_frame, text="Go to:").pack(side=tk.LEFT, padx=(0, 2))
+        self.event_label.pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(nav_frame, text="Go to:").pack(side=tk.LEFT)
         self.goto_var = tk.StringVar()
-        self.goto_entry = ttk.Entry(goto_frame, textvariable=self.goto_var, width=6)
-        self.goto_entry.pack(side=tk.LEFT, padx=(0, 2))
-        ttk.Button(goto_frame, text="Go", 
-                  command=self.go_to_event).pack(side=tk.LEFT)
-        
-        # Bind Enter key to go to event
+        self.goto_entry = ttk.Entry(nav_frame, textvariable=self.goto_var, width=5)
+        self.goto_entry.pack(side=tk.LEFT, padx=(2, 2))
         self.goto_entry.bind('<Return>', lambda e: self.go_to_event())
-        
-        # Progress bar
-        self.progress = ttk.Progressbar(nav_frame, mode='determinate')
-        self.progress.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(10, 0))
-        
-        # Annotation controls
-        annotation_frame = ttk.LabelFrame(control_frame, text="Annotation", padding=10)
-        annotation_frame.pack(fill=tk.X, pady=(10, 0))
-        
-        # Annotation buttons
-        button_frame = ttk.Frame(annotation_frame)
-        button_frame.pack(fill=tk.X)
-        
+        ttk.Button(nav_frame, text="Go", width=3, command=self.go_to_event).pack(side=tk.LEFT, padx=(0, 12))
         for category, info in ANNOTATION_CATEGORIES.items():
             if category != 'unannotated':
-                btn = ttk.Button(button_frame, 
-                               text=f"{info['label']} [{info['key']}]",
-                               command=lambda cat=category: self.annotate_event(cat))
-                btn.pack(side=tk.LEFT, padx=(0, 10))
+                ttk.Button(nav_frame, text=f"{info['label']} [{info['key']}]",
+                           command=lambda cat=category: self.annotate_event(cat)).pack(side=tk.LEFT, padx=(0, 4))
+        self.fish_count_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(nav_frame, text="Fish count input", variable=self.fish_count_var,
+                        command=self.toggle_fish_count).pack(side=tk.LEFT, padx=(12, 4))
+        self.fish_count_status = ttk.Label(nav_frame, text="", foreground='blue')
+        self.fish_count_status.pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Button(nav_frame, text="Help [h]", command=self.show_help).pack(side=tk.RIGHT)
+        self.progress = ttk.Progressbar(nav_frame, mode='determinate', length=160)
+        self.progress.pack(side=tk.RIGHT, padx=(10, 10))
         
-        # Fish count control
-        fish_count_frame = ttk.Frame(annotation_frame)
-        fish_count_frame.pack(fill=tk.X, pady=(10, 0))
-        
-        self.fish_count_var = tk.BooleanVar()
-        fish_count_checkbox = ttk.Checkbutton(fish_count_frame, 
-                                             text="Enable Fish Count Input (for Clear Fish)",
-                                             variable=self.fish_count_var,
-                                             command=self.toggle_fish_count)
-        fish_count_checkbox.pack(side=tk.LEFT)
-        
-        # Fish count status label
-        self.fish_count_status = ttk.Label(fish_count_frame, text="", foreground='blue')
-        self.fish_count_status.pack(side=tk.LEFT, padx=(20, 0))
-
-        # Fish-level corrections of the tracker output (only with a tracking folder)
-        correction_frame = ttk.Frame(annotation_frame)
-        correction_frame.pack(fill=tk.X, pady=(5, 0))
-        ttk.Label(correction_frame, text="Fish correction (m A B = merge B into A, d A = drop A, r = reset):").pack(side=tk.LEFT, padx=(0, 5))
+        # Row 3: tracker corrections and audio
+        correction_frame = ttk.Frame(main_frame)
+        correction_frame.pack(fill=tk.X, pady=(0, 2))
+        ttk.Label(correction_frame, text="Correction (m A B | d A | r):").pack(side=tk.LEFT, padx=(0, 4))
         self.correction_var = tk.StringVar()
-        self.correction_entry = ttk.Entry(correction_frame, textvariable=self.correction_var, width=12)
-        self.correction_entry.pack(side=tk.LEFT, padx=(0, 5))
+        self.correction_entry = ttk.Entry(correction_frame, textvariable=self.correction_var, width=10)
+        self.correction_entry.pack(side=tk.LEFT, padx=(0, 2))
         self.correction_entry.bind('<Return>', lambda e: self.apply_fish_correction())
-        ttk.Button(correction_frame, text="Apply", command=self.apply_fish_correction).pack(side=tk.LEFT)
+        ttk.Button(correction_frame, text="Apply", width=6, command=self.apply_fish_correction).pack(side=tk.LEFT)
         self.correction_status = ttk.Label(correction_frame, text="", foreground='blue')
-        self.correction_status.pack(side=tk.LEFT, padx=(20, 0))
-        
-        # Audio controls (if available)
+        self.correction_status.pack(side=tk.LEFT, padx=(8, 0))
         if AUDIO_AVAILABLE:
-            audio_frame = ttk.Frame(annotation_frame)
-            audio_frame.pack(fill=tk.X, pady=(10, 0))
-            
-            # Audio playback controls
-            playback_frame = ttk.Frame(audio_frame)
-            playback_frame.pack(fill=tk.X, pady=(0, 5))
-            
-            ttk.Button(playback_frame, text="▶ Play Audio", 
-                      command=self.play_audio).pack(side=tk.LEFT, padx=(0, 10))
-            ttk.Button(playback_frame, text="⏹ Stop Audio", 
-                      command=self.stop_audio).pack(side=tk.LEFT, padx=(0, 10))
-            
-            # Playback speed control
-            ttk.Label(playback_frame, text="Speed:").pack(side=tk.LEFT, padx=(20, 5))
-            self.speed_var = tk.DoubleVar(value=1.0)
-            speed_scale = ttk.Scale(playback_frame, from_=0.1, to=3.0, 
-                                  variable=self.speed_var, length=100)
-            speed_scale.pack(side=tk.LEFT, padx=(0, 10))
-            self.speed_label = ttk.Label(playback_frame, text="1.0x")
-            self.speed_label.pack(side=tk.LEFT)
-            self.speed_var.trace('w', self.update_speed_label)
-            
-            # Audio mode selection
-            mode_frame = ttk.Frame(audio_frame)
-            mode_frame.pack(fill=tk.X)
-            
-            ttk.Label(mode_frame, text="Audio Mode:").pack(side=tk.LEFT, padx=(0, 5))
-            self.audio_mode_var = tk.StringVar(value='differential_mix')
-            audio_modes = [
-                ('Differential Mix', 'differential_mix'),
-                ('Stereo (Ch 0-1)', 'stereo_channels'),
-                ('Mono Mix', 'mono_mix')
-            ]
-            
-            for label, mode in audio_modes:
-                ttk.Radiobutton(mode_frame, text=label, variable=self.audio_mode_var, 
-                               value=mode, command=self.update_audio_mode).pack(side=tk.LEFT, padx=(0, 10))
-            
-            # Channel selection for stereo mode
-            ttk.Label(mode_frame, text="Channels:").pack(side=tk.LEFT, padx=(20, 5))
             self.ch1_var = tk.IntVar(value=0)
             self.ch2_var = tk.IntVar(value=1)
-            
-            ttk.Spinbox(mode_frame, from_=0, to=7, width=3, textvariable=self.ch1_var).pack(side=tk.LEFT, padx=(0, 2))
-            ttk.Label(mode_frame, text="-").pack(side=tk.LEFT)
-            ttk.Spinbox(mode_frame, from_=0, to=7, width=3, textvariable=self.ch2_var).pack(side=tk.LEFT, padx=(2, 0))
+            ttk.Spinbox(correction_frame, from_=0, to=7, width=2, textvariable=self.ch2_var).pack(side=tk.RIGHT)
+            ttk.Label(correction_frame, text="-").pack(side=tk.RIGHT)
+            ttk.Spinbox(correction_frame, from_=0, to=7, width=2, textvariable=self.ch1_var).pack(side=tk.RIGHT)
+            ttk.Label(correction_frame, text="Ch:").pack(side=tk.RIGHT, padx=(8, 2))
+            self.audio_mode_var = tk.StringVar(value='differential_mix')
+            for label, mode in [('Mono', 'mono_mix'), ('Stereo', 'stereo_channels'), ('Diff mix', 'differential_mix')]:
+                ttk.Radiobutton(correction_frame, text=label, variable=self.audio_mode_var,
+                                value=mode, command=self.update_audio_mode).pack(side=tk.RIGHT, padx=(0, 4))
+            self.speed_label = ttk.Label(correction_frame, text="1.0x")
+            self.speed_label.pack(side=tk.RIGHT, padx=(0, 8))
+            self.speed_var = tk.DoubleVar(value=1.0)
+            ttk.Scale(correction_frame, from_=0.1, to=3.0, variable=self.speed_var, length=80).pack(side=tk.RIGHT)
+            self.speed_var.trace('w', self.update_speed_label)
+            ttk.Label(correction_frame, text="Speed:").pack(side=tk.RIGHT, padx=(8, 2))
+            ttk.Button(correction_frame, text="Stop", width=5, command=self.stop_audio).pack(side=tk.RIGHT)
+            ttk.Button(correction_frame, text="Play audio", command=self.play_audio).pack(side=tk.RIGHT, padx=(8, 2))
         
-        # Save/Load controls
-        save_frame = ttk.Frame(annotation_frame)
-        save_frame.pack(fill=tk.X, pady=(10, 0))
+        # Event info: three lines, no scrollbar (the convention sits in the help popup)
+        self.info_text = tk.Text(main_frame, height=3, wrap=tk.NONE, relief=tk.FLAT, background=self.root.cget('background'))
+        self.info_text.pack(fill=tk.X, pady=(0, 2))
         
-        ttk.Button(save_frame, text="💾 Save Annotations", 
-                  command=self.save_annotations).pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Button(save_frame, text="📁 Load Annotations", 
-                  command=self.load_annotations).pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Button(save_frame, text="📊 Export Dataset", 
-                  command=self.export_dataset).pack(side=tk.LEFT, padx=(0, 10))
-        
-        # Event info panel
-        info_frame = ttk.LabelFrame(main_frame, text="Event Information", padding=10)
-        info_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        # Create text widget for event info
-        self.info_text = tk.Text(info_frame, height=4, wrap=tk.WORD)
-        info_scrollbar = ttk.Scrollbar(info_frame, orient=tk.VERTICAL, command=self.info_text.yview)
-        self.info_text.configure(yscrollcommand=info_scrollbar.set)
-        
-        self.info_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        info_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        # Plot frame
-        plot_frame = ttk.LabelFrame(main_frame, text="Event Visualization", padding=10)
+        # Plot frame (takes all remaining space)
+        plot_frame = ttk.Frame(main_frame)
         plot_frame.pack(fill=tk.BOTH, expand=True)
         
         # Matplotlib canvas will be added here when an event is loaded
@@ -277,10 +217,18 @@ class EventAnnotationTool:
         self.root.bind('<Key-1>', self.handle_key_1)
         self.root.bind('<Key-2>', self.handle_key_2)
         self.root.bind('<Key-3>', self.handle_key_3)
-        for digit in range(4, 10):
-            self.root.bind(f'<Key-{digit}>', self.handle_key_digit)  # fish counts 4-9
+        for digit in [0, 4, 5, 6, 7, 8, 9]:
+            self.root.bind(f'<Key-{digit}>', self.handle_key_digit)  # fish counts 4-9 / lasso assignment 0-9
+        self.root.bind('<Key-n>', self.handle_key_n)  # lasso selection -> new fish
+        self.root.bind('<Escape>', lambda e: self.clear_selection())
         self.root.bind('<Key-a>', self.handle_key_a)  # accept the (corrected) tracker fish count
         self.root.bind('<Key-u>', self.handle_key_u)  # For 'unclear' fish count
+        self.root.bind('<Key-g>', self.handle_key_g)  # toggle the trail_gaps flag (fish leaves and reappears)
+        self.root.bind('<bracketleft>', lambda e: self.step_window(-1))
+        self.root.bind('<bracketright>', lambda e: self.step_window(+1))
+        self.root.bind('<Key-w>', lambda e: self.step_window(0))  # whole event
+        self.root.bind('<Key-h>', lambda e: None if self.keyboard_target_is_entry() else self.show_help())
+        self.root.bind('<Key-l>', lambda e: None if self.keyboard_target_is_entry() else self.lasso_mode())
         self.root.bind('<Left>', lambda e: self.previous_event())
         self.root.bind('<Right>', lambda e: self.next_event())
         self.root.bind('<space>', lambda e: self.play_audio())
@@ -316,6 +264,72 @@ class EventAnnotationTool:
         focus = self.root.focus_get()
         return focus == self.goto_entry or focus == self.correction_entry
 
+    def load_sample_csv(self):
+        """Load an annotation sample (03_3 output); the event list is then restricted to the sampled events
+        of the opened folder and the tracking folder is set from the CSV."""
+        filename = filedialog.askopenfilename(title="Load annotation sample CSV (03_3)",
+                                              filetypes=[("CSV files", "*.csv"), ("All files", "*.*")])
+        if not filename:
+            return
+        self.sample_df = pd.read_csv(filename)
+        self.sample_label.config(text=f"Sample: {os.path.basename(filename)} ({len(self.sample_df)} events)")
+        if self.events_folder:
+            self.load_event_files()
+
+    def apply_sample_filter(self):
+        """Keep only the events of the opened folder that are in the loaded sample; set the tracking folder."""
+        if self.sample_df is None or not self.events_folder:
+            return
+        folder_norm = os.path.normcase(os.path.normpath(str(self.events_folder)))
+        rows = self.sample_df[[os.path.normcase(os.path.normpath(str(p))) == folder_norm for p in self.sample_df['extraction_folder']]]
+        if len(rows) == 0:
+            messagebox.showwarning("Sample", "No sampled events in this folder")
+            return
+        stems = set(rows['base_stem'])
+        self.event_files = [e for e in self.event_files if e['base_stem'] in stems]
+        self.sample_strata = dict(zip(rows['base_stem'], rows['stratum']))
+        track_folder = Path(str(rows['track_folder'].iloc[0]))
+        if track_folder.exists():
+            self.tracking_folder = track_folder
+            n_tracked = len(list(self.tracking_folder.glob("*_tracked.csv")))
+            self.tracking_label.config(text=f"Tracking: {self.tracking_folder.name} ({n_tracked} tracked events)")
+        print(f"Sample filter: {len(self.event_files)} of the sampled events found in this folder")
+
+    def step_window(self, direction):
+        """Show a view_window_s long window of the current event (direction -1 / +1), or the whole event (0)."""
+        if self.current_audio is None:
+            return
+        n_samples = len(self.current_audio)
+        window_samples = int(self.view_window_s * self.sample_rate)
+        if direction == 0 or n_samples <= window_samples:
+            self.view_window = None
+        else:
+            start = 0 if self.view_window is None else self.view_window[0]
+            if self.view_window is not None:
+                start = max(0, min(n_samples - window_samples, start + direction * window_samples))
+            self.view_window = (start, min(n_samples, start + window_samples))
+        self.update_plot()
+
+    def lasso_mode(self):
+        """Leave the toolbar's zoom/pan mode so that left-drag on the lower panels is a lasso again."""
+        toolbar = getattr(self, 'toolbar', None)
+        if toolbar is None:
+            return
+        if toolbar.mode == 'zoom rect':
+            toolbar.zoom()
+        elif toolbar.mode == 'pan/zoom':
+            toolbar.pan()
+        self.correction_status.config(text="lasso mode (toolbar zoom/pan off)")
+
+    def handle_key_g(self, event):
+        """Key 'g' - toggle the trail_gaps flag of the current event (one fish that leaves and reappears)."""
+        if self.keyboard_target_is_entry() or not self.event_files:
+            return
+        event_id = self.event_files[self.current_event_idx]['base_stem']
+        flags = self.event_flags.setdefault(event_id, {})
+        flags['trail_gaps'] = not flags.get('trail_gaps', False)
+        self.update_info_text()
+
     def load_tracking(self, event_id):
         """Attach the tracker's fish_id to the current EOD table (matched on p1_idx and eod_channel);
         pulses without a tracked row get -1 (unassigned). Stored corrections are applied afterwards."""
@@ -335,7 +349,14 @@ class EventAnnotationTool:
             'n_unassigned': int((fish_ids < 0).sum()),
         }
         self.current_fish_ids = self.apply_corrections_to_ids(fish_ids, self.fish_corrections.get(event_id, {}))
+        pulse_corr = self.pulse_corrections.get(event_id, {})
+        if pulse_corr:
+            keys = [f"{p}_{c}" for p, c in zip(self.current_eod_table['p1_idx'].values, self.current_eod_table['eod_channel'].values)]
+            for i, key in enumerate(keys):
+                if key in pulse_corr:
+                    self.current_fish_ids[i] = int(pulse_corr[key])
         self.tracker_results[event_id]['corrected_n_fish'] = int(len(set(self.current_fish_ids[self.current_fish_ids >= 0])))
+        self.tracker_results[event_id]['n_pulse_corrections'] = len(pulse_corr)
 
     def apply_corrections_to_ids(self, fish_ids, corrections):
         fish_ids = fish_ids.copy()
@@ -359,14 +380,62 @@ class EventAnnotationTool:
             corrections['drop'].append(int(tokens[1]))
         elif tokens == ['r']:
             self.fish_corrections.pop(event_id, None)
+            self.pulse_corrections.pop(event_id, None)
+            self.lasso_selected = set()
         else:
             self.correction_status.config(text="Use: m A B | d A | r")
             return
         self.correction_var.set("")
         self.load_tracking(event_id)
-        self.correction_status.config(text=f"Corrections: {self.fish_corrections.get(event_id, {})}")
+        self.correction_status.config(text=f"Corrections: {self.fish_corrections.get(event_id, {})}, pulse-level: {len(self.pulse_corrections.get(event_id, {}))}")
+        self.keep_xlim = self.ax.get_xlim() if self.ax is not None else None
         self.update_display()
         self.root.focus_set()
+
+    def on_lasso(self, ax_panel, vertices):
+        """Lasso callback: pulses inside the drawn path on this panel join the selection; a digit then
+        assigns the selection to that fish (n = new fish), Escape clears it."""
+        if ax_panel not in self.panel_points or len(vertices) < 3:
+            return
+        x, y = self.panel_points[ax_panel]
+        if ax_panel.get_yscale() == 'log':
+            # path vertices are in data coordinates; compare in log space to match the display
+            path = MplPath([(vx, np.log10(vy)) for vx, vy in vertices if vy > 0])
+            inside = path.contains_points(np.column_stack([x, np.log10(np.where(y > 0, y, np.nan))]))
+        else:
+            path = MplPath(vertices)
+            inside = path.contains_points(np.column_stack([x, y]))
+        inside = inside & ~np.isnan(y)
+        self.lasso_selected |= set(np.where(inside)[0].tolist())
+        self.correction_status.config(text=f"{len(self.lasso_selected)} pulses selected: press fish number (0-9), n = new fish, Esc = clear")
+        self.keep_xlim = self.ax.get_xlim()
+        self.update_plot()
+
+    def assign_selection_to_fish(self, fish):
+        """Store the lasso selection as pulse-level corrections for the current event and re-render."""
+        if not self.lasso_selected or self.current_eod_table is None:
+            return
+        event_id = self.event_files[self.current_event_idx]['base_stem']
+        if fish == 'n':
+            fish = int(self.current_fish_ids.max()) + 1 if self.current_fish_ids is not None and len(self.current_fish_ids) else 0
+        corr = self.pulse_corrections.setdefault(event_id, {})
+        p1 = self.current_eod_table['p1_idx'].values
+        ch = self.current_eod_table['eod_channel'].values
+        for i in self.lasso_selected:
+            corr[f"{p1[i]}_{ch[i]}"] = int(fish)
+        n_assigned = len(self.lasso_selected)
+        self.lasso_selected = set()
+        self.load_tracking(event_id)
+        self.correction_status.config(text=f"{n_assigned} pulses -> fish {fish}; pulse-level corrections: {len(corr)}")
+        self.keep_xlim = self.ax.get_xlim()
+        self.update_display()
+
+    def clear_selection(self):
+        if self.lasso_selected:
+            self.lasso_selected = set()
+            self.correction_status.config(text="selection cleared")
+            self.keep_xlim = self.ax.get_xlim()
+            self.update_plot()
 
     def current_fish_count_from_tracker(self):
         if self.current_fish_ids is None:
@@ -420,10 +489,13 @@ class EventAnnotationTool:
             })
         
         print(f"Found {len(self.event_files)} event files")
+        self.sample_strata = {}
+        self.apply_sample_filter()
         
         # Initialize annotations and fish count dictionaries
         self.annotations = {e['base_stem']: 'unannotated' for e in self.event_files}
         self.fish_counts = {}  # Will be populated as needed
+        self.event_flags = {}
         
         # Update progress bar
         self.progress['maximum'] = len(self.event_files)
@@ -439,6 +511,9 @@ class EventAnnotationTool:
             
         # Clean up memory from previous event before loading new one
         self.cleanup_previous_event()
+        self.view_window = None
+        self.lasso_selected = set()
+        self.keep_xlim = None
             
         event_file = self.event_files[self.current_event_idx]
         event_id = event_file['base_stem']
@@ -682,43 +757,66 @@ class EventAnnotationTool:
         self.root.title(f"EOD Event Annotation Tool - {event_id} [{annotation_info['label']}]")
     
     def update_info_text(self):
-        """Update the event information text display"""
+        """Update the event information text display (three lines)"""
         event_id = self.event_files[self.current_event_idx]['base_stem']
-        
-        # Clear existing text
         self.info_text.delete(1.0, tk.END)
-        
-        # Event ID and annotation status
         current_annotation = self.annotations.get(event_id, 'unannotated')
         annotation_info = ANNOTATION_CATEGORIES[current_annotation]
         
-        info_text = f"Event ID: {event_id}\n"
-        info_text += f"Annotation: {annotation_info['label']}\n"
-        
-        # Add fish count information if available and applicable
+        line1 = f"{event_id}   |   {annotation_info['label']}"
         if current_annotation == 'clear_fish' and event_id in self.fish_counts:
-            fish_count = self.fish_counts[event_id]
-            info_text += f"Fish Count: {fish_count}\n"
+            line1 += f", {self.fish_counts[event_id]} fish"
+        if getattr(self, 'sample_strata', None) and event_id in self.sample_strata:
+            line1 += f"   |   stratum {self.sample_strata[event_id]}"
+        flags = self.event_flags.get(event_id, {})
+        line1 += f"   |   trail_gaps={flags.get('trail_gaps', False)}"
+        if self.view_window is not None:
+            line1 += f"   |   view {self.view_window[0] / self.sample_rate:.0f}-{self.view_window[1] / self.sample_rate:.0f} s"
         
-        # Features
+        line2 = ""
         if event_id in self.event_features:
             features = self.event_features[event_id]
-            info_text += f"Duration: {features.get('duration_seconds', 'N/A'):.1f}s, "
-            info_text += f"EODs: {features.get('n_eods', 'N/A')}, "
-            info_text += f"Channels: {features.get('n_channels_with_eods', 'N/A')}\n"
-            
+            line2 = (f"Duration {features.get('duration_seconds', float('nan')):.1f} s, EODs {features.get('n_eods', 'N/A')}, "
+                     f"channels {features.get('n_channels_with_eods', 'N/A')}")
             if 'mean_ipi' in features:
-                info_text += f"Mean IPI: {features['mean_ipi']:.3f}s, "
-                info_text += f"IPI CV: {features['ipi_cv']:.2f}, "
-                info_text += f"Amplitude CV: {features.get('amplitude_cv', 'N/A'):.2f}\n"
-
+                line2 += (f", mean IPI {features['mean_ipi']:.3f} s, IPI CV {features['ipi_cv']:.2f}, "
+                          f"amplitude CV {features.get('amplitude_cv', float('nan')):.2f}")
+        
+        line3 = ""
         if event_id in self.tracker_results and self.current_fish_ids is not None:
             tr = self.tracker_results[event_id]
-            per_fish = ', '.join(f"fish {f}: {n}" for f, n in tr['tracker_pulses_per_fish'].items())
-            info_text += (f"Tracker: {tr['tracker_n_fish']} fish ({per_fish}; unassigned {tr['n_unassigned']}); "
-                          f"after corrections: {tr['corrected_n_fish']} fish  ['a' accepts this count]\n")
+            per_fish = ', '.join(f"{f}: {n}" for f, n in tr['tracker_pulses_per_fish'].items())
+            line3 = (f"Tracker {tr['tracker_n_fish']} fish (pulses {per_fish}; unassigned {tr['n_unassigned']})   ->   "
+                     f"corrected {tr['corrected_n_fish']} fish, {tr.get('n_pulse_corrections', 0)} pulse corrections   ['a' accepts]")
         
-        self.info_text.insert(1.0, info_text)
+        self.info_text.insert(1.0, line1 + "\n" + line2 + "\n" + line3)
+
+    def show_help(self):
+        """Keyboard shortcuts and the labelling convention in a popup."""
+        text = (
+            "Keys\n"
+            "  1 / 2 / 3   clear fish / clear noise / ambiguous\n"
+            "  while waiting for a fish count: 1-9 count, a = accept corrected tracker count, u = unclear\n"
+            "  g   toggle trail_gaps (one fish that leaves and reappears)\n"
+            "  [ ] step 30 s windows, w whole event; Left/Right previous/next event; Space play audio\n"
+            "  Lasso (left drag) on the IPI / location / amplitude panel selects pulses; l = leave toolbar zoom/pan mode\n"
+            "  (or click the active toolbar button again); then 0-9 assigns them to that fish, n = new fish, Esc clears\n"
+            "  Correction entry: m A B = merge fish B into A, d A = drop fish A, r = reset all corrections of the event\n\n"
+            "Convention\n"
+            "  1 fish: one continuous trail (one IPI band, one location trace, one amplitude envelope);\n"
+            "          pauses with the same width / location / IPI before and after = 1 fish + trail_gaps\n"
+            "  2 fish: two trails separable by eye. Merge tracker over-splits (m A B), drop spurious fragments (d A),\n"
+            "          separate mixed fish_ids with the lasso, then accept the count with 'a'\n"
+            "  Not separable with reasonable effort: fish count 'u' (unclear). Noise: 2.\n"
+        )
+        popup = tk.Toplevel(self.root)
+        popup.title("Help")
+        popup.transient(self.root)
+        label = tk.Label(popup, text=text, justify=tk.LEFT, font=('Consolas', 10), padx=12, pady=10)
+        label.pack()
+        popup.bind('<Escape>', lambda e: popup.destroy())
+        popup.bind('<Key-h>', lambda e: popup.destroy())
+        popup.focus_set()
     
     def update_plot(self):
         """Update the matplotlib plot with memory optimization"""
@@ -750,14 +848,15 @@ class EventAnnotationTool:
         if self.current_audio is None:
             return
         
-        # Create matplotlib figure; with tracking data two extra panels (IPI, location) share the x-axis
+        # Create matplotlib figure; with tracking data three extra panels (IPI, location, amplitude) share the x-axis
         show_tracks = self.current_fish_ids is not None and self.current_eod_table is not None
         if show_tracks:
-            self.fig = plt.figure(figsize=(14, 9))
-            gs = gridspec.GridSpec(3, 1, height_ratios=[3, 1, 1], hspace=0.08, figure=self.fig)
+            self.fig = plt.figure(figsize=(14, 10))
+            gs = gridspec.GridSpec(4, 1, height_ratios=[2.2, 1, 1, 1], hspace=0.06, figure=self.fig, left=0.05, right=0.99, top=0.96, bottom=0.05)
             self.ax = self.fig.add_subplot(gs[0])
             ax_ipi = self.fig.add_subplot(gs[1], sharex=self.ax)
             ax_loc = self.fig.add_subplot(gs[2], sharex=self.ax)
+            ax_amp = self.fig.add_subplot(gs[3], sharex=self.ax)
             fish_present = sorted(set(self.current_fish_ids))
             fish_color = {f: (UNASSIGNED_COLOR if f < 0 else FISH_COLORS[i % len(FISH_COLORS)])
                           for i, f in enumerate([f for f in fish_present if f >= 0])}
@@ -765,26 +864,44 @@ class EventAnnotationTool:
             marker_colors = np.array([fish_color[f] for f in self.current_fish_ids])
             x_pulse = self.current_eod_table['p1_idx'].values
             t_pulse = pd.to_datetime(self.current_eod_table['timestamp']).values.astype('datetime64[ns]').astype(np.int64) / 1e9
+            # per-pulse panel values (IPI to the previous pulse of the same fish; NaN for the first), kept for the lasso
+            y_ipi = np.full(len(x_pulse), np.nan)
+            for f in fish_present:
+                idx = np.where(self.current_fish_ids == f)[0]
+                idx = idx[np.argsort(x_pulse[idx])]
+                y_ipi[idx[1:]] = np.diff(t_pulse[idx]) * 1e3
+            y_loc = self.current_eod_table['pulse_location'].values if 'pulse_location' in self.current_eod_table.columns else np.full(len(x_pulse), np.nan)
+            y_amp = self.current_eod_table['eod_amplitude'].values
+            self.panel_points = {ax_ipi: (x_pulse, y_ipi), ax_loc: (x_pulse, y_loc), ax_amp: (x_pulse, y_amp)}
             for f in fish_present:
                 m = self.current_fish_ids == f
-                order = np.argsort(x_pulse[m])
-                xs = x_pulse[m][order]
-                ipi = np.diff(t_pulse[m][order])
                 label = f'fish {f} (n={m.sum()})' if f >= 0 else f'unassigned (n={m.sum()})'
-                ax_ipi.plot(xs[1:], ipi * 1e3, '.', ms=3, color=fish_color[f], label=label)
-                if 'pulse_location' in self.current_eod_table.columns:
-                    ax_loc.plot(xs, self.current_eod_table['pulse_location'].values[m][order], '.', ms=3, color=fish_color[f])
+                ax_ipi.plot(x_pulse[m], y_ipi[m], '.', ms=3, color=fish_color[f], label=label)
+                ax_loc.plot(x_pulse[m], y_loc[m], '.', ms=3, color=fish_color[f])
+                ax_amp.plot(x_pulse[m], y_amp[m], '.', ms=3, color=fish_color[f])
+            if len(self.lasso_selected) > 0:
+                sel = np.array(sorted(self.lasso_selected))
+                for ax_p, (xp, yp) in self.panel_points.items():
+                    ax_p.plot(xp[sel], yp[sel], 'o', ms=7, mfc='none', mec='k', mew=1.2)
             ax_ipi.set_ylabel('IPI (ms)')
             ax_ipi.set_yscale('log')
             ax_ipi.legend(loc='upper right', fontsize=7, ncol=4)
             ax_ipi.grid(True, alpha=0.3)
             ax_loc.set_ylabel('location (el.)')
-            ax_loc.set_xlabel('Sample')
             ax_loc.grid(True, alpha=0.3)
+            ax_amp.set_ylabel('amplitude (V)')
+            ax_amp.set_yscale('log')
+            ax_amp.set_xlabel('Sample')
+            ax_amp.grid(True, alpha=0.3)
             plt.setp(self.ax.get_xticklabels(), visible=False)
             plt.setp(ax_ipi.get_xticklabels(), visible=False)
+            plt.setp(ax_loc.get_xticklabels(), visible=False)
+            # lasso selection of pulses on the three lower panels (references kept, else garbage-collected)
+            self.lasso_selectors = [LassoSelector(ax_p, onselect=lambda verts, ax_p=ax_p: self.on_lasso(ax_p, verts),
+                                                  useblit=False, button=1) for ax_p in self.panel_points]
         else:
             self.fig, self.ax = plt.subplots(1, 1, figsize=(14, 6))
+            self.fig.subplots_adjust(left=0.05, right=0.99, top=0.95, bottom=0.07)
         
         # Plot differential signals with aggressive downsampling for very large files
         n_channels = self.current_audio.shape[1] if len(self.current_audio.shape) > 1 else 1
@@ -886,9 +1003,10 @@ class EventAnnotationTool:
             del x_coords, y_coords
         
         # Formatting
-        self.ax.set_xlabel('Sample')
+        if not show_tracks:
+            self.ax.set_xlabel('Sample')
         self.ax.set_ylabel('Amplitude (stacked by channel)' if n_channels > 1 else 'Amplitude')
-        self.ax.legend(loc='upper right')
+        self.ax.legend(loc='upper right', fontsize=7, ncol=4)
         self.ax.grid(True, alpha=0.3)
         
         # Color-code by annotation
@@ -896,7 +1014,7 @@ class EventAnnotationTool:
         current_annotation = self.annotations.get(event_id, 'unannotated')
         bg_color = ANNOTATION_CATEGORIES[current_annotation]['color']
         
-        self.ax.set_title(f'{event_id} - {ANNOTATION_CATEGORIES[current_annotation]["label"]}', 
+        self.ax.set_title(f'{event_id} - {ANNOTATION_CATEGORIES[current_annotation]["label"]}', fontsize=10, pad=2,
                          bbox=dict(boxstyle="round,pad=0.3", facecolor=bg_color, alpha=0.3))
         
         # Draw part boundaries for split events
@@ -920,6 +1038,17 @@ class EventAnnotationTool:
         self.toolbar_frame.pack(fill=tk.X, side=tk.TOP)
         self.toolbar = NavigationToolbar2Tk(self.canvas, self.toolbar_frame)
         self.toolbar.update()
+        
+        # Window stepper / zoom kept across a re-render (lasso assignment, correction): the full view is
+        # pushed to the toolbar's history first, so that "home" returns to the whole event
+        if self.keep_xlim is not None or self.view_window is not None:
+            self.toolbar.push_current()
+            if self.keep_xlim is not None:
+                self.ax.set_xlim(self.keep_xlim)
+                self.keep_xlim = None
+            else:
+                self.ax.set_xlim(self.view_window[0], self.view_window[1])
+            self.toolbar.push_current()
         
         # Now pack the canvas (it will appear below the toolbar)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
@@ -1018,7 +1147,9 @@ class EventAnnotationTool:
     def handle_key_1(self, event):
         """Handle key '1' - annotate as clear fish or set fish count to 1"""
         if not self.keyboard_target_is_entry():
-            if self.waiting_for_fish_count:
+            if self.lasso_selected:
+                self.assign_selection_to_fish(1)
+            elif self.waiting_for_fish_count:
                 self.set_fish_count('1')
             else:
                 self.annotate_event('clear_fish')
@@ -1026,7 +1157,9 @@ class EventAnnotationTool:
     def handle_key_2(self, event):
         """Handle key '2' - annotate as clear noise or set fish count to 2"""
         if not self.keyboard_target_is_entry():
-            if self.waiting_for_fish_count:
+            if self.lasso_selected:
+                self.assign_selection_to_fish(2)
+            elif self.waiting_for_fish_count:
                 self.set_fish_count('2')
             else:
                 self.annotate_event('clear_noise')
@@ -1034,15 +1167,26 @@ class EventAnnotationTool:
     def handle_key_3(self, event):
         """Handle key '3' - annotate as ambiguous, or set fish count to 3 while waiting for a count"""
         if not self.keyboard_target_is_entry():
-            if self.waiting_for_fish_count:
+            if self.lasso_selected:
+                self.assign_selection_to_fish(3)
+            elif self.waiting_for_fish_count:
                 self.set_fish_count('3')
             else:
                 self.annotate_event('ambiguous')
 
     def handle_key_digit(self, event):
-        """Keys 4-9 - fish count while waiting for a count"""
-        if not self.keyboard_target_is_entry() and self.waiting_for_fish_count:
+        """Keys 0, 4-9 - assign a lasso selection to that fish, or fish count while waiting for a count"""
+        if self.keyboard_target_is_entry():
+            return
+        if self.lasso_selected:
+            self.assign_selection_to_fish(int(event.char))
+        elif self.waiting_for_fish_count and event.char != '0':
             self.set_fish_count(event.char)
+
+    def handle_key_n(self, event):
+        """Key 'n' - assign a lasso selection to a new fish"""
+        if not self.keyboard_target_is_entry() and self.lasso_selected:
+            self.assign_selection_to_fish('n')
 
     def handle_key_a(self, event):
         """Key 'a' - accept the (corrected) tracker fish count"""
@@ -1230,6 +1374,9 @@ class EventAnnotationTool:
                 'annotations': self.annotations,
                 'fish_counts': self.fish_counts,
                 'fish_corrections': self.fish_corrections,
+                'pulse_corrections': self.pulse_corrections,
+                'event_flags': self.event_flags,
+                'sample_strata': getattr(self, 'sample_strata', {}),
                 'tracker_results': self.tracker_results,
                 'features': self.event_features,
                 'metadata': {
@@ -1264,6 +1411,8 @@ class EventAnnotationTool:
                 self.annotations.update(load_data.get('annotations', {}))
                 self.fish_counts.update(load_data.get('fish_counts', {}))
                 self.fish_corrections.update(load_data.get('fish_corrections', {}))
+                self.pulse_corrections.update(load_data.get('pulse_corrections', {}))
+                self.event_flags.update(load_data.get('event_flags', {}))
                 self.tracker_results.update(load_data.get('tracker_results', {}))
                 self.event_features.update(load_data.get('features', {}))
                 
@@ -1312,6 +1461,9 @@ class EventAnnotationTool:
                         row['tracker_n_fish'] = tracker.get('tracker_n_fish')
                         row['corrected_n_fish'] = tracker.get('corrected_n_fish')
                         row['fish_corrections'] = json.dumps(self.fish_corrections[event_id]) if event_id in self.fish_corrections else ''
+                        row['n_pulse_corrections'] = len(self.pulse_corrections.get(event_id, {}))
+                        row['trail_gaps'] = self.event_flags.get(event_id, {}).get('trail_gaps', False)
+                        row['sample_stratum'] = getattr(self, 'sample_strata', {}).get(event_id, '')
                         row.update(features)
                         dataset_rows.append(row)
                 
@@ -1367,6 +1519,8 @@ class EventAnnotationTool:
         print("  2 - Clear Noise") 
         print("  3 - Ambiguous")
         print("  while waiting for a fish count: 1-9, a = accept tracker count, u = unclear")
+        print("  g - toggle trail_gaps flag; [ ] - step 30 s windows, w - whole event")
+        print("  Lasso on the IPI/location/amplitude panel selects pulses; 0-9 assigns them to that fish, n = new fish, Esc = clear")
         print("  Fish correction entry: m A B (merge B into A), d A (drop A), r (reset)")
         print("  ← → - Navigate events")
         print("  Space - Play audio")
