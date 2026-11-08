@@ -56,7 +56,7 @@ bool_keys = {
 }
 int_keys = {
     "duplicate_samples", "interp_factor", "search_window",
-    "min_eods_premerge", "min_eods_postmerge"
+    "min_eods_premerge", "min_eods_postmerge", "min_amplitude_run"
 }
 str_keys = {"source", "extraction_method", "detection_method", "location_method", "extraction_window", "pulse_mode", "waveform_extraction"}
 
@@ -83,7 +83,7 @@ parameters.setdefault("envelope_shadow_us", 5000.0)
 parameters.setdefault("envelope_shadow_fraction", 0.4)
 parameters.setdefault("envelope_highpass_hz", 8.0)
 parameters.setdefault("envelope_biphasic_merge_us", 2000.0)
-parameters.setdefault("triphasic_search", False)
+parameters.setdefault("triphasic_search", True)
 
 use_ml_filtering = False
 classifier_path = ""

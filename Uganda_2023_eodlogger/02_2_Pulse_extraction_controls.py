@@ -306,7 +306,7 @@ for n, individual in enumerate(individual_info):
                 search_window=parameters['search_window'],
                 symmetry_threshold=parameters.get('symmetry_threshold', 0.3),
                 pulse_mode=pulse_mode,
-                triphasic_search=parameters.get('triphasic_search', False)
+                triphasic_search=parameters.get('triphasic_search', True)
             )
         
         # extract_pulse_snippets(

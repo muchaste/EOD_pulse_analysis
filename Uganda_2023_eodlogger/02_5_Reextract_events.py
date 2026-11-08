@@ -54,12 +54,12 @@ from pulse_functions import (
     create_channel_events,
     merge_channel_events,
     filter_events,
+    event_amplitude_statistics,
     create_event_plots,
 )
 
 # Parameter overrides applied on top of the source folder's config.cfg (empty dict = same parameters)
 parameter_overrides = {
-    'triphasic_search': False,
 }
 margin_tolerance_s = 0.002   # pulses this far outside eod_start_time..eod_end_time are still kept
 min_source_match_fraction = 0.5   # merged events in the window with fewer source matches (1 ms) were separate events in the source run: dropped
@@ -81,7 +81,7 @@ bool_keys = {
 }
 int_keys = {
     "duplicate_samples", "interp_factor", "search_window",
-    "min_eods_premerge", "min_eods_postmerge"
+    "min_eods_premerge", "min_eods_postmerge", "min_amplitude_run"
 }
 str_keys = {"source", "extraction_method", "detection_method", "location_method", "extraction_window", "pulse_mode", "waveform_extraction"}
 parameters = {}
@@ -98,8 +98,9 @@ parameters.setdefault("pulse_mode", "biphasic")
 parameters.setdefault("extraction_method", "differential")
 parameters.setdefault("location_method", "auto")
 parameters.setdefault("detection_method", "per_channel")
-parameters.setdefault("triphasic_search", False)
+parameters.setdefault("triphasic_search", True)
 parameters.setdefault("ignore_channel", False)
+parameters.setdefault("min_amplitude_run", 1)   # configs without the key use the old maximum rule
 parameters.setdefault("split_duration", 0.0)
 parameters.update(parameter_overrides)
 
@@ -349,7 +350,8 @@ for _, event_row in source_summaries.iterrows():
     # Channel events, merge and event-size filters as in process_events
     channel_events = create_channel_events(eod_table, parameters['max_ipi_seconds'], ignore_channel=parameters['ignore_channel'])
     if parameters['pre_merge_filtering']:
-        channel_events = filter_events(channel_events, parameters['min_eods_premerge'], parameters['min_amplitude'])
+        channel_events = filter_events(channel_events, parameters['min_eods_premerge'], parameters['min_amplitude'],
+                                       min_run_pulses=parameters['min_amplitude_run'], max_ipi_seconds=parameters['max_ipi_seconds'])
     if len(channel_events) == 0:
         print("  no channel events left after pre-merge filtering")
         continue
@@ -361,7 +363,8 @@ for _, event_row in source_summaries.iterrows():
         merged_events['event_start_time'] = merged_events['channel_start_time']
         merged_events['event_end_time'] = merged_events['channel_end_time']
     if parameters['post_merge_filtering']:
-        merged_events = filter_events(merged_events, parameters['min_eods_postmerge'], parameters['min_amplitude'])
+        merged_events = filter_events(merged_events, parameters['min_eods_postmerge'], parameters['min_amplitude'],
+                                      min_run_pulses=parameters['min_amplitude_run'], max_ipi_seconds=parameters['max_ipi_seconds'])
     if len(merged_events) == 0:
         print("  no events left after post-merge filtering")
         continue
@@ -420,6 +423,8 @@ for _, event_row in source_summaries.iterrows():
         'median_ipi_seconds': event_eods['channel_ipi_seconds'].median(),
         'mean_amplitude': event_eods['eod_amplitude'].mean(),
         'max_amplitude': event_eods['eod_amplitude'].max(),
+        **event_amplitude_statistics(event_eods['timestamp_dt'].values.astype('datetime64[ns]').astype(np.int64) / 1e9,
+                                     event_eods['eod_amplitude'].values, k=5, max_ipi=parameters['max_ipi_seconds']),
         'mean_width_ms': event_eods['eod_width_us'].mean() / 1000,
         'n_files': event_eods['filename'].nunique(),
         'file_names': ','.join(event_eods['filename'].unique()),

@@ -105,6 +105,7 @@ if parameters['create_events']:
     print(f"  max_merge_gap_seconds: {parameters['max_merge_gap_seconds']}")
     print(f"  min_eods_postmerge: {parameters['min_eods_postmerge']}")
     print(f"  min_amplitude: {parameters['min_amplitude']}")
+    print(f"  min_amplitude_run: {parameters.get('min_amplitude_run', 1)}")
 
 # List all .wav files
 filelist = glob.glob(input_path+'/*.wav', recursive=True)
@@ -463,7 +464,7 @@ for n, filepath in enumerate(file_set['filename']):
                 search_window = parameters['search_window'],
                 symmetry_threshold=parameters.get('symmetry_threshold', 0.3),
                 pulse_mode=parameters.get('pulse_mode', 'biphasic'),
-                triphasic_search=parameters.get('triphasic_search', False)
+                triphasic_search=parameters.get('triphasic_search', True)
             )
 
         if len(eod_snippets) == 0:

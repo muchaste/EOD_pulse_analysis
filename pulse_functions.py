@@ -270,7 +270,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
                            pca_component=0, pca_interp_points=100,
                            window_mode="fixed", window_factor=7, window_length = 4000,
                            search_window=10, symmetry_threshold=0.3, pulse_mode='biphasic',
-                           triphasic_search=False, pca_common_average=True):
+                           triphasic_search=True, pca_common_average=True):
     """
     Extract and analyze EOD snippets with variable widths based on detected pulse widths.
     For 2-D multi-channel data (finds polarity flips and extracts differential signals OR
@@ -353,12 +353,14 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
         Length (in microseconds) of waveform snippets to extract around each pulse midpoint.
         Only used when window_mode='fixed'.
     triphasic_search : bool, optional
-        If True, search for a missed first phase (P1) before the detected pair and
+        If True (default), search for a missed first phase (P1) before the detected pair and
         for a trailing phase (P3) after it (Case A/B); a found P1 replaces the detected landmark
-        and the detected pair becomes P2/P3. Candidates must reach half the larger landmark
-        amplitude and lie within twice the detected P1-P2 separation. If False (default since
-        2026-11-03: on Uganda field data the search mostly picked noise bumps or neighbouring
-        pulses), P1/P2 stay at the re-detected landmarks and P3 is not searched
+        and the detected pair becomes P2/P3. Since 2026-11-03 the search is bounded: candidates
+        must reach half the larger landmark amplitude and lie within twice the detected P1-P2
+        separation (the unbounded search picked noise bumps and neighbouring pulses on field
+        data). Triphasic species need the search: a small first or third phase regularly stays
+        below the detection threshold, and without it the orientation of a fish's pulses flips
+        with amplitude. If False, P1/P2 stay at the re-detected landmarks and P3 is not searched
         (snippet_p3_idc / final_p3_idc are -1). Never run for pulse_mode='monophasic'.
         A triphasic pulse that the detector split into (P1, P2) and (P2, P3) is re-joined
         afterwards by remove_duplicates (merge_shared_landmark_pulses), which sets P3 without
@@ -3819,29 +3821,94 @@ def merge_channel_events(channel_events, max_merge_gap_seconds, verbose=False):
         return pd.DataFrame()
     
 
-def filter_events(events_to_filter, min_eods_per_event, min_amplitude):
+def sustained_amplitude(timestamps, amplitudes, k=5, max_ipi=0.5):
+    """
+    Largest amplitude level that k consecutive pulses reach together.
+
+    Over all windows of k consecutive pulses (sorted by time) whose successive intervals are all
+    shorter than max_ipi, the minimum amplitude of the window is taken; the result is the maximum of
+    these minima. An event passes the run rule "at least k consecutive pulses >= E" exactly when
+    sustained_amplitude(...) >= E. Unlike the maximum amplitude it is not set by isolated spikes, and
+    unlike a fraction of pulses it does not depend on the event length. k = 1 returns the maximum.
+
+    Parameters
+    ----------
+    timestamps : array-like of float
+        Pulse times in seconds.
+    amplitudes : array-like of float
+        Pulse amplitudes (eod_amplitude).
+    k : int
+        Number of consecutive pulses (5 = min_eods_premerge of the field presets).
+    max_ipi : float
+        Maximum interval in seconds between successive pulses of a window.
+
+    Returns
+    -------
+    float
+        Sustained amplitude, 0.0 if there is no window of k pulses.
+    """
+    t = np.asarray(timestamps, dtype=float)
+    a = np.asarray(amplitudes, dtype=float)
+    if len(t) == 0:
+        return 0.0
+    if k <= 1:
+        return float(np.max(a))
+    if len(t) < k:
+        return 0.0
+    order = np.argsort(t, kind='stable')
+    t = t[order]
+    a = a[order]
+    window_t = np.lib.stride_tricks.sliding_window_view(t, k)
+    window_a = np.lib.stride_tricks.sliding_window_view(a, k)
+    contiguous = np.diff(window_t, axis=1).max(axis=1) < max_ipi
+    if not contiguous.any():
+        return 0.0
+    return float(window_a.min(axis=1)[contiguous].max())
+
+
+def event_amplitude_statistics(timestamps, amplitudes, k=5, max_ipi=0.5):
+    """Amplitude statistics of an event for the event summary: median, 90th percentile and the
+    sustained amplitude of k consecutive pulses (see sustained_amplitude); every event threshold on
+    the sustained amplitude can then be applied after extraction."""
+    a = np.asarray(amplitudes, dtype=float)
+    return {
+        'median_amplitude': float(np.median(a)),
+        'p90_amplitude': float(np.percentile(a, 90)),
+        'sustained_amplitude': sustained_amplitude(timestamps, a, k=k, max_ipi=max_ipi),
+    }
+
+
+def filter_events(events_to_filter, min_eods_per_event, min_amplitude, min_run_pulses=1, max_ipi_seconds=0.5):
     """
     Filter events based on size and amplitude criteria.
+    
+    The amplitude criterion is the run rule: an event needs at least min_run_pulses consecutive pulses
+    (successive intervals < max_ipi_seconds) with amplitude >= min_amplitude, i.e.
+    sustained_amplitude(k=min_run_pulses) >= min_amplitude. It is robust against isolated spikes and does
+    not depend on the event length. min_run_pulses = 1 reduces to "at least one pulse >= min_amplitude"
+    (the maximum rule of all earlier extractions and of the frozen Suriname scripts, which call this
+    function with three arguments).
     
     Parameters:
     -----------
     events_to_filter : pd.DataFrame
-        Events that don't reach file end and need filtering
+        Events that don't reach file end and need filtering (channel events or merged events; the
+        'timestamp_dt' column from create_channel_events is needed for min_run_pulses > 1)
     min_eods_per_event : int
         Minimum number of EODs required per event
     min_amplitude : float
-        Minimum amplitude threshold for events
-    event_counter : int
-        Current global event counter
-        
+        Amplitude level of the run rule
+    min_run_pulses : int, default 1
+        Number of consecutive pulses at or above min_amplitude (the field presets use 5)
+    max_ipi_seconds : float, default 0.5
+        Interval limit between successive pulses of a run
+    
     Returns:
     --------
     events_filtered : pd.DataFrame
-        Filtered events with reassigned sequential IDs
-    event_counter : int
-        Updated global event counter
+        Filtered events
     """
-    print(f"  Removing events with <{min_eods_per_event} pulses OR no pulse ≥{min_amplitude} amplitude...")
+    print(f"  Removing events with <{min_eods_per_event} pulses OR no run of {min_run_pulses} consecutive pulses ≥{min_amplitude} amplitude...")
 
     if 'channel_event_id' in events_to_filter.columns and 'merged_event_id' not in events_to_filter.columns:
         id_col = 'channel_event_id'
@@ -3855,9 +3922,18 @@ def filter_events(events_to_filter, min_eods_per_event, min_amplitude):
     print(f"  Event sizes: min={event_sizes.min()}, max={event_sizes.max()}, mean={event_sizes.mean():.1f}")
     valid_size_ids = event_sizes[event_sizes >= min_eods_per_event].index
 
-    # Criterion 2: Amplitude filter (at least one pulse with amplitude ≥ min_amplitude)
-    event_max_amplitudes = events_to_filter.groupby(id_col)['eod_amplitude'].max()
-    valid_amplitude_ids = event_max_amplitudes[event_max_amplitudes >= min_amplitude].index
+    # Criterion 2: Amplitude filter (run rule)
+    if 'timestamp_dt' in events_to_filter.columns:
+        time_column = events_to_filter['timestamp_dt'].values.astype('datetime64[ns]').astype(np.int64) / 1e9
+    elif min_run_pulses <= 1:
+        time_column = np.zeros(len(events_to_filter))
+    else:
+        raise ValueError("filter_events needs the 'timestamp_dt' column for min_run_pulses > 1")
+    amplitude_column = events_to_filter['eod_amplitude'].values
+    event_amplitude = pd.Series({
+        event_id: sustained_amplitude(time_column[rows], amplitude_column[rows], k=min_run_pulses, max_ipi=max_ipi_seconds)
+        for event_id, rows in events_to_filter.groupby(id_col).indices.items()})
+    valid_amplitude_ids = event_amplitude[event_amplitude >= min_amplitude].index
 
     # Combined filter: channel events must pass BOTH criteria
     valid_event_ids = valid_size_ids.intersection(valid_amplitude_ids)
@@ -3871,7 +3947,7 @@ def filter_events(events_to_filter, min_eods_per_event, min_amplitude):
     print(f"  Events passing size filter: {len(valid_event_ids)} / {len(event_sizes)}")
     print(f"    Original channel events: {n_total}")
     print(f"    Failed size criterion (<{min_eods_per_event} pulses): {n_removed_size}")
-    print(f"    Failed amplitude criterion (max amplitude <{min_amplitude}): {n_removed_amplitude}")
+    print(f"    Failed amplitude criterion (no run of {min_run_pulses} pulses ≥{min_amplitude}): {n_removed_amplitude}")
     print(f"    Remaining after combined filter: {len(valid_event_ids)}")
     print(f"    Total removed: {n_removed_total}")
 
@@ -3967,7 +4043,9 @@ def process_events(state, parameters, rate, output_path, data, file_start_time, 
         return
 
     if parameters['pre_merge_filtering']:
-        filtered_channel_events = filter_events(channel_events, parameters['min_eods_premerge'], parameters['min_amplitude'])
+        filtered_channel_events = filter_events(channel_events, parameters['min_eods_premerge'], parameters['min_amplitude'],
+                                                min_run_pulses=parameters.get('min_amplitude_run', 1),
+                                                max_ipi_seconds=parameters['max_ipi_seconds'])
     else:
         filtered_channel_events = channel_events.copy()
 
@@ -4114,7 +4192,9 @@ def process_events(state, parameters, rate, output_path, data, file_start_time, 
 
     # Post-merge filter: remove events based on size AND amplitude criteria
     if parameters['post_merge_filtering']:
-        final_events = filter_events(events_to_filter, parameters['min_eods_postmerge'], parameters['min_amplitude'])
+        final_events = filter_events(events_to_filter, parameters['min_eods_postmerge'], parameters['min_amplitude'],
+                                     min_run_pulses=parameters.get('min_amplitude_run', 1),
+                                     max_ipi_seconds=parameters['max_ipi_seconds'])
     else:
         final_events = events_to_filter.copy()
 
@@ -4171,6 +4251,8 @@ def process_events(state, parameters, rate, output_path, data, file_start_time, 
             'median_ipi_seconds': event_eods['channel_ipi_seconds'].median(),
             'mean_amplitude': event_eods['eod_amplitude'].mean(),
             'max_amplitude': event_eods['eod_amplitude'].max(),
+            **event_amplitude_statistics(event_eods['timestamp_dt'].values.astype('datetime64[ns]').astype(np.int64) / 1e9,
+                                         event_eods['eod_amplitude'].values, k=5, max_ipi=parameters['max_ipi_seconds']),
             'mean_width_ms': event_eods['eod_width_us'].mean() / 1000 if 'eod_width_us' in event_eods.columns else 0,
             'n_files': event_eods['filename'].nunique() if 'filename' in event_eods.columns else 1,
             'file_names': ','.join(event_eods['filename'].unique()) if 'filename' in event_eods.columns else 'unknown',

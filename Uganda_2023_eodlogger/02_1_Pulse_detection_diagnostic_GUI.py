@@ -63,7 +63,7 @@ BIPHASIC_PRESET = {
     'length_extraction': 'variable',
     'length_factor': 10,
     'search_window': 10,
-    'triphasic_search': False,
+    'triphasic_search': True,
     'envelope_peak_window_us': 1000,
     'envelope_shadow_us': 5000,
     'envelope_shadow_fraction': 0.4,
@@ -95,7 +95,7 @@ MONOPHASIC_PRESET = {
     'length_extraction': 'variable',
     'length_factor': 10,
     'search_window': 200,
-    'triphasic_search': False,
+    'triphasic_search': True,
     'envelope_peak_window_us': 1000,
     'envelope_shadow_us': 5000,
     'envelope_shadow_fraction': 0.4,
@@ -1460,7 +1460,7 @@ class PulseDiagnosticTool:
                         search_window=self.parameters['search_window'],
                         symmetry_threshold=self.parameters.get('symmetry_threshold', 0.3),
                         pulse_mode=self.parameters['pulse_mode'],
-                        triphasic_search=self.parameters.get('triphasic_search', False)
+                        triphasic_search=self.parameters.get('triphasic_search', True)
                     )
 
                 print(f"    Filtering for differential pulses...{len(unique_pulses)} total, {np.sum(is_differential)} differential")

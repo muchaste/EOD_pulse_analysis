@@ -45,6 +45,7 @@ FIELD_BIPHASIC_PRESET = {
     'envelope_highpass_hz': 8.0,
     'envelope_biphasic_merge_us': 2000,
     'min_amplitude': 0.04,
+    'min_amplitude_run': 5,
     'max_ipi_seconds': 5.0,
     'min_eods_premerge': 5,
     'max_merge_gap_seconds': 0.5,
@@ -81,6 +82,7 @@ FIELD_MONOPHASIC_PRESET = {
     'envelope_highpass_hz': 8.0,
     'envelope_biphasic_merge_us': 2000,
     'min_amplitude': 0.001,
+    'min_amplitude_run': 1,
     'max_ipi_seconds': 20.0,
     'min_eods_premerge': 5,
     'max_merge_gap_seconds': 20.0,
@@ -368,8 +370,8 @@ class ParameterConfigGUI:
         detection_combo.bind('<<ComboboxSelected>>', self.update_extraction_method_options)
 
         # Case A/B search for a missed first phase (P1) / trailing phase (P3) in extract_pulse_snippets
-        # (off by default since 2026-11-03: on field data it mostly picked noise, bug 17)
-        self.param_vars['triphasic_search'] = tk.BooleanVar(value=False)
+        # (bounded search; on by default, needed for triphasic species, bug 17/18)
+        self.param_vars['triphasic_search'] = tk.BooleanVar(value=True)
         ttk.Checkbutton(pulse_frame, text="Triphasic P1/P3 search",
                         variable=self.param_vars['triphasic_search']).grid(
             row=next_row+6, column=3, columnspan=2, sticky=tk.W, pady=2)
@@ -392,7 +394,8 @@ class ParameterConfigGUI:
         
         # Left column - Numeric parameters
         event_params = [
-            ('min_amplitude', 'Min Event Amplitude:', 0.04, float),
+            ('min_amplitude', 'Event Amplitude Level (of the run):', 0.04, float),
+            ('min_amplitude_run', 'Min Consecutive Pulses at/above Level (1 = max rule):', 5, int),
             ('max_ipi_seconds', 'Max Inter-Pulse Interval (s):', 5.0, float),
             ('min_eods_premerge', 'Min EODs Pre-Merge:', 5, int),
             ('max_merge_gap_seconds', 'Max Merge Gap (s):', 0.5, float),
@@ -643,6 +646,9 @@ class ParameterConfigGUI:
                             var.set(float(value_str))
                         else:  # StringVar
                             var.set(value_str)
+                # configs saved before the run rule existed keep the old maximum rule
+                if 'min_amplitude_run' in self.param_vars and 'min_amplitude_run' not in config['Parameters']:
+                    self.param_vars['min_amplitude_run'].set(1)
             self.update_extraction_method_options()
             
             messagebox.showinfo("Success", f"Configuration loaded from:\n{filename}")
@@ -905,8 +911,8 @@ class ControlParameterConfigGUI:
         pulse_mode_combo.bind('<<ComboboxSelected>>', self.apply_pulse_mode_preset)
 
         # Case A/B search for a missed first phase (P1) / trailing phase (P3) in extract_pulse_snippets
-        # (skipped for monophasic pulses; off by default since 2026-11-03, bug 17)
-        self.param_vars['triphasic_search'] = tk.BooleanVar(value=False)
+        # (skipped for monophasic pulses; bounded search, on by default, bug 17/18)
+        self.param_vars['triphasic_search'] = tk.BooleanVar(value=True)
         ttk.Checkbutton(pulse_frame, text="Triphasic P1/P3 search",
                         variable=self.param_vars['triphasic_search']).grid(
             row=next_row + 5, column=3, columnspan=2, sticky=tk.W, pady=2)
