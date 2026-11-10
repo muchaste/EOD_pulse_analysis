@@ -1278,6 +1278,7 @@ class TrackingParameterConfigGUI:
         prune_params = [
             ('min_track_pulses',     'Min Pulses per Track:',   15,  int),
             ('min_track_duration_s', 'Min Track Duration (s):', 0.5, float),
+            ('min_pulse_amplitude',  'Min Pulse Amplitude (V, 0 = off):', 0.0, float),
         ]
         for i, (key, label, default, dtype) in enumerate(prune_params):
             col = (i % 2) * 3
