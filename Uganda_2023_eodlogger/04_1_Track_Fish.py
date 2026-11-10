@@ -152,6 +152,8 @@ pass2_overlap_max_iterations = int(params['pass2_overlap_max_iterations'])
 
 min_track_pulses     = int(params['min_track_pulses'])
 min_track_duration_s = float(params['min_track_duration_s'])
+# Pulses below this amplitude are excluded from tracking and written with fish_id = -1
+min_pulse_amplitude  = float(params.get('min_pulse_amplitude', 0.0))
 
 width_min_separation_us = float(params['width_min_separation_us'])
 use_species_matching    = bool(params['use_species_matching'])
@@ -244,6 +246,20 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
     if len(waveforms_raw) != len(eod_data):
         print(f"⚠ WARNING: Waveform count ({len(waveforms_raw)}) != EOD table count ({len(eod_data)}), skipping")
         continue
+
+    n_pulses_total = len(eod_data)
+    eod_full = None
+    if min_pulse_amplitude > 0:
+        keep_mask = (eod_data['eod_amplitude'] >= min_pulse_amplitude).values
+        if not keep_mask.all():
+            eod_full = eod_data
+            keep_idx = np.flatnonzero(keep_mask)
+            eod_data = eod_data[keep_mask].reset_index(drop=True)
+            waveforms_raw = [waveforms_raw[i] for i in keep_idx]
+            print(f"✓ Amplitude filter (>= {min_pulse_amplitude}): kept {len(eod_data)}/{n_pulses_total} pulses")
+        if len(eod_data) == 0:
+            print("⚠ No pulses above the minimum amplitude, skipping")
+            continue
 
     # Slope subtraction: remove linear DC drift across each raw snippet window.
     # bg_ratio: boundary slope relative to peak amplitude — per-pulse noise quality metric.
@@ -1251,7 +1267,15 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
 
     # Save tracked EOD table
     out_csv = os.path.join(output_folder, f"{file_set['base_name']}_tracked.csv")
-    eod_data.to_csv(out_csv, index=False)
+    if eod_full is not None:
+        # Re-insert the excluded pulses at their original row positions
+        eod_out = eod_data.copy()
+        eod_out.index = keep_idx
+        eod_out = pd.concat([eod_out, eod_full[~keep_mask]]).sort_index()
+        eod_out['fish_id'] = eod_out['fish_id'].fillna(-1).astype(int)
+        eod_out.to_csv(out_csv, index=False)
+    else:
+        eod_data.to_csv(out_csv, index=False)
     print(f"✓ Saved tracked table: {os.path.basename(out_csv)}")
 
     # Collect per-fish details for summary outputs
@@ -1337,8 +1361,8 @@ for file_idx, (row_idx, file_set) in enumerate(file_sets.iterrows()):
         'base_name':       file_set['base_name'],
         'event_id':        file_set['event_id'],
         'n_fish':          n_fish,
-        'n_pulses':        len(eod_data),
-        'assignment_rate': assigned / len(eod_data) if len(eod_data) > 0 else 0.0,
+        'n_pulses':        n_pulses_total,
+        'assignment_rate': assigned / n_pulses_total if n_pulses_total > 0 else 0.0,
         'fish_details':    fish_details,
     })
     del eod_data, waveforms_l2, waveforms_l2_p2
