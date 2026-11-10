@@ -60,6 +60,10 @@ from pulse_functions import (
 
 # Parameter overrides applied on top of the source folder's config.cfg (empty dict = same parameters)
 parameter_overrides = {
+    'thresh': 0.01,
+    'min_amplitude': 0.02,
+    'min_amplitude_run': 5,
+    'max_merge_gap_seconds': 3.0,
 }
 margin_tolerance_s = 0.002   # pulses this far outside eod_start_time..eod_end_time are still kept
 min_source_match_fraction = 0.5   # merged events in the window with fewer source matches (1 ms) were separate events in the source run: dropped
