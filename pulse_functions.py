@@ -264,6 +264,48 @@ def _dispatch_location_estimate(data, peak_idx, trough_idx, channel_idx, n_chann
     raise ValueError(f"Invalid location_method for _dispatch_location_estimate: {location_method!r}")
 
 
+def _main_phase_pair(snippet, idx_first, idx_second, idx_p3):
+    """
+    Largest phase of a pulse and its larger neighbouring phase, independent of which phases
+    the landmark search labelled P1/P2.
+
+    The phases are the labelled pair (idx_first < idx_second) and, if found, the trailing P3.
+    Amplitude, width and amplitude ratio are taken from the largest phase and the larger of its
+    adjacent phases, so they do not change when a small first phase is found or missed (the
+    labelled pair then switches between (small lead, large) and (large, trail)).
+
+    Parameters
+    ----------
+    snippet : 1-D array
+        Waveform snippet (interpolated).
+    idx_first, idx_second : int
+        Snippet indices of the labelled pair in temporal order.
+    idx_p3 : int
+        Snippet index of the trailing phase, or -1 if none.
+
+    Returns
+    -------
+    amplitude : float
+        Absolute difference between the largest phase and its larger neighbour.
+    separation : int
+        Distance in snippet samples between these two phases.
+    ratio : float
+        |earlier phase| / |later phase| of the two (as the P1/P2 ratio of a biphasic pulse).
+    """
+    phase_idc = [idx_first, idx_second]
+    if 0 <= idx_p3 < len(snippet) and idx_p3 > idx_second:
+        phase_idc.append(idx_p3)
+    phase_vals = np.array([snippet[i] for i in phase_idc])
+    largest = int(np.argmax(np.abs(phase_vals)))
+    neighbours = [n for n in (largest - 1, largest + 1) if 0 <= n < len(phase_idc)]
+    neighbour = max(neighbours, key=lambda n: abs(phase_vals[n]))
+    earlier, later = sorted((largest, neighbour))
+    amplitude = abs(phase_vals[largest] - phase_vals[neighbour])
+    separation = abs(phase_idc[largest] - phase_idc[neighbour])
+    ratio = abs(phase_vals[earlier] / phase_vals[later]) if phase_vals[later] != 0 else np.inf
+    return amplitude, separation, ratio
+
+
 def extract_pulse_snippets(data, peaks, troughs, rate, 
                            source, extraction_method=None, location_method='auto',
                            return_differential=None, use_pca=None, interp_factor=1,
@@ -356,8 +398,9 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
         If True (default), search for a missed first phase (P1) before the detected pair and
         for a trailing phase (P3) after it (Case A/B); a found P1 replaces the detected landmark
         and the detected pair becomes P2/P3. Since 2026-11-03 the search is bounded: candidates
-        must reach half the larger landmark amplitude and lie within twice the detected P1-P2
-        separation (the unbounded search picked noise bumps and neighbouring pulses on field
+        must reach half the smaller landmark amplitude, but at most 0.2 of the larger one, and lie
+        within 1.5 times the detected P1-P2 separation (the unbounded search picked noise bumps and
+        neighbouring pulses on field
         data). Triphasic species need the search: a small first or third phase regularly stays
         below the detection threshold, and without it the orientation of a fish's pulses flips
         with amplitude. If False, P1/P2 stay at the re-detected landmarks and P3 is not searched
@@ -379,9 +422,13 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
         If extraction_method='differential': differential waveforms from adjacent channel pairs.
         If extraction_method='single_channel': raw single-channel waveforms.
     eod_amps : 1-D array
-        Amplitude of extracted waveform
+        Amplitude of extracted waveform: absolute difference between the largest phase and its larger
+        neighbouring phase (P1/P2 and, if found, P3), i.e. the peak-to-trough amplitude of a biphasic
+        pulse and the peak-to-peak amplitude of a triphasic one, independent of P1/P2 labelling
+        (biphasic pulse_mode only; monophasic keeps the P1-P2 difference)
     eod_widths : 1-D array
-        Width in microseconds between peak and trough of the extracted waveform
+        Width in microseconds between the largest phase and its larger neighbouring phase
+        (peak and trough for biphasic pulses)
     eod_chan : 1-D array
         Index of channel/channel-pair used for waveform extraction.
         For PCA extraction: electrode with highest spatial amplitude (0 to N-1).
@@ -691,11 +738,25 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
                 snippet_trough_idx = trough_idx - start_idx
 
             # Search for missed third phase in triphasic pulses.
-            # Bounded (2026-11-03, bug 17): a candidate must reach half the LARGER landmark and lie
-            # within twice the detected P1-P2 separation; the unbounded search over the whole
-            # snippet with half the smaller landmark picked noise bumps and neighbouring pulses.
-            amp_thr_tri = max(abs(snippet[snippet_peak_idx]), abs(snippet[snippet_trough_idx])) * 0.5
-            max_phase_sep = 2 * abs(snippet_peak_idx - snippet_trough_idx)
+            # Bounded (2026-11-03, bug 17; threshold revised 2026-11-12, bug 19): a candidate must reach
+            # half the SMALLER landmark but at most 0.2 of the LARGER one, and lie within 1.5 times the
+            # detected P1-P2 separation; the unbounded search over the whole snippet picked noise bumps
+            # and neighbouring pulses. Half the larger landmark missed the small first phase of
+            # triphasic fish (0.2-0.4 of the large phase), so P1/P2 flipped between the real phases from
+            # pulse to pulse; half the smaller landmark still sat inside the first-phase amplitude
+            # distribution when the trailing phase was large (0.55).
+            amp_thr_tri = min(min(abs(snippet[snippet_peak_idx]), abs(snippet[snippet_trough_idx])) * 0.5,
+                              max(abs(snippet[snippet_peak_idx]), abs(snippet[snippet_trough_idx])) * 0.2)
+            if len(snippet) >= 32:
+                # Noise floor: phases below 6 times the detrended noise at the snippet edges are not
+                # accepted (the 0.2 x larger limit alone admitted phases at noise level in 100x-gain data)
+                edge_samples = np.concatenate([snippet[:8], snippet[-8:]])
+                edge_noise = np.std(edge_samples - np.polyval(np.polyfit(np.arange(16), edge_samples, 1), np.arange(16)))
+                amp_thr_tri = max(amp_thr_tri, 6 * edge_noise)
+            max_phase_sep = int(1.5 * abs(snippet_peak_idx - snippet_trough_idx))
+            # A first phase closer than a third of the detected separation is a shoulder ripple of the
+            # pulse, not a phase (such pairs left the detected second phase 3-30 separations behind P2)
+            min_phase_sep = int(np.ceil(0.33 * abs(snippet_peak_idx - snippet_trough_idx)))
           
             # Case A: Trough detected before peak -- HP triphasic where P3_peak was wrongly
             # returned by detect_pulses instead of P1_peak.
@@ -704,7 +765,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
             if run_triphasic_search and snippet_trough_idx < snippet_peak_idx:
                 p1_found = False
                 before_start = max(0, snippet_trough_idx - max_phase_sep)
-                before_region = snippet[before_start:snippet_trough_idx]
+                before_region = snippet[before_start:max(before_start, snippet_trough_idx - min_phase_sep + 2)]
                 if len(before_region) > 0:
                     p1_candidates, _ = find_peaks(before_region, height=amp_thr_tri)
                     if len(p1_candidates) > 0:
@@ -726,7 +787,7 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
             elif run_triphasic_search and snippet_peak_idx < snippet_trough_idx:
                 p1_found = False
                 before_start = max(0, snippet_peak_idx - max_phase_sep)
-                before_region = snippet[before_start:snippet_peak_idx]
+                before_region = snippet[before_start:max(before_start, snippet_peak_idx - min_phase_sep + 2)]
                 if len(before_region) > 0:
                     p1_candidates, _ = find_peaks(-before_region, height=amp_thr_tri)
                     if len(p1_candidates) > 0:
@@ -830,6 +891,14 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
                 final_p2_idc.append(filtered_peak_idc[i])
                 amplitude_ratio = abs(snippet[snippet_trough_idx] / snippet[snippet_peak_idx]) if snippet[snippet_peak_idx] != 0 else np.inf
 
+            # Amplitude, width and ratio from the largest phase and its larger neighbour (not from the
+            # labelled pair, which switches between (small lead, large) and (large, trail) for triphasic
+            # pulses); identical to the pair values for biphasic pulses without P3.
+            p3_interp_idx = (abs_p3_idx - start_idx) * interp_factor if abs_p3_idx >= 0 else -1
+            eod_amp, main_pair_sep, amplitude_ratio = _main_phase_pair(
+                snippet, min(snippet_peak_idx, snippet_trough_idx), max(snippet_peak_idx, snippet_trough_idx), p3_interp_idx)
+            eod_width = main_pair_sep * 1e6 // (rate * interp_factor)
+
         # Calculate FFT peak frequency for the processed waveform
         if len(snippet) > 0 and pulse_mode == 'monophasic':
             # The spectral maximum of a monophasic pulse is DC (skipped by calc_fft_peak), so the
@@ -856,6 +925,8 @@ def extract_pulse_snippets(data, peaks, troughs, rate,
         is_differential_out.append(filtered_is_differential[i] if extraction_method != 'pca' else 2)
         # Convert absolute P3 index to final-snippet-relative using the last attempt's start_idx.
         snippet_p3_idx = abs_p3_idx - start_idx if abs_p3_idx >= 0 else -1
+        if snippet_p3_idx * interp_factor >= len(snippet):
+            snippet_p3_idx = -1   # P3 lies outside the final snippet window
         snippet_p3_idc.append(snippet_p3_idx * interp_factor if interp_factor > 1 and snippet_p3_idx >= 0 else snippet_p3_idx)
         final_p3_idc.append(abs_p3_idx if abs_p3_idx >= 0 else -1)
 
@@ -2010,7 +2081,9 @@ def merge_shared_landmark_pulses(arrays_dict, tolerance=5, interp_factor=1):
     (P1, P2) and (P2, P3), which share the large middle landmark. After extraction they appear
     as two pulses on the same or an adjacent channel whose second P1 lies within `tolerance` raw
     samples of the first pulse's P2. The first pair is kept as P1/P2 and the second pair's P2 is
-    recorded as its P3 (final_p3_idc, snippet_p3_idc); the second pulse is dropped. Two independent
+    recorded as its P3 (final_p3_idc, snippet_p3_idc); the second pulse is dropped. The amplitude,
+    width and amplitude ratio of the kept pulse are recomputed with P3 (largest phase and its
+    larger neighbour). Two independent
     pulses cannot share an extremum, so no amplitude or shape test is needed.
 
     Parameters
@@ -2032,12 +2105,18 @@ def merge_shared_landmark_pulses(arrays_dict, tolerance=5, interp_factor=1):
     p2 = np.asarray(arrays_dict['final_trough_idc'])
     chan = np.asarray(arrays_dict['eod_chan'])
     n = len(p1)
+    min_p3_gap = 3   # raw samples: a trailing phase lies at least this far behind P2; closer means the same pair twice
     if n < 2:
         return arrays_dict, 0
     snippet_p3 = np.array(arrays_dict['snippet_p3_idc'], copy=True)
     final_p3 = np.array(arrays_dict['final_p3_idc'], copy=True)
     snippet_p2 = np.asarray(arrays_dict['snippet_trough_idc'])
+    snippet_p1 = np.asarray(arrays_dict['snippet_peak_idc'])
     wf_lengths = np.asarray(arrays_dict['waveform_lengths'])
+    waveforms = arrays_dict['eod_waveforms']
+    eod_amps = np.array(arrays_dict['eod_amps'], copy=True)
+    eod_widths = np.array(arrays_dict['eod_widths'], copy=True)
+    amp_ratios = np.array(arrays_dict['amplitude_ratios'], copy=True)
     order = np.argsort(p1, kind='stable')
     keep = np.ones(n, dtype=bool)
     n_merged = 0
@@ -2051,9 +2130,21 @@ def merge_shared_landmark_pulses(arrays_dict, tolerance=5, interp_factor=1):
                 break
             if not keep[j] or abs(int(chan[j]) - int(chan[i])) > 1 or abs(p1[j] - p2[i]) > tolerance:
                 continue
+            if p2[j] - p2[i] < min_p3_gap:
+                # same labelled pair found twice (identical landmarks), not a trailing phase: left to the proximity dedup
+                continue
             final_p3[i] = p2[j]
             p3_in_snippet = snippet_p2[i] + (p2[j] - p2[i]) * interp_factor
             snippet_p3[i] = p3_in_snippet if 0 <= p3_in_snippet < wf_lengths[i] else -1
+            if snippet_p3[i] >= 0:
+                # P3 is now known: amplitude, width and ratio of the largest phase and its larger neighbour
+                old_sep = abs(int(snippet_p2[i]) - int(snippet_p1[i]))
+                new_amp, new_sep, new_ratio = _main_phase_pair(
+                    np.asarray(waveforms[i]), min(int(snippet_p1[i]), int(snippet_p2[i])), max(int(snippet_p1[i]), int(snippet_p2[i])), int(snippet_p3[i]))
+                eod_amps[i] = new_amp
+                amp_ratios[i] = new_ratio
+                if old_sep > 0:
+                    eod_widths[i] = eod_widths[i] * new_sep // old_sep   # width in us scales with the sample separation
             keep[j] = False
             n_merged += 1
             break
@@ -2062,6 +2153,9 @@ def merge_shared_landmark_pulses(arrays_dict, tolerance=5, interp_factor=1):
     arrays_dict = arrays_dict.copy()
     arrays_dict['snippet_p3_idc'] = snippet_p3
     arrays_dict['final_p3_idc'] = final_p3
+    arrays_dict['eod_amps'] = eod_amps
+    arrays_dict['eod_widths'] = eod_widths
+    arrays_dict['amplitude_ratios'] = amp_ratios
     filtered_arrays = {}
     for key, array in arrays_dict.items():
         if key == 'eod_waveforms':
@@ -4294,6 +4388,8 @@ def process_events(state, parameters, rate, output_path, data, file_start_time, 
         event_eods['p1_idx'] = event_eods['p1_idx'] - event_audio_start_idx
         event_eods['p2_idx'] = event_eods['p2_idx'].where(event_eods['p2_idx'] < 0, event_eods['p2_idx'] - event_audio_start_idx)
         event_eods['midpoint_idx'] = event_eods['midpoint_idx'] - event_audio_start_idx
+        if 'p3_idx' in event_eods.columns:
+            event_eods['p3_idx'] = event_eods['p3_idx'].where(event_eods['p3_idx'] < 0, event_eods['p3_idx'] - event_audio_start_idx)
 
         # Compute part boundaries and assign audio_part + part_audio_start_sample columns
         if needs_parts and split_duration > 0 and len(event_data) > split_dur_samp:
@@ -4334,6 +4430,8 @@ def process_events(state, parameters, rate, output_path, data, file_start_time, 
                 part_eods['p1_idx'] = part_eods['p1_idx'] - part_start
                 part_eods['p2_idx'] = part_eods['p2_idx'].where(part_eods['p2_idx'] < 0, part_eods['p2_idx'] - part_start)
                 part_eods['midpoint_idx'] = part_eods['midpoint_idx'] - part_start
+                if 'p3_idx' in part_eods.columns:
+                    part_eods['p3_idx'] = part_eods['p3_idx'].where(part_eods['p3_idx'] < 0, part_eods['p3_idx'] - part_start)
                 part_audio_file = os.path.join(output_path, f'{fname[:-4]}_event_{event_id}_part_{part_num}.wav')
                 aio.write_audio(part_audio_file, part_audio, rate)
                 print(f"      Saved part audio: {part_audio_file}")
