@@ -4224,7 +4224,7 @@ def process_events(state, parameters, rate, output_path, data, file_start_time, 
                         (mid_eods['midpoint_idx'] >= abs_part_start) &
                         (mid_eods['midpoint_idx'] < abs_part_end)
                     ].copy()
-                    for col in ['p1_idx', 'p2_idx', 'midpoint_idx']:
+                    for col in ['p1_idx', 'p2_idx', 'p3_idx', 'midpoint_idx']:
                         if col in part_eods.columns:
                             part_eods[col] = part_eods[col].where(part_eods[col] < 0, part_eods[col] - abs_part_start)
                     part_num = state.retained_part_counts[mid]

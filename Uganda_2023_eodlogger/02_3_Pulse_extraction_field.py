@@ -21,6 +21,7 @@ import datetime as dt
 import os
 import json
 import pickle
+import subprocess
 from scipy.signal import correlate
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -90,6 +91,12 @@ print("="*60 + "\n")
 
 # Create output folder if it doesn't exist
 os.makedirs(output_path, exist_ok=True)
+
+# Code version of this run (read at the start: a long run must record the state it was started with)
+repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+git_hash = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo_dir).decode().strip()
+git_uncommitted_changes = len(subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=no'], cwd=repo_dir).decode().strip()) > 0
+print(f"Git commit: {git_hash}" + (" (uncommitted changes present)" if git_uncommitted_changes else ""))
 
 # Load calibration factors
 cor_factors_all = pd.read_csv(cal_file)
@@ -850,6 +857,8 @@ session_metadata = {
     'output_directory': output_path,
     'calibration_file': cal_file,
     'files_processed': len(file_set),
+    'git_hash': git_hash,
+    'git_uncommitted_changes': git_uncommitted_changes,
     'parameters_used': parameters
 }
 
